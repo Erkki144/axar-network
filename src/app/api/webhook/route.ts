@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No job_id' }, { status: 400 })
     }
 
-    const job = getJob(jobId)
+    const job = await getJob(jobId)
     if (!job) {
       console.error('Job not found:', jobId)
       return NextResponse.json({ error: 'Job not found' }, { status: 404 })
@@ -41,11 +41,10 @@ export async function POST(request: NextRequest) {
 
     const paymentIntentId = await getPaymentIntent(session.id)
 
-    const stmt = db.prepare(`
+    await db.prepare(`
       UPDATE jobs SET stripe_session_id = ?, stripe_payment_id = ?
       WHERE id = ?
-    `)
-    stmt.run(session.id, paymentIntentId, jobId)
+    `).run(session.id, paymentIntentId, jobId)
 
     try {
       await sendPaymentConfirmation(job.email, jobId, job.title, job.budget_cents)
@@ -54,7 +53,7 @@ export async function POST(request: NextRequest) {
     }
 
     console.log(`Job ${jobId}: Payment authorized, starting agent work`)
-    logAgentAction(jobId, job.job_type, 'PAYMENT_AUTHORIZED', `Session: ${session.id}`)
+    await logAgentAction(jobId, job.job_type, 'PAYMENT_AUTHORIZED', `Session: ${session.id}`)
 
     try {
       const result = await executeJob(job)
@@ -63,8 +62,8 @@ export async function POST(request: NextRequest) {
         const verification = await verifyResult(job, result.result)
 
         if (verification.passed) {
-          updateJobStatus(jobId, 'COMPLETED', result.result, result.notes)
-          logAgentAction(jobId, job.job_type, 'QA_PASSED', `Score: ${verification.score}`)
+          await updateJobStatus(jobId, 'COMPLETED', result.result, result.notes)
+          await logAgentAction(jobId, job.job_type, 'QA_PASSED', `Score: ${verification.score}`)
 
           try {
             const preview = result.result.slice(0, 300)
@@ -73,8 +72,8 @@ export async function POST(request: NextRequest) {
             console.error('Failed to send result email:', e)
           }
         } else {
-          updateJobStatus(jobId, 'FAILED', result.result, `QA Failed: ${verification.feedback}`)
-          logAgentAction(jobId, job.job_type, 'QA_FAILED', verification.feedback)
+          await updateJobStatus(jobId, 'FAILED', result.result, `QA Failed: ${verification.feedback}`)
+          await logAgentAction(jobId, job.job_type, 'QA_FAILED', verification.feedback)
 
           try {
             await sendJobNotification(job.email, jobId, job.title, 'failed')
@@ -83,7 +82,7 @@ export async function POST(request: NextRequest) {
           }
         }
       } else {
-        updateJobStatus(jobId, 'FAILED', result.result, result.notes)
+        await updateJobStatus(jobId, 'FAILED', result.result, result.notes)
 
         try {
           await sendJobNotification(job.email, jobId, job.title, 'failed')
@@ -93,8 +92,8 @@ export async function POST(request: NextRequest) {
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      updateJobStatus(jobId, 'FAILED', `Agent error: ${errorMessage}`, errorMessage)
-      logAgentAction(jobId, job.job_type, 'ERROR', errorMessage)
+      await updateJobStatus(jobId, 'FAILED', `Agent error: ${errorMessage}`, errorMessage)
+      await logAgentAction(jobId, job.job_type, 'ERROR', errorMessage)
 
       try {
         await sendJobNotification(job.email, jobId, job.title, 'failed')

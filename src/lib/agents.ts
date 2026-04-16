@@ -64,8 +64,8 @@ export async function executeJob(job: Job): Promise<{ success: boolean; result: 
   const agentType = job.job_type
   const systemPrompt = AGENT_PROMPTS[agentType]
 
-  logAgentAction(job.id, agentType, 'STARTED', `Processing job: ${job.title}`)
-  updateJobStatus(job.id, 'IN_PROGRESS')
+  await logAgentAction(job.id, agentType, 'STARTED', `Processing job: ${job.title}`)
+  await updateJobStatus(job.id, 'IN_PROGRESS')
 
   try {
     const anthropic = await getAnthropicClient()
@@ -96,7 +96,7 @@ Please complete this task thoroughly. Provide a comprehensive deliverable that e
       .map((block) => (block as { type: 'text'; text: string }).text)
       .join('\n\n')
 
-    logAgentAction(job.id, agentType, 'COMPLETED', `Tokens used: ${response.usage.input_tokens + response.usage.output_tokens}`)
+    await logAgentAction(job.id, agentType, 'COMPLETED', `Tokens used: ${response.usage.input_tokens + response.usage.output_tokens}`)
 
     return {
       success: true,
@@ -105,7 +105,7 @@ Please complete this task thoroughly. Provide a comprehensive deliverable that e
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-    logAgentAction(job.id, agentType, 'FAILED', errorMessage)
+    await logAgentAction(job.id, agentType, 'FAILED', errorMessage)
 
     return {
       success: false,

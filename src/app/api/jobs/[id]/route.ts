@@ -9,7 +9,7 @@ export async function GET(
   const { id } = await params
 
   try {
-    const job = getJob(id)
+    const job = await getJob(id)
     if (!job) {
       return NextResponse.json({ error: 'Job not found' }, { status: 404 })
     }
@@ -29,7 +29,7 @@ export async function POST(
   const action = url.searchParams.get('action')
 
   try {
-    const job = getJob(id)
+    const job = await getJob(id)
     if (!job) {
       return NextResponse.json({ error: 'Job not found' }, { status: 404 })
     }
@@ -66,11 +66,11 @@ export async function POST(
       }
 
       await cancelPayment(job.stripe_payment_id)
-      updateJobStatus(id, 'REFUNDED')
+      await updateJobStatus(id, 'REFUNDED')
 
       return NextResponse.json({
         message: 'Payment refunded successfully',
-        job: getJob(id),
+        job: await getJob(id),
       })
     }
 

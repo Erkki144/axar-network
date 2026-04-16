@@ -1,22 +1,20 @@
-import Database from 'better-sqlite3'
-import path from 'path'
-import fs from 'fs'
+import { createClient, Client } from '@libsql/client'
 
-let db: ReturnType<typeof Database> | null = null
+let db: Client | null = null
 
-function getDb(): ReturnType<typeof Database> {
+function getDb(): Client {
   if (db) return db
 
-  const dbPath = process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'axar.db')
+  const url = process.env.DATABASE_URL || 'file:./data/axar.db'
+  const authToken = process.env.DATABASE_AUTH_TOKEN
 
-  const dataDir = path.dirname(dbPath)
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true })
-  }
+  db = createClient({
+    url,
+    authToken,
+  })
 
-  db = new Database(dbPath)
-
-  db.exec(`
+  // Initialize tables
+  db.executeMultiple(`
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -53,7 +51,22 @@ function getDb(): ReturnType<typeof Database> {
 }
 
 export default {
-  prepare: (sql: string) => getDb().prepare(sql),
+  prepare: (sql: string) => ({
+    run: async (...params: unknown[]) => {
+      const client = getDb()
+      await client.execute({ sql, args: params as (string | number | null)[] })
+    },
+    get: async (...params: unknown[]) => {
+      const client = getDb()
+      const result = await client.execute({ sql, args: params as (string | number | null)[] })
+      return result.rows[0] || null
+    },
+    all: async (...params: unknown[]) => {
+      const client = getDb()
+      const result = await client.execute({ sql, args: params as (string | number | null)[] })
+      return result.rows
+    },
+  }),
 }
 
 export interface Job {
@@ -74,31 +87,36 @@ export interface Job {
   completed_at: string | null
 }
 
-export function createJob(job: Omit<Job, 'created_at' | 'started_at' | 'completed_at' | 'status' | 'result' | 'agent_notes'>): Job {
-  const stmt = getDb().prepare(`
-    INSERT INTO jobs (id, title, description, job_type, budget_cents, deadline, email, stripe_payment_id, stripe_session_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `)
-  stmt.run(job.id, job.title, job.description, job.job_type, job.budget_cents, job.deadline, job.email, job.stripe_payment_id, job.stripe_session_id)
-  return getJob(job.id)!
+export async function createJob(job: Omit<Job, 'created_at' | 'started_at' | 'completed_at' | 'status' | 'result' | 'agent_notes'>): Promise<Job> {
+  const client = getDb()
+  await client.execute({
+    sql: `INSERT INTO jobs (id, title, description, job_type, budget_cents, deadline, email, stripe_payment_id, stripe_session_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [job.id, job.title, job.description, job.job_type, job.budget_cents, job.deadline, job.email, job.stripe_payment_id, job.stripe_session_id]
+  })
+  return (await getJob(job.id))!
 }
 
-export function getJob(id: string): Job | null {
-  const stmt = getDb().prepare('SELECT * FROM jobs WHERE id = ?')
-  return stmt.get(id) as Job | null
+export async function getJob(id: string): Promise<Job | null> {
+  const client = getDb()
+  const result = await client.execute({ sql: 'SELECT * FROM jobs WHERE id = ?', args: [id] })
+  return result.rows[0] as unknown as Job | null
 }
 
-export function getOpenJobs(): Job[] {
-  const stmt = getDb().prepare('SELECT * FROM jobs WHERE status = ? ORDER BY created_at DESC')
-  return stmt.all('OPEN') as Job[]
+export async function getOpenJobs(): Promise<Job[]> {
+  const client = getDb()
+  const result = await client.execute({ sql: 'SELECT * FROM jobs WHERE status = ? ORDER BY created_at DESC', args: ['OPEN'] })
+  return result.rows as unknown as Job[]
 }
 
-export function getAllJobs(): Job[] {
-  const stmt = getDb().prepare('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100')
-  return stmt.all() as Job[]
+export async function getAllJobs(): Promise<Job[]> {
+  const client = getDb()
+  const result = await client.execute({ sql: 'SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100', args: [] })
+  return result.rows as unknown as Job[]
 }
 
-export function updateJobStatus(id: string, status: Job['status'], result?: string, agentNotes?: string): void {
+export async function updateJobStatus(id: string, status: Job['status'], result?: string, agentNotes?: string): Promise<void> {
+  const client = getDb()
   const updates: string[] = ['status = ?']
   const params: (string | null)[] = [status]
 
@@ -118,11 +136,13 @@ export function updateJobStatus(id: string, status: Job['status'], result?: stri
   }
 
   params.push(id)
-  const stmt = getDb().prepare(`UPDATE jobs SET ${updates.join(', ')} WHERE id = ?`)
-  stmt.run(...params)
+  await client.execute({ sql: `UPDATE jobs SET ${updates.join(', ')} WHERE id = ?`, args: params })
 }
 
-export function logAgentAction(jobId: string, agentType: string, action: string, details?: string): void {
-  const stmt = getDb().prepare('INSERT INTO agent_logs (job_id, agent_type, action, details) VALUES (?, ?, ?, ?)')
-  stmt.run(jobId, agentType, action, details || null)
+export async function logAgentAction(jobId: string, agentType: string, action: string, details?: string): Promise<void> {
+  const client = getDb()
+  await client.execute({
+    sql: 'INSERT INTO agent_logs (job_id, agent_type, action, details) VALUES (?, ?, ?, ?)',
+    args: [jobId, agentType, action, details || null]
+  })
 }

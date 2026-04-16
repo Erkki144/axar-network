@@ -5,7 +5,7 @@ import { nanoid } from 'nanoid'
 
 export async function GET() {
   try {
-    const jobs = getAllJobs()
+    const jobs = await getAllJobs()
     return NextResponse.json(jobs)
   } catch (error) {
     console.error('Failed to get jobs:', error)
@@ -43,7 +43,7 @@ export async function POST(request: NextRequest) {
 
     const jobId = nanoid(12)
 
-    const job = createJob({
+    const job = await createJob({
       id: jobId,
       title,
       description,
