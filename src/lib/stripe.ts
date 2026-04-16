@@ -1,8 +1,15 @@
 import Stripe from 'stripe'
 
-export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: '2026-03-25.dahlia',
-})
+let stripe: Stripe | null = null
+
+function getStripe(): Stripe {
+  if (!stripe) {
+    stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+      apiVersion: '2026-03-25.dahlia',
+    })
+  }
+  return stripe
+}
 
 export async function createCheckoutSession(
   jobId: string,
@@ -10,7 +17,7 @@ export async function createCheckoutSession(
   budgetCents: number,
   email: string
 ): Promise<Stripe.Checkout.Session> {
-  const session = await stripe.checkout.sessions.create({
+  const session = await getStripe().checkout.sessions.create({
     payment_method_types: ['card'],
     line_items: [
       {
@@ -44,14 +51,14 @@ export async function createCheckoutSession(
 }
 
 export async function capturePayment(paymentIntentId: string): Promise<void> {
-  await stripe.paymentIntents.capture(paymentIntentId)
+  await getStripe().paymentIntents.capture(paymentIntentId)
 }
 
 export async function cancelPayment(paymentIntentId: string): Promise<void> {
-  await stripe.paymentIntents.cancel(paymentIntentId)
+  await getStripe().paymentIntents.cancel(paymentIntentId)
 }
 
 export async function getPaymentIntent(sessionId: string): Promise<string | null> {
-  const session = await stripe.checkout.sessions.retrieve(sessionId)
+  const session = await getStripe().checkout.sessions.retrieve(sessionId)
   return session.payment_intent as string | null
 }

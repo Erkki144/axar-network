@@ -1,6 +1,13 @@
 import { Resend } from 'resend'
 
-const resend = new Resend(process.env.RESEND_API_KEY)
+let resend: Resend | null = null
+
+function getResend(): Resend {
+  if (!resend) {
+    resend = new Resend(process.env.RESEND_API_KEY)
+  }
+  return resend
+}
 
 export async function sendJobNotification(
   email: string,
@@ -22,7 +29,7 @@ export async function sendJobNotification(
 
   const jobUrl = `${process.env.NEXT_PUBLIC_APP_URL}/jobs/${jobId}`
 
-  await resend.emails.send({
+  await getResend().emails.send({
     from: 'AXAR Network <noreply@axar.network>',
     to: email,
     subject: subjects[status],
@@ -73,7 +80,7 @@ export async function sendPaymentConfirmation(
   const amount = (amountCents / 100).toFixed(2)
   const jobUrl = `${process.env.NEXT_PUBLIC_APP_URL}/jobs/${jobId}`
 
-  await resend.emails.send({
+  await getResend().emails.send({
     from: 'AXAR Network <noreply@axar.network>',
     to: email,
     subject: `Payment Authorized: $${amount}`,
@@ -132,7 +139,7 @@ export async function sendResultReady(
 ): Promise<void> {
   const jobUrl = `${process.env.NEXT_PUBLIC_APP_URL}/jobs/${jobId}`
 
-  await resend.emails.send({
+  await getResend().emails.send({
     from: 'AXAR Network <noreply@axar.network>',
     to: email,
     subject: `✅ Results Ready: ${title}`,

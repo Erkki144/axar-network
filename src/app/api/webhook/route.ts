@@ -5,9 +5,16 @@ import { executeJob, verifyResult } from '@/lib/agents'
 import { getPaymentIntent } from '@/lib/stripe'
 import { sendPaymentConfirmation, sendResultReady, sendJobNotification } from '@/lib/email'
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: '2026-03-25.dahlia',
-})
+let stripe: Stripe | null = null
+
+function getStripe(): Stripe {
+  if (!stripe) {
+    stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+      apiVersion: '2026-03-25.dahlia',
+    })
+  }
+  return stripe
+}
 
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET!
 
@@ -18,7 +25,7 @@ export async function POST(request: NextRequest) {
   let event: Stripe.Event
 
   try {
-    event = stripe.webhooks.constructEvent(body, signature, webhookSecret)
+    event = getStripe().webhooks.constructEvent(body, signature, webhookSecret)
   } catch (err) {
     console.error('Webhook signature verification failed:', err)
     return NextResponse.json({ error: 'Invalid signature' }, { status: 400 })
