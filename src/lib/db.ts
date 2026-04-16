@@ -1,6 +1,7 @@
 import { createClient, Client } from '@libsql/client'
 
 let db: Client | null = null
+let initialized = false
 
 function getDb(): Client {
   if (db) return db
@@ -13,8 +14,16 @@ function getDb(): Client {
     authToken,
   })
 
+  return db
+}
+
+async function ensureInitialized(): Promise<void> {
+  if (initialized) return
+
+  const client = getDb()
+
   // Initialize tables
-  db.executeMultiple(`
+  await client.executeMultiple(`
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -47,7 +56,7 @@ function getDb(): Client {
     CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
   `)
 
-  return db
+  initialized = true
 }
 
 export default {
@@ -88,6 +97,7 @@ export interface Job {
 }
 
 export async function createJob(job: Omit<Job, 'created_at' | 'started_at' | 'completed_at' | 'status' | 'result' | 'agent_notes'>): Promise<Job> {
+  await ensureInitialized()
   const client = getDb()
   await client.execute({
     sql: `INSERT INTO jobs (id, title, description, job_type, budget_cents, deadline, email, stripe_payment_id, stripe_session_id)
@@ -98,24 +108,28 @@ export async function createJob(job: Omit<Job, 'created_at' | 'started_at' | 'co
 }
 
 export async function getJob(id: string): Promise<Job | null> {
+  await ensureInitialized()
   const client = getDb()
   const result = await client.execute({ sql: 'SELECT * FROM jobs WHERE id = ?', args: [id] })
   return result.rows[0] as unknown as Job | null
 }
 
 export async function getOpenJobs(): Promise<Job[]> {
+  await ensureInitialized()
   const client = getDb()
   const result = await client.execute({ sql: 'SELECT * FROM jobs WHERE status = ? ORDER BY created_at DESC', args: ['OPEN'] })
   return result.rows as unknown as Job[]
 }
 
 export async function getAllJobs(): Promise<Job[]> {
+  await ensureInitialized()
   const client = getDb()
   const result = await client.execute({ sql: 'SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100', args: [] })
   return result.rows as unknown as Job[]
 }
 
 export async function updateJobStatus(id: string, status: Job['status'], result?: string, agentNotes?: string): Promise<void> {
+  await ensureInitialized()
   const client = getDb()
   const updates: string[] = ['status = ?']
   const params: (string | null)[] = [status]
@@ -140,6 +154,7 @@ export async function updateJobStatus(id: string, status: Job['status'], result?
 }
 
 export async function logAgentAction(jobId: string, agentType: string, action: string, details?: string): Promise<void> {
+  await ensureInitialized()
   const client = getDb()
   await client.execute({
     sql: 'INSERT INTO agent_logs (job_id, agent_type, action, details) VALUES (?, ?, ?, ?)',
