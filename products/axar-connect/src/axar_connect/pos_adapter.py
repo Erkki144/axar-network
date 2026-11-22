@@ -33,9 +33,10 @@ def from_pos_outbox_v1(envelope: dict) -> CashSale:
     """
     if not isinstance(envelope, dict):
         raise TypeError("expected internal event envelope")
-    if (envelope.get("type"), envelope.get("version"), envelope.get("source")) != (
-        "pos.sale.completed", 1, "axar-pos"
-    ):
+    if (envelope.get("type") != "pos.sale.completed"
+        or type(envelope.get("version")) is not int
+        or envelope.get("version") != 1
+        or envelope.get("source") != "axar-pos"):
         raise ValueError("unrecognized event type/version/source")
     raw = envelope.get("payload")
     if not isinstance(raw, str):

@@ -75,3 +75,9 @@ def test_reject_card_payment():
     rehash(ev,json.dumps(data))
     with pytest.raises(ValueError,match="cash-sale"):
         from_pos_outbox_v1(ev)
+
+
+def test_boolean_is_not_valid_event_version():
+    ev=envelope();ev["version"]=True
+    with pytest.raises(ValueError,match="type/version/source"):
+        from_pos_outbox_v1(ev)

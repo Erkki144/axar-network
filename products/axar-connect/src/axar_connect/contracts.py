@@ -29,6 +29,11 @@ class SaleLine:
             raise ValueError("line total mismatch")
         if not 0 <= self.vat_rate_bp <= 10000:
             raise ValueError("invalid VAT rate")
+        # Independent recomputation: POS v1 uses half-up VAT extracted from gross.
+        denominator = 10000 + self.vat_rate_bp
+        expected_vat = (2 * self.gross_cents * self.vat_rate_bp + denominator) // (2 * denominator)
+        if self.vat_cents != expected_vat:
+            raise ValueError("VAT does not match gross and recorded rate")
 
 
 @dataclass(frozen=True)

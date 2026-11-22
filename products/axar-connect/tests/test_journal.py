@@ -73,3 +73,8 @@ def test_non_integer_money_rejected(bad):
 def test_negative_sale_cannot_hide_refund():
     with pytest.raises(ValueError):
         SaleLine(-100,-80,-20,2400)
+
+
+def test_line_rate_must_match_computed_vat():
+    with pytest.raises(ValueError,match="VAT does not match"):
+        SaleLine(100,99,1,0)  # 0% VAT cannot contain one cent VAT
