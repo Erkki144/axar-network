@@ -47,3 +47,11 @@ and retail fiscal rules require separate independent legal/accounting review.
 
 **No live banking, no card processing, no real bank transfers, no live Merit
 export, no credentials, no customer data and no auto-deploy.**
+
+## Current Claude POS contract adapter (v1)
+
+`from_pos_outbox_v1(...)` parses the exact immutable `pos.sale.completed` v1
+payload in Claude's PR #7, verifies the SHA-256 checksum and validates sale
+amounts. It constructs a journal-preview input, without any network or posting.
+This adapter must run *only* on authenticated trusted internal events: a hash is
+an integrity check, **not** a digital signature or authorization mechanism.
