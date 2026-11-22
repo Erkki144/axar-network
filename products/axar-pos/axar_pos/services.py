@@ -25,9 +25,10 @@ from .models import (
     Register,
     Sale,
     SaleLine,
+    SaleRefundState,
     TaxRate,
 )
-from .money import format_eur, round_cash, vat_from_gross
+from .money import allocate_half_up, format_eur, round_cash, vat_from_gross
 
 
 class DomainError(Exception):
@@ -496,6 +497,8 @@ def create_cash_sale(
             )
             for ln in sale_lines
         )
+        s.add(SaleRefundState(sale_id=sale_id, tenant_id=tenant_id,
+                              refunded_gross_cents=0, refunded_cash_cents=0))
         s.commit()
     except IntegrityError:
         # Concurrent request with the same key (or receipt number) won.
@@ -675,13 +678,17 @@ def _create_cash_refund(
             raise OverRefund(
                 f"line {req.line_no}: requested {req.quantity}, refundable {remaining}"
             )
-        if req.quantity == remaining:
-            # Last units: refund exactly what is left, so totals net to zero.
-            gross = sl.gross_cents - alloc.refunded_gross_cents
-            vat = sl.vat_cents - alloc.refunded_vat_cents
-        else:
-            gross = sl.unit_price_cents * req.quantity
-            vat = vat_from_gross(gross, sl.vat_rate_bp)
+        # Cumulative pro-rata allocation from the immutable original line:
+        # VAT refunded after k of n units = half_up(line_vat * k / n). Each
+        # refund takes (target after) − (already refunded). Monotonic, exact at
+        # 100 %, and never front- or back-loads VAT onto one refund.
+        gross = sl.unit_price_cents * req.quantity
+        vat = allocate_half_up(sl.vat_cents, seen_qty + req.quantity,
+                               sl.quantity) - alloc.refunded_vat_cents
+        if not 0 <= vat <= gross:
+            raise LedgerMismatch(
+                f"line {req.line_no}: refund VAT {vat} outside [0, {gross}]"
+            )
 
         # Compare-and-swap on the counter: fails if anyone refunded this line
         # since we read it (stale read / concurrent refund). Never over-refunds.
@@ -723,7 +730,33 @@ def _create_cash_refund(
 
     total = sum(x.gross_cents for x in refund_lines)
     vat_total = sum(x.vat_cents for x in refund_lines)
-    cash_paid = round_cash(total, settings.cash_rounding_step_cents)
+
+    # Cumulative cash rounding per sale (compare-and-swap on the sale row):
+    # cash paid = round(Σ gross refunded after) − Σ cash already paid out.
+    # After a full refund Σ cash paid == sale.cash_due for ANY split/order.
+    state = s.scalar(select(SaleRefundState).where(
+        SaleRefundState.sale_id == sale.id, SaleRefundState.tenant_id == tenant_id))
+    if state is None:
+        raise LedgerMismatch(f"no refund state for sale {sale.id}")
+    gross_before, cash_before = state.refunded_gross_cents, state.refunded_cash_cents
+    cash_after = round_cash(gross_before + total, settings.cash_rounding_step_cents)
+    cash_paid = cash_after - cash_before
+    if cash_paid < 0:
+        raise LedgerMismatch("negative cumulative cash refund")
+    res = s.execute(
+        update(SaleRefundState)
+        .where(
+            SaleRefundState.sale_id == sale.id,
+            SaleRefundState.tenant_id == tenant_id,
+            SaleRefundState.refunded_gross_cents == gross_before,
+            SaleRefundState.refunded_cash_cents == cash_before,
+        )
+        .values(refunded_gross_cents=gross_before + total, refunded_cash_cents=cash_after)
+        .execution_options(synchronize_session=False)
+    )
+    if res.rowcount != 1:
+        s.rollback()
+        raise OverRefund("sale was refunded concurrently; reload and retry")
 
     # Pay out of the drawer only if it is still open and holds enough cash.
     res = s.execute(

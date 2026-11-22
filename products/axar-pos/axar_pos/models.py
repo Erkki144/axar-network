@@ -226,6 +226,23 @@ class RefundAllocation(Base):
     refunded_vat_cents: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class SaleRefundState(Base):
+    """Mutable per-sale refund totals (one row per sale, created with it).
+
+    Cash refunds are rounded *cumulatively* per sale:
+    ``cash_paid = round_cash(refunded_gross_after) - refunded_cash_before``,
+    so after a full refund Σ cash paid == the sale's cash_due regardless of how
+    the refund was split. Changed only by compare-and-swap.
+    """
+
+    __tablename__ = "sale_refund_state"
+
+    sale_id: Mapped[str] = mapped_column(ForeignKey("sales.id"), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    refunded_gross_cents: Mapped[int] = mapped_column(Integer, default=0)
+    refunded_cash_cents: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class Refund(Base):
     """Simulated cash refund: a separate, append-only record that references
     the original sale. The original sale is never modified."""

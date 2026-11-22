@@ -17,6 +17,7 @@ from axar_pos.models import (
     RefundAllocation,
     RefundLine,
     Sale,
+    SaleRefundState,
 )
 
 
@@ -73,8 +74,9 @@ def test_partial_refunds_sum_exactly_to_original_vat(a, m):
         r = m.refund(sale["id"], [(1, 1)])
         assert r.status_code == 201, r.text
         vats.append(r.json()["vat_cents"])
-    # 250 @24% = 48.39 -> 48, 48, then the last unit takes the remainder.
-    assert vats == [48, 48, 49]
+    # Cumulative pro-rata of 145: half_up(145*1/3)=48, half_up(145*2/3)=97,
+    # 145 -> refunds 48, 49, 48 (no remainder dumped on the last refund).
+    assert vats == [48, 49, 48]
     assert sum(vats) == sale["vat_cents"]
 
 
@@ -262,10 +264,10 @@ def test_stale_allocation_read_cannot_over_refund(a, m, app, monkeypatch):
 
 
 def test_stale_read_cannot_cause_vat_drift_on_last_unit(a, m, app, monkeypatch):
-    """3 x 2.50: VAT 145, but 3 x per-unit VAT = 144. The last unit must take
-    the remainder (49). If a concurrent refund makes *our* unit the last one
-    after we read, the compare-and-swap rejects us so the retry computes the
-    remainder. Without CAS we would refund 48 and lose a cent of VAT."""
+    """3 x 2.50: VAT 145; cumulative targets 48 / 97 / 145. If a concurrent
+    refund makes *our* unit the last one after we read, the compare-and-swap
+    rejects us so the retry computes 145 − 97 = 48. Without CAS we would
+    compute from the stale count (97 − 48 = 49) and over-refund VAT by 1."""
     a.open_drawer()
     sale = sold(a, [("KOHV", 3)], 750)
     assert m.refund(sale["id"], [(1, 1)]).json()["vat_cents"] == 48
@@ -284,7 +286,10 @@ def test_stale_read_cannot_cause_vat_drift_on_last_unit(a, m, app, monkeypatch):
             s.execute(update(RefundAllocation).values(
                 refunded_quantity=RefundAllocation.refunded_quantity + 1,
                 refunded_gross_cents=RefundAllocation.refunded_gross_cents + 250,
-                refunded_vat_cents=RefundAllocation.refunded_vat_cents + 48))
+                refunded_vat_cents=RefundAllocation.refunded_vat_cents + 49))
+            s.execute(update(SaleRefundState).values(
+                refunded_gross_cents=SaleRefundState.refunded_gross_cents + 250,
+                refunded_cash_cents=SaleRefundState.refunded_cash_cents + 250))
             s.commit()
         return snap
 
@@ -295,7 +300,7 @@ def test_stale_read_cannot_cause_vat_drift_on_last_unit(a, m, app, monkeypatch):
 
     retry = m.refund(sale["id"], [(1, 1)])
     assert retry.status_code == 201
-    assert retry.json()["vat_cents"] == 49
+    assert retry.json()["vat_cents"] == 48
     with app.state.session_factory() as s:
         alloc = s.scalar(select(RefundAllocation))
     assert (alloc.refunded_quantity, alloc.refunded_vat_cents) == (3, 145)
@@ -429,15 +434,15 @@ def test_daily_report_includes_refunds_and_net(a, m):
     a.open_drawer(register="R2")
     s1 = sold(a, register="R1")                        # 6.99 / VAT 136 / cash 7.00
     sold(a, [("RAAMAT", 1)], 1600, register="R2")      # 15.99 / VAT 132 / cash 16.00
-    m.refund(s1["id"], [(1, 1)], register="R2")        # 2.50 / VAT 48 (2.50 * 24/124)
+    m.refund(s1["id"], [(1, 1)], register="R2")        # 1 of 2: VAT half_up(97/2)=49
     r = a.get("/api/v1/reports/daily", params={"business_date": "2026-03-10"}).json()
     assert r["sale_count"] == 2 and r["refund_count"] == 1
-    assert (r["refund_total_cents"], r["refund_vat_cents"], r["cash_refunded_cents"]) == (250, 48, 250)
+    assert (r["refund_total_cents"], r["refund_vat_cents"], r["cash_refunded_cents"]) == (250, 49, 250)
     assert r["net_total_cents"] == 699 + 1599 - 250
-    assert r["net_vat_cents"] == 136 + 132 - 48
+    assert r["net_vat_cents"] == 136 + 132 - 49
     assert r["net_cash_cents"] == 700 + 1600 - 250
     assert r["refund_vat_breakdown"] == [
-        {"vat_rate_bp": 2400, "gross_cents": 250, "vat_cents": 48, "net_cents": 202}]
+        {"vat_rate_bp": 2400, "gross_cents": 250, "vat_cents": 49, "net_cents": 201}]
     reg2 = next(x for x in r["by_register"] if x["register_id"] == a.register_id("R2"))
     assert (reg2["refund_count"], reg2["cash_refunded_cents"]) == (1, 250)
 

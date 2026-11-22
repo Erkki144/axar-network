@@ -21,6 +21,18 @@ def _div_round_half_up(numerator: int, denominator: int) -> int:
     return sign * q
 
 
+def allocate_half_up(total: int, part: int, whole: int) -> int:
+    """``total * part / whole`` rounded half-up — cumulative pro-rata share.
+
+    Used for refunds: the VAT refunded after ``part`` of ``whole`` units is
+    ``allocate_half_up(line_vat, part, whole)``. It is monotonic in ``part``
+    and equals ``total`` exactly at ``part == whole``.
+    """
+    if not 0 <= part <= whole or whole <= 0 or total < 0:
+        raise ValueError("invalid allocation")
+    return _div_round_half_up(total * part, whole)
+
+
 def vat_from_gross(gross_cents: int, rate_bp: int) -> int:
     """VAT contained in a VAT-inclusive (gross) amount.
 

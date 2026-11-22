@@ -37,9 +37,27 @@ simulated cash only**. No card or bank refund is modelled or claimed.
 | Tenant isolation | every lookup tenant-filtered; 404 across tenants | `test_refunds_are_tenant_scoped` |
 | Role | `manager` or `owner` only (`X-Role`, demo identity) | `test_cashier_cannot_refund_and_invalid_role_rejected` |
 
-Cash rounding: the refund total is rounded to 5 cents for the cash paid out,
-recorded separately as `cash_rounding_cents`. A full refund of a sale pays out
-exactly what the customer paid (e.g. 6,99 € → 7,00 € both ways).
+Cash rounding: cumulative per sale (see table); each refund records its own
+`cash_rounding_cents = cash_paid − gross` (always within ±4 cents). After a
+full refund the cash paid back equals the sale's `cash_due` for any split or
+order (e.g. 6,99 € → 7,00 € both ways; 6,96 € → 6,95 € as 2,30 + 2,35 + 2,30).
+
+### Review round 2 (AION, 2026-11-22) — fixed defects
+
+- **P0:** the first version gave each partial refund its own per-unit VAT and
+  dumped the line's remainder on the last refund. 100 × 0,01 € refunded unit by
+  unit produced a final refund of gross 1 cent with VAT 19 cents (net −18).
+  Fixed by the cumulative pro-rata allocation above.
+- **P1:** cash rounding was applied per refund, so 3 × 2,32 € refunded
+  separately paid 6,90 € back for a 6,95 € cash payment. Fixed by cumulative
+  per-sale cash rounding.
+- Evidence: the 34 new tests in `tests/test_refund_allocation.py` were run
+  against the old code — **18 failed** (incl. the P0, P1 and concurrent-split
+  cases); with the fix all pass.
+- Behaviour change: individual partial refunds can now carry 1 cent more or
+  less VAT than before (e.g. 1 of 2 × 2,50 € refunds 49 cents VAT, half of 97
+  rounded up), but every refund is within `[0, gross]` and the totals reverse
+  the sale exactly. **Accountant to confirm this allocation policy.**
 
 ## Honest limits
 

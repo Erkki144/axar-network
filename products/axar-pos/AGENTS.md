@@ -38,8 +38,11 @@ Next.js marketing app; do not change that app from POS work.
    refund. Close recomputes sales and refunds from the ledgers and refuses on
    mismatch.
 5a. Refunds are separate records. Per-line refund counters change only via
-   compare-and-swap; the last units of a line take the exact remaining
-   amount and VAT. Refunds need the manager/owner role.
+   compare-and-swap. Refund VAT is cumulative pro-rata of the original line
+   (`half_up(line_vat × k / n)` minus already refunded); cash is rounded
+   cumulatively per sale. Every refund must satisfy `0 ≤ vat ≤ gross`, and a
+   full refund must reverse gross, VAT and cash exactly. Refunds need the
+   manager/owner role.
 6. Timestamps are aware UTC (`UTCDateTime`); business dates use
    `Europe/Tallinn` + configured cutoff.
 7. Every query on a tenant table filters on `tenant_id`; cross-tenant access
