@@ -1,0 +1,21 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {assertCents,assertQuantity,vatIncluded,cashRounded,cartSummary,cashChange,formatEuro} from '../prototype/money.mjs';
+
+test('integer cents reject floats and strings',()=>{ assert.throws(()=>assertCents(2.1));assert.throws(()=>assertCents('100'));assert.throws(()=>assertCents(-1));});
+test('invalid quantities rejected',()=>{assert.throws(()=>assertQuantity(0));assert.throws(()=>assertQuantity(1.5));assert.throws(()=>assertQuantity(1000));});
+test('VAT 24% included in 2.50',()=>assert.equal(vatIncluded(250,2400),48));
+test('VAT 13% included in 11.30',()=>assert.equal(vatIncluded(1130,1300),130));
+test('VAT 9% included in 10.90',()=>assert.equal(vatIncluded(1090,900),90));
+test('VAT 0% is zero',()=>assert.equal(vatIncluded(1090,0),0));
+test('cash round 2 down and 3 up',()=>{assert.equal(cashRounded(102),100);assert.equal(cashRounded(103),105);});
+test('cash round 7 down and 8 up',()=>{assert.equal(cashRounded(107),105);assert.equal(cashRounded(108),110);});
+test('cash rounding across 0..100 always divisible by 5',()=>{for(let i=0;i<=100;i++) assert.equal(cashRounded(i)%5,0);});
+test('cart summary reconciles VAT, net, totals',()=>{const s=cartSummary([{priceCents:250,quantity:2,rateBp:2400},{priceCents:199,quantity:1,rateBp:2400}]);assert.equal(s.totalCents,699);assert.equal(s.vatCents,136);assert.equal(s.netCents,563);assert.equal(s.cashDueCents,700);assert.equal(s.cashRoundingCents,1)});
+test('mixed VAT rates recorded separately',()=>{const s=cartSummary([{priceCents:1130,quantity:1,rateBp:1300},{priceCents:1090,quantity:1,rateBp:900}]);assert.equal(s.vatCents,220);assert.equal(s.byRate['1300'].vatCents,130);assert.equal(s.byRate['900'].vatCents,90)});
+test('cash change exact',()=>assert.equal(cashChange(699,1000),300));
+test('insufficient tender rejected',()=>assert.throws(()=>cashChange(699,695)));
+test('euro formatting',()=>assert.equal(formatEuro(1250),'12,50 €'));
+test('overflow rejected',()=>assert.throws(()=>cartSummary([{priceCents:10000000,quantity:11,rateBp:2400}])));
+test('zero cart is safe',()=>{assert.equal(cartSummary([]).totalCents,0);assert.equal(cartSummary([]).cashDueCents,0)});
+test('rate validation',()=>{assert.throws(()=>vatIncluded(100,-1));assert.throws(()=>vatIncluded(100,20000));});

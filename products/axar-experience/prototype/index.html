@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="et">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#112b35">
+  <title>AXAR ONE — POS kasutajakogemuse prototüüp</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Peamenüü">
+      <div class="brand" aria-label="AXAR ONE"><span class="brand-glyph">◈</span><span class="brand-name">AXAR<span>ONE</span></span></div>
+      <div class="sidebar-sep"></div>
+      <nav class="nav-items" aria-label="Töövaated">
+        <button type="button" class="nav-item active" data-mode="express" aria-current="page"><span aria-hidden="true">▦</span><small>Kiirmüük</small></button>
+        <button type="button" class="nav-item" data-mode="tables"><span aria-hidden="true">▤</span><small>Lauad</small></button>
+        <button type="button" class="nav-item" data-mode="kitchen"><span aria-hidden="true">♨</span><small>Köök</small></button>
+        <button type="button" class="nav-item" data-mode="manager"><span aria-hidden="true">▥</span><small>Juht</small></button>
+      </nav>
+      <div class="side-lower"><div class="avatar" aria-hidden="true">KL</div><span>Kassapidaja</span></div>
+    </aside>
+    <main class="main" id="main-area">
+      <header class="topbar">
+        <div class="location-heading"><div class="location-dot" aria-hidden="true"></div><div><strong>Põhjakohvik</strong><small>Asukoht 01 · Kassa A</small></div></div>
+        <div class="top-right"><span class="demo-pill">● DEMO</span><span class="status-pill">◌ Testkeskkond</span><span class="date" id="local-clock"></span></div>
+      </header>
+      <section class="headline">
+        <div><p class="eyebrow" id="section-eyebrow">MÜÜGI TÖÖLAUD</p><h1 id="section-title">Kiire teenindus.<br><em>Vähem samme.</em></h1><p class="subtitle" id="section-subtitle">Tooted, tellimused ja maksmine ühes vaates.</p></div>
+        <div class="note-card"><span class="spark" aria-hidden="true">✳</span><span>AXAR soovitus<small id="hint-message">Sinu enim müüdud tooted võiksid olla esimeses reas.</small></span></div>
+      </section>
+      <div class="workspace-body" id="view-root"></div>
+      <footer class="safe-note"><span aria-hidden="true">⊘</span> Interaktiivne kasutajaliidese prototüüp. Kõik müügid, köögitellimused ja maksed on simuleeritud; andmeid ei saadeta ega salvestata.</footer>
+    </main>
+    <aside class="checkout" id="checkout-panel" aria-label="Ostukorv">
+      <div class="checkout-heading"><div><p class="eyebrow">AKTIIVNE TELLIMUS</p><h2 id="basket-title">Kassamüük</h2></div><span class="basket-count" id="basket-count">0</span></div>
+      <div class="basket-items" id="basket-items"><div class="empty-basket"><span aria-hidden="true">◇</span><strong>Alusta tellimust</strong><small>Puuduta toodet, et see ostukorvi lisada.</small></div></div>
+      <div class="basket-footer"><div class="summary-line"><span>Kaubad kokku</span><strong id="subtotal">0,00 €</strong></div><div class="summary-line"><span>Sisaldab KM</span><span id="vat">0,00 €</span></div><div class="summary-line rounding"><span>Sularaha ümardus</span><span id="rounding">0,00 €</span></div><div class="total-line"><span>Maksta</span><strong id="total">0,00 €</strong></div><button id="pay-button" class="primary-btn" disabled>Võta sularaha <span aria-hidden="true">→</span></button><button id="send-button" class="secondary-btn" hidden>Saada kööki <span aria-hidden="true">↗</span></button><p class="payment-warning">Ainult näidis – pärismakseid ei töödelda.</p></div>
+    </aside>
+  </div>
+  <div id="modal" class="overlay" hidden role="presentation"><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title"><button id="close-modal" type="button" class="close-modal" aria-label="Sulge">×</button><div id="modal-content"></div></div></div>
+  <div class="sr-only" id="announcer" aria-live="polite" aria-atomic="true"></div>
+  <script type="module" src="app.mjs"></script>
+</body>
+</html>
