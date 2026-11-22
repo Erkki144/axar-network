@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="et">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AXAR POS — demo kassa</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --ink:#1b1f24; --muted:#5b6470; --accent:#0b6bcb; --ok:#137333; --bad:#b3261e; --line:#d9dde3; }
+  * { box-sizing: border-box; }
+  body { margin:0; font: 16px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:12px 16px; background:var(--ink); color:#fff; display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; }
+  header small { color:#c9ced6; }
+  main { display:grid; grid-template-columns: 1fr minmax(280px, 380px); gap:16px; padding:16px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  h2 { margin:0 0 12px; font-size:18px; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap:10px; }
+  button { font:inherit; border-radius:10px; border:1px solid var(--line); background:#fff; padding:14px; min-height:56px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .prod { text-align:left; } .prod b { display:block; } .prod span { color:var(--muted); }
+  .primary { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:600; width:100%; }
+  .row { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--line); }
+  .row button { min-height:40px; padding:6px 12px; }
+  .total { font-size:22px; font-weight:700; }
+  label { display:block; margin:12px 0 4px; color:var(--muted); }
+  input { font:inherit; width:100%; padding:12px; border:1px solid var(--line); border-radius:10px; }
+  .msg { margin-top:12px; min-height:1.4em; } .msg.ok { color:var(--ok); } .msg.bad { color:var(--bad); }
+  pre { background:#fafafa; border:1px dashed var(--line); padding:12px; overflow:auto; font-size:13px; }
+  .stack > * + * { margin-top:8px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>AXAR POS · demo kassa</strong>
+  <small>Simuleeritud sularahamüük — mitte päris kassasüsteem</small>
+</header>
+<main>
+  <section>
+    <h2>Tooted</h2>
+    <div class="grid" id="products"></div>
+  </section>
+  <section class="stack">
+    <div id="drawer"></div>
+    <h2>Ostukorv</h2>
+    <div id="cart"></div>
+    <div class="row"><span>Kokku</span><span class="total" id="total">0,00 €</span></div>
+    <div class="row" id="dueRow" hidden><span>Tasuda sularahas (ümardatud 5 sendini)</span><span id="due"></span></div>
+    <label for="tendered">Klient maksis (€)</label>
+    <input id="tendered" inputmode="decimal" autocomplete="off" placeholder="nt 10,00">
+    <button class="primary" id="pay">Võta sularaha vastu</button>
+    <div class="msg" id="msg" role="status" aria-live="polite"></div>
+    <pre id="receipt" hidden></pre>
+  </section>
+</main>
+<script>
+"use strict";
+const HEADERS = { "X-Tenant-ID": "demo", "X-Cashier-ID": "kassa1" };
+const $ = (id) => document.getElementById(id);
+let products = [], cart = new Map(), drawer = null, pendingKey = null;
+
+const eur = (c) => (c < 0 ? "-" : "") + Math.floor(Math.abs(c) / 100) + "," + String(Math.abs(c) % 100).padStart(2, "0") + " €";
+// Parse "12,30" / "12.3" into integer cents without float arithmetic.
+function toCents(text) {
+  const m = String(text).trim().replace(",", ".").match(/^(\d{1,7})(?:\.(\d{0,2}))?$/);
+  if (!m) return null;
+  return parseInt(m[1], 10) * 100 + parseInt((m[2] || "").padEnd(2, "0") || "0", 10);
+}
+function el(tag, text, cls) { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; }
+function say(text, ok) { const m = $("msg"); m.textContent = text; m.className = "msg " + (ok ? "ok" : "bad"); }
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: { ...HEADERS, "Content-Type": "application/json", ...(opts.headers || {}) } });
+  const body = res.headers.get("content-type")?.includes("json") ? await res.json() : await res.text();
+  if (!res.ok) throw new Error(body.message || body.detail || res.statusText);
+  return body;
+}
+
+function renderProducts() {
+  const g = $("products"); g.replaceChildren();
+  for (const p of products) {
+    const b = el("button", null, "prod");
+    b.append(el("b", p.name), el("span", eur(p.price_cents)));
+    b.onclick = () => { cart.set(p.id, (cart.get(p.id) || 0) + 1); pendingKey = null; renderCart(); };
+    g.append(b);
+  }
+}
+function cartTotal() { let t = 0; for (const [id, q] of cart) t += products.find(p => p.id === id).price_cents * q; return t; }
+function renderCart() {
+  const c = $("cart"); c.replaceChildren();
+  if (!cart.size) c.append(el("p", "Ostukorv on tühi."));
+  for (const [id, q] of cart) {
+    const p = products.find(x => x.id === id);
+    const r = el("div", null, "row");
+    const minus = el("button", "−"); minus.setAttribute("aria-label", "Vähenda " + p.name);
+    minus.onclick = () => { q > 1 ? cart.set(id, q - 1) : cart.delete(id); pendingKey = null; renderCart(); };
+    r.append(el("span", `${q} × ${p.name}`), el("span", eur(p.price_cents * q)), minus);
+    c.append(r);
+  }
+  const t = cartTotal(), due = Math.floor((t + 2) / 5) * 5; // display only; server decides
+  $("total").textContent = eur(t);
+  $("due").textContent = eur(due); $("dueRow").hidden = due === t;
+  $("pay").disabled = !cart.size || !drawer;
+}
+async function renderDrawer() {
+  drawer = (await api("/api/v1/drawer/current")).drawer;
+  const d = $("drawer"); d.replaceChildren();
+  if (!drawer) {
+    const b = el("button", "Ava kassa (vahetusraha 50,00 €)", "primary");
+    b.onclick = async () => { try { await api("/api/v1/drawer/open", { method: "POST", body: JSON.stringify({ opening_float_cents: 5000 }) }); await renderDrawer(); } catch (e) { say(e.message); } };
+    d.append(b);
+  } else {
+    d.append(el("div", `Kassa #${drawer.id} avatud · oodatav sularaha ${eur(drawer.expected_cents)}`));
+  }
+  renderCart();
+}
+
+$("pay").onclick = async () => {
+  const tendered = toCents($("tendered").value);
+  if (tendered === null) return say("Sisesta summa, nt 10,00");
+  // Same key for retries of the same cart => the server never double-books.
+  pendingKey = pendingKey || crypto.randomUUID();
+  $("pay").disabled = true;
+  try {
+    const lines = [...cart].map(([product_id, quantity]) => ({ product_id, quantity }));
+    const sale = await api("/api/v1/sales/cash", { method: "POST", headers: { "Idempotency-Key": pendingKey }, body: JSON.stringify({ lines, tendered_cents: tendered }) });
+    say(`Tšekk nr ${sale.receipt_no} · tagasi ${eur(sale.change_cents)}`, true);
+    const r = $("receipt"); r.textContent = await api(`/api/v1/sales/${sale.id}/receipt.txt`); r.hidden = false;
+    cart.clear(); pendingKey = null; $("tendered").value = "";
+    await renderDrawer();
+  } catch (e) { say(e.message); renderCart(); }
+};
+
+(async () => {
+  try { products = await api("/api/v1/products"); renderProducts(); await renderDrawer(); }
+  catch (e) { say("Server ei vasta: " + e.message); }
+})();
+</script>
+</body>
+</html>
