@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from . import __version__, services
 from .config import Settings
 from .db import init_db, make_engine, seed_demo
-from .models import DrawerSession, Sale, Tenant
+from .models import DrawerSession, Refund, Sale, Tenant
 
 STATIC = Path(__file__).parent / "static"
 
@@ -44,6 +44,17 @@ class DrawerOpenIn(Strict):
     opening_float_cents: Cents
 
 
+class RefundLineIn(Strict):
+    line_no: Id
+    quantity: Qty
+
+
+class CashRefundIn(Strict):
+    register_id: Id
+    lines: Annotated[list[RefundLineIn], Field(min_length=1, max_length=200)]
+    reason: Annotated[str, Field(min_length=3, max_length=500)]
+
+
 class DrawerCloseIn(Strict):
     counted_cents: Cents
     note: Annotated[str | None, Field(max_length=500)] = None
@@ -54,6 +65,7 @@ class Identity:
     tenant_id: str
     tenant_name: str
     cashier_id: str
+    role: str
 
 
 def _sale_out(sale: Sale) -> dict:
@@ -93,6 +105,38 @@ def _sale_out(sale: Sale) -> dict:
     }
 
 
+def _refund_out(r: Refund) -> dict:
+    return {
+        "id": r.id,
+        "refund_no": r.refund_no,
+        "original_sale_id": r.original_sale_id,
+        "original_receipt_no": r.original_sale.receipt_no,
+        "register_id": r.register_id,
+        "drawer_session_id": r.drawer_session_id,
+        "cashier_id": r.cashier_id,
+        "approved_by": r.approved_by,
+        "approver_role": r.approver_role,
+        "reason": r.reason,
+        "correlation_id": r.correlation_id,
+        "created_at": r.created_at.isoformat(),
+        "business_date": r.business_date.isoformat(),
+        "payment_method": r.payment_method,
+        "simulated": True,
+        "total_cents": r.total_cents,
+        "vat_cents": r.vat_cents,
+        "net_cents": r.net_cents,
+        "cash_rounding_cents": r.cash_rounding_cents,
+        "cash_paid_cents": r.cash_paid_cents,
+        "lines": [
+            {"line_no": ln.line_no, "sale_line_id": ln.sale_line_id, "sku": ln.sku,
+             "name": ln.name, "unit_price_cents": ln.unit_price_cents,
+             "quantity": ln.quantity, "gross_cents": ln.gross_cents,
+             "vat_rate_bp": ln.vat_rate_bp, "vat_cents": ln.vat_cents, "net_cents": ln.net_cents}
+            for ln in r.lines
+        ],
+    }
+
+
 def _drawer_out(d: DrawerSession) -> dict:
     return {
         "id": d.id,
@@ -105,10 +149,12 @@ def _drawer_out(d: DrawerSession) -> dict:
         "closed_at": d.closed_at.isoformat() if d.closed_at else None,
         "sale_count": d.sale_count,
         "cash_sales_cents": d.cash_sales_cents,
+        "refund_count": d.refund_count,
+        "cash_refunds_cents": d.cash_refunds_cents,
         # While open: running expectation. Once closed: frozen at close.
         "expected_cents": d.expected_cents
         if d.status == "closed"
-        else d.opening_float_cents + d.cash_sales_cents,
+        else d.opening_float_cents + d.cash_sales_cents - d.cash_refunds_cents,
         "counted_cents": d.counted_cents,
         "variance_cents": d.variance_cents,
         "note": d.note,
@@ -144,6 +190,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         s: Annotated[Session, Depends(db)],
         x_tenant_id: Annotated[str | None, Header()] = None,
         x_cashier_id: Annotated[str | None, Header()] = None,
+        x_role: Annotated[str | None, Header()] = None,
     ) -> Identity:
         if not settings.demo_identity:
             # Real authentication is issue #2. Refuse rather than guess.
@@ -153,7 +200,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tenant = s.get(Tenant, x_tenant_id)
         if tenant is None:
             raise HTTPException(403, "unknown tenant")
-        return Identity(tenant.id, tenant.name, x_cashier_id[:64])
+        role = x_role or "cashier"
+        if role not in services.ROLES:
+            raise HTTPException(403, "invalid role")
+        return Identity(tenant.id, tenant.name, x_cashier_id[:64], role)
 
     Db = Annotated[Session, Depends(db)]
     Who = Annotated[Identity, Depends(identity)]
@@ -238,7 +288,54 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/sales/{sale_id}")
     def sale(sale_id: str, who: Who, s: Db):
-        return _sale_out(services.get_sale(s, who.tenant_id, sale_id))
+        sale = services.get_sale(s, who.tenant_id, sale_id)
+        out = _sale_out(sale)
+        state = services.refund_state(s, who.tenant_id, sale.id)
+        for ln_out, ln in zip(out["lines"], sale.lines):
+            alloc = state.get(ln.id)
+            ln_out["refunded_quantity"] = alloc.refunded_quantity if alloc else 0
+        return out
+
+    @app.post("/api/v1/sales/{sale_id}/refunds")
+    def create_refund(
+        sale_id: str,
+        body: CashRefundIn,
+        who: Who,
+        s: Db,
+        idempotency_key: Annotated[str, Header(min_length=8, max_length=128)],
+    ):
+        refund, replayed = services.create_cash_refund(
+            s,
+            tenant_id=who.tenant_id,
+            register_id=body.register_id,
+            cashier_id=who.cashier_id,
+            role=who.role,
+            sale_id=sale_id,
+            idempotency_key=idempotency_key,
+            lines=[services.RefundLineRequest(x.line_no, x.quantity) for x in body.lines],
+            reason=body.reason,
+            settings=settings,
+            now=settings.clock(),
+        )
+        return JSONResponse(
+            status_code=200 if replayed else 201,
+            content=_refund_out(refund),
+            headers={"Idempotent-Replayed": "true" if replayed else "false"},
+        )
+
+    @app.get("/api/v1/sales/{sale_id}/refunds")
+    def sale_refunds(sale_id: str, who: Who, s: Db):
+        services.get_sale(s, who.tenant_id, sale_id)
+        return [_refund_out(r) for r in services.list_refunds(s, who.tenant_id, sale_id=sale_id)]
+
+    @app.get("/api/v1/refunds/{refund_id}")
+    def refund_get(refund_id: str, who: Who, s: Db):
+        return _refund_out(services.get_refund(s, who.tenant_id, refund_id))
+
+    @app.get("/api/v1/refunds/{refund_id}/receipt.txt", response_class=PlainTextResponse)
+    def refund_receipt(refund_id: str, who: Who, s: Db):
+        refund = services.get_refund(s, who.tenant_id, refund_id)
+        return services.render_refund_receipt_text(refund, who.tenant_name, settings)
 
     @app.get("/api/v1/sales/{sale_id}/receipt.txt", response_class=PlainTextResponse)
     def receipt(sale_id: str, who: Who, s: Db):

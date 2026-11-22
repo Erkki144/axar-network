@@ -11,7 +11,8 @@ AXAR POS is a separate future product from the existing AXAR Network content-mar
 - Idempotent cash sales, sequential receipts, immutable sale snapshots, transactional outbox event
 - Tenant → location → register → drawer session; independent drawers per register
 - Cash drawer open/close with expected vs counted variance, race-safe against concurrent sales
-- Europe/Tallinn business-day report with VAT breakdown
+- Simulated cash refunds (full/partial) as separate auditable records, over-refund and VAT-drift safe — see [`docs/SLICE_2_REFUNDS.md`](docs/SLICE_2_REFUNDS.md)
+- Europe/Tallinn business-day report with VAT breakdown, refunds and net totals
 - Tenant-scoped queries with cross-tenant tests; demo identity must be switched on explicitly
 
 Details, tenant-boundary plan, limitations and rollback: [`docs/SLICE_1.md`](docs/SLICE_1.md). Rules for coding agents: [`AGENTS.md`](AGENTS.md).
@@ -35,7 +36,7 @@ AXAR_POS_DEMO_IDENTITY=1 AXAR_POS_SEED_DEMO=1 uvicorn axar_pos.main:app --host 1
 # open http://127.0.0.1:8000/
 ```
 
-`AXAR_POS_DEMO_IDENTITY=1` trusts `X-Tenant-ID` / `X-Cashier-ID` headers with **no authentication**. Never bind to a public interface.
+`AXAR_POS_DEMO_IDENTITY=1` trusts `X-Tenant-ID` / `X-Cashier-ID` / `X-Role` (`cashier` default, `manager`, `owner`) headers with **no authentication**. Never bind to a public interface.
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
@@ -58,6 +59,10 @@ AXAR_POS_DEMO_IDENTITY=1 AXAR_POS_SEED_DEMO=1 uvicorn axar_pos.main:app --host 1
 | POST | `/api/v1/drawer/open` | `{register_id, opening_float_cents}` |
 | POST | `/api/v1/drawer/{id}/close` | `{counted_cents, note?}` → variance; refuses on ledger mismatch |
 | POST | `/api/v1/sales/cash` | header `Idempotency-Key`; `{register_id, lines:[{product_id, quantity}], tendered_cents}` |
+| POST | `/api/v1/sales/{id}/refunds` | manager/owner; header `Idempotency-Key`; `{register_id, lines:[{line_no, quantity}], reason}` |
+| GET | `/api/v1/sales/{id}/refunds` | refunds of one sale |
+| GET | `/api/v1/refunds/{id}` | |
+| GET | `/api/v1/refunds/{id}/receipt.txt` | Estonian refund receipt |
 | GET | `/api/v1/sales[?business_date=]` | |
 | GET | `/api/v1/sales/{id}` | |
 | GET | `/api/v1/sales/{id}/receipt.txt` | Estonian plain-text receipt |

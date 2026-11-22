@@ -52,6 +52,7 @@
     <button class="primary" id="pay">Võta sularaha vastu</button>
     <div class="msg" id="msg" role="status" aria-live="polite"></div>
     <pre id="receipt" hidden></pre>
+    <button id="refund" hidden>Tagasta see müük (juhataja · demo)</button>
   </section>
 </main>
 <script>
@@ -147,9 +148,32 @@ $("pay").onclick = async () => {
     const sale = await api("/api/v1/sales/cash", { method: "POST", headers: { "Idempotency-Key": pendingKey }, body: JSON.stringify({ register_id: registerId(), lines, tendered_cents: tendered }) });
     say(`Tšekk nr ${sale.receipt_no} · tagasi ${eur(sale.change_cents)}`, true);
     const r = $("receipt"); r.textContent = await api(`/api/v1/sales/${sale.id}/receipt.txt`); r.hidden = false;
+    lastSaleId = sale.id; refundKey = null; $("refund").hidden = false;
     cart.clear(); pendingKey = null; $("tendered").value = "";
     await renderDrawer();
   } catch (e) { say(e.message); renderCart(); }
+};
+
+// Demo only: sends X-Role: manager. Real role checks arrive with issue #2.
+let lastSaleId = null, refundKey = null;
+$("refund").onclick = async () => {
+  if (!lastSaleId) return;
+  const reason = prompt("Tagastuse põhjus:", "");
+  if (!reason || reason.trim().length < 3) return say("Tagastus katkestatud: põhjus on kohustuslik (vähemalt 3 märki).");
+  try {
+    const sale = await api(`/api/v1/sales/${lastSaleId}`);
+    const lines = sale.lines.filter(l => l.quantity > l.refunded_quantity)
+      .map(l => ({ line_no: l.line_no, quantity: l.quantity - l.refunded_quantity }));
+    if (!lines.length) return say("See müük on juba täielikult tagastatud.");
+    refundKey = refundKey || crypto.randomUUID();
+    const rf = await api(`/api/v1/sales/${lastSaleId}/refunds`, { method: "POST",
+      headers: { "Idempotency-Key": refundKey, "X-Role": "manager" },
+      body: JSON.stringify({ register_id: registerId(), lines, reason: reason.trim() }) });
+    say(`Tagastus nr ${rf.refund_no} · sularahas välja ${eur(rf.cash_paid_cents)}`, true);
+    const r = $("receipt"); r.textContent = await api(`/api/v1/refunds/${rf.id}/receipt.txt`); r.hidden = false;
+    refundKey = null; $("refund").hidden = true;
+    await renderDrawer();
+  } catch (e) { say(e.message); }
 };
 
 (async () => {

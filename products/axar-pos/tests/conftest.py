@@ -63,9 +63,22 @@ def app(settings):
 class Api:
     """Thin helper that always sends a tenant identity."""
 
-    def __init__(self, client: TestClient, tenant: str, cashier: str = "kassa1"):
+    def __init__(self, client: TestClient, tenant: str, cashier: str = "kassa1",
+                 role: str | None = None):
         self.c = client
         self.h = {"X-Tenant-ID": tenant, "X-Cashier-ID": cashier}
+        if role:
+            self.h["X-Role"] = role
+
+    def as_role(self, role: str, cashier: str = "juhataja") -> "Api":
+        return Api(self.c, self.h["X-Tenant-ID"], cashier, role)
+
+    def refund(self, sale_id, lines, key=None, register="R1", reason="klient tagastas"):
+        body = {"register_id": self.register_id(register),
+                "lines": [{"line_no": n, "quantity": q} for n, q in lines],
+                "reason": reason}
+        return self.post(f"/api/v1/sales/{sale_id}/refunds", body,
+                         headers={"Idempotency-Key": key or str(uuid.uuid4())})
 
     def get(self, path, **kw):
         return self.c.get(path, headers=self.h, **kw)

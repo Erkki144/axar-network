@@ -50,9 +50,9 @@ def test_daily_report_breaks_down_by_register(a):
     r = a.get("/api/v1/reports/daily", params={"business_date": "2026-03-10"}).json()
     assert r["by_register"] == [
         {"register_id": a.register_id("R1"), "sale_count": 1, "total_cents": 250,
-         "cash_collected_cents": 250},
+         "cash_collected_cents": 250, "refund_count": 0, "cash_refunded_cents": 0},
         {"register_id": a.register_id("R2"), "sale_count": 1, "total_cents": 500,
-         "cash_collected_cents": 500},
+         "cash_collected_cents": 500, "refund_count": 0, "cash_refunded_cents": 0},
     ]
 
 

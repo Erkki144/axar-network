@@ -130,6 +130,8 @@ class DrawerSession(Base):
     # status='open' inside the sale transaction (see services._claim_drawer).
     cash_sales_cents: Mapped[int] = mapped_column(Integer, default=0)
     sale_count: Mapped[int] = mapped_column(Integer, default=0)
+    cash_refunds_cents: Mapped[int] = mapped_column(Integer, default=0)
+    refund_count: Mapped[int] = mapped_column(Integer, default=0)
     closed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(nullable=True)
     expected_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -208,6 +210,83 @@ class SaleLine(Base):
     sale: Mapped[Sale] = relationship(back_populates="lines")
 
 
+class RefundAllocation(Base):
+    """Mutable per-sale-line refund counter (one row per sale line, created
+    with the sale). Changed only by a conditional UPDATE that refuses to go
+    above the original quantity — the over-refund guard under concurrency."""
+
+    __tablename__ = "refund_allocations"
+
+    sale_line_id: Mapped[int] = mapped_column(ForeignKey("sale_lines.id"), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    sale_id: Mapped[str] = mapped_column(ForeignKey("sales.id"), index=True)
+    original_quantity: Mapped[int] = mapped_column(Integer)
+    refunded_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    refunded_gross_cents: Mapped[int] = mapped_column(Integer, default=0)
+    refunded_vat_cents: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Refund(Base):
+    """Simulated cash refund: a separate, append-only record that references
+    the original sale. The original sale is never modified."""
+
+    __tablename__ = "refunds"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    refund_no: Mapped[int] = mapped_column(Integer)
+    original_sale_id: Mapped[str] = mapped_column(ForeignKey("sales.id"), index=True)
+    register_id: Mapped[int] = mapped_column(ForeignKey("registers.id"), index=True)
+    drawer_session_id: Mapped[int] = mapped_column(ForeignKey("drawer_sessions.id"), index=True)
+    cashier_id: Mapped[str] = mapped_column(String(64))
+    approved_by: Mapped[str] = mapped_column(String(64))
+    approver_role: Mapped[str] = mapped_column(String(32))
+    reason: Mapped[str] = mapped_column(String(500))
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    correlation_id: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime]
+    business_date: Mapped[date] = mapped_column(Date, index=True)
+    payment_method: Mapped[str] = mapped_column(String(16), default="cash")
+    # All amounts positive = money going back to the customer.
+    total_cents: Mapped[int] = mapped_column(Integer)
+    vat_cents: Mapped[int] = mapped_column(Integer)
+    net_cents: Mapped[int] = mapped_column(Integer)
+    cash_rounding_cents: Mapped[int] = mapped_column(Integer)
+    cash_paid_cents: Mapped[int] = mapped_column(Integer)
+
+    lines: Mapped[list["RefundLine"]] = relationship(
+        back_populates="refund", order_by="RefundLine.line_no", lazy="selectin"
+    )
+    original_sale: Mapped[Sale] = relationship(lazy="selectin")
+    register: Mapped[Register] = relationship(lazy="selectin")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_refund_idempotency"),
+        UniqueConstraint("tenant_id", "refund_no", name="uq_refund_no"),
+    )
+
+
+class RefundLine(Base):
+    __tablename__ = "refund_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    refund_id: Mapped[str] = mapped_column(ForeignKey("refunds.id"), index=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))
+    line_no: Mapped[int] = mapped_column(Integer)
+    sale_line_id: Mapped[int] = mapped_column(ForeignKey("sale_lines.id"), index=True)
+    sku: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(200))
+    unit_price_cents: Mapped[int] = mapped_column(Integer)
+    quantity: Mapped[int] = mapped_column(Integer)
+    gross_cents: Mapped[int] = mapped_column(Integer)
+    vat_rate_bp: Mapped[int] = mapped_column(Integer)  # from the original line
+    vat_cents: Mapped[int] = mapped_column(Integer)
+    net_cents: Mapped[int] = mapped_column(Integer)
+
+    refund: Mapped[Refund] = relationship(back_populates="lines")
+
+
 class OutboxEvent(Base):
     """Transactional outbox; written in the same transaction as the sale."""
 
@@ -224,7 +303,7 @@ class OutboxEvent(Base):
     payload_hash: Mapped[str] = mapped_column(String(64))
 
 
-APPEND_ONLY = (Sale, SaleLine, OutboxEvent)
+APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent)
 
 
 class AppendOnlyViolation(RuntimeError):

@@ -15,7 +15,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import Settings
-from .models import DrawerSession, OutboxEvent, Product, Register, Sale, SaleLine, TaxRate
+from .models import (
+    DrawerSession,
+    OutboxEvent,
+    Product,
+    Refund,
+    RefundAllocation,
+    RefundLine,
+    Register,
+    Sale,
+    SaleLine,
+    TaxRate,
+)
 from .money import format_eur, round_cash, vat_from_gross
 
 
@@ -63,6 +74,28 @@ class TaxRateMissing(DomainError):
 class LedgerMismatch(DomainError):
     status_code = 500
     code = "ledger_mismatch"
+
+
+class Forbidden(DomainError):
+    status_code = 403
+    code = "forbidden"
+
+
+class InvalidRefund(DomainError):
+    status_code = 422
+    code = "invalid_refund"
+
+
+class OverRefund(Conflict):
+    code = "over_refund"
+
+
+class InsufficientDrawerCash(Conflict):
+    code = "insufficient_drawer_cash"
+
+
+ROLES = ("cashier", "manager", "owner")
+REFUND_ROLES = ("manager", "owner")
 
 
 # --------------------------------------------------------------------------- time
@@ -188,6 +221,26 @@ def ledger_cash_sales(s: Session, tenant_id: str, drawer_id: int) -> tuple[int, 
     return int(total), int(n)
 
 
+def ledger_cash_refunds(s: Session, tenant_id: str, drawer_id: int) -> tuple[int, int]:
+    """(Σ cash_paid, count) recomputed from the immutable refunds ledger."""
+    total, n = s.execute(
+        select(func.coalesce(func.sum(Refund.cash_paid_cents), 0), func.count(Refund.id)).where(
+            Refund.tenant_id == tenant_id,
+            Refund.drawer_session_id == drawer_id,
+            Refund.payment_method == "cash",
+        )
+    ).one()
+    return int(total), int(n)
+
+
+def _expected_cash_expr():
+    return (
+        DrawerSession.opening_float_cents
+        + DrawerSession.cash_sales_cents
+        - DrawerSession.cash_refunds_cents
+    )
+
+
 def get_drawer(s: Session, tenant_id: str, drawer_id: int) -> DrawerSession:
     d = s.scalar(
         select(DrawerSession).where(
@@ -249,9 +302,8 @@ def close_drawer(
             closed_at=now,
             note=note,
             counted_cents=counted_cents,
-            expected_cents=DrawerSession.opening_float_cents + DrawerSession.cash_sales_cents,
-            variance_cents=counted_cents
-            - (DrawerSession.opening_float_cents + DrawerSession.cash_sales_cents),
+            expected_cents=_expected_cash_expr(),
+            variance_cents=counted_cents - _expected_cash_expr(),
         )
         .execution_options(synchronize_session=False)
     )
@@ -272,6 +324,13 @@ def close_drawer(
         raise LedgerMismatch(
             f"drawer running total {d.cash_sales_cents}/{d.sale_count} != "
             f"ledger {ledger_total}/{ledger_n}"
+        )
+    ref_total, ref_n = ledger_cash_refunds(s, tenant_id, drawer_id)
+    if (ref_total, ref_n) != (d.cash_refunds_cents, d.refund_count):
+        s.rollback()
+        raise LedgerMismatch(
+            f"drawer refund total {d.cash_refunds_cents}/{d.refund_count} != "
+            f"ledger {ref_total}/{ref_n}"
         )
     s.commit()
     return d
@@ -424,6 +483,19 @@ def create_cash_sale(
     s.add_all(sale_lines)
     s.add(_sale_completed_event(sale, sale_lines, now))
     try:
+        s.flush()  # assigns sale line ids
+        s.add_all(
+            RefundAllocation(
+                sale_line_id=ln.id,
+                tenant_id=tenant_id,
+                sale_id=sale_id,
+                original_quantity=ln.quantity,
+                refunded_quantity=0,
+                refunded_gross_cents=0,
+                refunded_vat_cents=0,
+            )
+            for ln in sale_lines
+        )
         s.commit()
     except IntegrityError:
         # Concurrent request with the same key (or receipt number) won.
@@ -489,6 +561,291 @@ def list_sales(s: Session, tenant_id: str, business_date: date | None = None) ->
     return list(s.scalars(q.order_by(Sale.receipt_no)))
 
 
+# ------------------------------------------------------------------------- refunds
+
+
+@dataclass
+class RefundLineRequest:
+    line_no: int
+    quantity: int
+
+
+def refund_state(s: Session, tenant_id: str, sale_id: str) -> dict[int, RefundAllocation]:
+    """sale_line_id -> allocation (refunded so far)."""
+    rows = s.scalars(
+        select(RefundAllocation).where(
+            RefundAllocation.tenant_id == tenant_id, RefundAllocation.sale_id == sale_id
+        )
+    )
+    return {r.sale_line_id: r for r in rows}
+
+
+def _refund_request_hash(sale_id: str, register_id: int, lines: list[RefundLineRequest],
+                         reason: str) -> str:
+    return _sha256(_canonical({
+        "sale_id": sale_id,
+        "register_id": register_id,
+        "payment_method": "cash",
+        "reason": reason,
+        "lines": sorted([ln.line_no, ln.quantity] for ln in lines),
+    }))
+
+
+def _find_refund_by_key(s: Session, tenant_id: str, key: str) -> Refund | None:
+    return s.scalar(
+        select(Refund).where(Refund.tenant_id == tenant_id, Refund.idempotency_key == key)
+    )
+
+
+def _refund_replay_or_conflict(existing: Refund, req_hash: str) -> tuple[Refund, bool]:
+    if existing.request_hash != req_hash:
+        raise IdempotencyConflict(
+            "Idempotency-Key was already used for a different refund request"
+        )
+    return existing, True
+
+
+def create_cash_refund(s: Session, **kw) -> tuple[Refund, bool]:
+    """All-or-nothing wrapper: any domain error rolls back every counter
+    already moved in this transaction (e.g. line 1 claimed, line 2 invalid)."""
+    try:
+        return _create_cash_refund(s, **kw)
+    except DomainError:
+        s.rollback()
+        raise
+
+
+def _create_cash_refund(
+    s: Session,
+    *,
+    tenant_id: str,
+    register_id: int,
+    cashier_id: str,
+    role: str,
+    sale_id: str,
+    idempotency_key: str,
+    lines: list[RefundLineRequest],
+    reason: str,
+    settings: Settings,
+    now: datetime,
+) -> tuple[Refund, bool]:
+    """Simulated cash refund against an existing sale. Returns ``(refund, replayed)``.
+
+    Guarantees:
+    - never refunds more units than were sold (per line, under concurrency);
+    - the original sale, its lines and its outbox event are never modified;
+    - the last unit of a line refunds exactly the remaining VAT, so a fully
+      refunded line nets to zero VAT with no rounding drift;
+    - cash is paid out of an *open* drawer that holds enough expected cash.
+    """
+    if role not in REFUND_ROLES:
+        raise Forbidden("refunds require the manager or owner role")
+
+    req_hash = _refund_request_hash(sale_id, register_id, lines, reason)
+    existing = _find_refund_by_key(s, tenant_id, idempotency_key)
+    if existing is not None:
+        return _refund_replay_or_conflict(existing, req_hash)
+
+    sale = get_sale(s, tenant_id, sale_id)  # 404 across tenants
+    get_register(s, tenant_id, register_id)
+    drawer = get_open_drawer(s, tenant_id, register_id)
+    if drawer is None:
+        raise NoOpenDrawer("open this register's cash drawer before refunding")
+
+    seen = set()
+    for ln in lines:
+        if ln.line_no in seen:
+            raise InvalidRefund(f"line {ln.line_no} listed twice")
+        seen.add(ln.line_no)
+    by_no = {ln.line_no: ln for ln in sale.lines}
+    allocations = refund_state(s, tenant_id, sale_id)
+
+    refund_id = str(uuid.uuid4())
+    refund_lines: list[RefundLine] = []
+    for i, req in enumerate(sorted(lines, key=lambda x: x.line_no), start=1):
+        sl = by_no.get(req.line_no)
+        if sl is None:
+            raise InvalidRefund(f"sale has no line {req.line_no}")
+        alloc = allocations.get(sl.id)
+        if alloc is None:
+            raise LedgerMismatch(f"no refund allocation for sale line {sl.id}")
+        seen_qty = alloc.refunded_quantity
+        remaining = alloc.original_quantity - seen_qty
+        if req.quantity > remaining:
+            raise OverRefund(
+                f"line {req.line_no}: requested {req.quantity}, refundable {remaining}"
+            )
+        if req.quantity == remaining:
+            # Last units: refund exactly what is left, so totals net to zero.
+            gross = sl.gross_cents - alloc.refunded_gross_cents
+            vat = sl.vat_cents - alloc.refunded_vat_cents
+        else:
+            gross = sl.unit_price_cents * req.quantity
+            vat = vat_from_gross(gross, sl.vat_rate_bp)
+
+        # Compare-and-swap on the counter: fails if anyone refunded this line
+        # since we read it (stale read / concurrent refund). Never over-refunds.
+        res = s.execute(
+            update(RefundAllocation)
+            .where(
+                RefundAllocation.sale_line_id == sl.id,
+                RefundAllocation.tenant_id == tenant_id,
+                RefundAllocation.refunded_quantity == seen_qty,
+                RefundAllocation.refunded_quantity + req.quantity
+                <= RefundAllocation.original_quantity,
+            )
+            .values(
+                refunded_quantity=RefundAllocation.refunded_quantity + req.quantity,
+                refunded_gross_cents=RefundAllocation.refunded_gross_cents + gross,
+                refunded_vat_cents=RefundAllocation.refunded_vat_cents + vat,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if res.rowcount != 1:
+            s.rollback()
+            raise OverRefund(
+                f"line {req.line_no} was refunded concurrently; reload and retry"
+            )
+        refund_lines.append(RefundLine(
+            refund_id=refund_id,
+            tenant_id=tenant_id,
+            line_no=i,
+            sale_line_id=sl.id,
+            sku=sl.sku,
+            name=sl.name,
+            unit_price_cents=sl.unit_price_cents,
+            quantity=req.quantity,
+            gross_cents=gross,
+            vat_rate_bp=sl.vat_rate_bp,
+            vat_cents=vat,
+            net_cents=gross - vat,
+        ))
+
+    total = sum(x.gross_cents for x in refund_lines)
+    vat_total = sum(x.vat_cents for x in refund_lines)
+    cash_paid = round_cash(total, settings.cash_rounding_step_cents)
+
+    # Pay out of the drawer only if it is still open and holds enough cash.
+    res = s.execute(
+        update(DrawerSession)
+        .where(
+            DrawerSession.id == drawer.id,
+            DrawerSession.tenant_id == tenant_id,
+            DrawerSession.status == "open",
+            _expected_cash_expr() >= cash_paid,
+        )
+        .values(
+            cash_refunds_cents=DrawerSession.cash_refunds_cents + cash_paid,
+            refund_count=DrawerSession.refund_count + 1,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if res.rowcount != 1:
+        s.rollback()
+        current = get_drawer(s, tenant_id, drawer.id)
+        if current.status != "open":
+            raise NoOpenDrawer("the cash drawer was closed; refund not recorded")
+        raise InsufficientDrawerCash("not enough cash in this drawer for the refund")
+
+    refund_no = (
+        s.scalar(select(func.coalesce(func.max(Refund.refund_no), 0)).where(
+            Refund.tenant_id == tenant_id
+        ))
+        + 1
+    )
+    refund = Refund(
+        id=refund_id,
+        tenant_id=tenant_id,
+        refund_no=refund_no,
+        original_sale_id=sale.id,
+        register_id=register_id,
+        drawer_session_id=drawer.id,
+        cashier_id=cashier_id,
+        approved_by=cashier_id,
+        approver_role=role,
+        reason=reason,
+        idempotency_key=idempotency_key,
+        request_hash=req_hash,
+        correlation_id=str(uuid.uuid4()),
+        created_at=now,
+        business_date=business_date_for(now, settings),
+        payment_method="cash",
+        total_cents=total,
+        vat_cents=vat_total,
+        net_cents=total - vat_total,
+        cash_rounding_cents=cash_paid - total,
+        cash_paid_cents=cash_paid,
+    )
+    s.add(refund)
+    s.add_all(refund_lines)
+    s.add(_refund_completed_event(refund, refund_lines, sale))
+    try:
+        s.commit()
+    except IntegrityError:
+        s.rollback()
+        existing = _find_refund_by_key(s, tenant_id, idempotency_key)
+        if existing is not None:
+            return _refund_replay_or_conflict(existing, req_hash)
+        raise Conflict("concurrent refund conflict; retry with the same Idempotency-Key")
+    s.refresh(refund)
+    return refund, False
+
+
+def _refund_completed_event(refund: Refund, lines: list[RefundLine], sale: Sale) -> OutboxEvent:
+    payload = {
+        "refund_id": refund.id,
+        "refund_no": refund.refund_no,
+        "original_sale_id": sale.id,
+        "original_receipt_no": sale.receipt_no,
+        "original_correlation_id": sale.correlation_id,
+        "register_id": refund.register_id,
+        "drawer_session_id": refund.drawer_session_id,
+        "business_date": refund.business_date.isoformat(),
+        "payment_method": refund.payment_method,
+        "simulated": True,
+        "total_cents": refund.total_cents,
+        "vat_cents": refund.vat_cents,
+        "net_cents": refund.net_cents,
+        "cash_paid_cents": refund.cash_paid_cents,
+        "cash_rounding_cents": refund.cash_rounding_cents,
+        "approver_role": refund.approver_role,
+        "lines": [
+            {"sku": ln.sku, "quantity": ln.quantity, "gross_cents": ln.gross_cents,
+             "vat_rate_bp": ln.vat_rate_bp, "vat_cents": ln.vat_cents}
+            for ln in lines
+        ],
+    }
+    body = _canonical(payload)
+    return OutboxEvent(
+        id=str(uuid.uuid4()),
+        tenant_id=refund.tenant_id,
+        type="pos.refund.completed",
+        version=1,
+        source="axar-pos",
+        occurred_at=refund.created_at,
+        correlation_id=refund.correlation_id,
+        payload=body,
+        payload_hash=_sha256(body),
+    )
+
+
+def get_refund(s: Session, tenant_id: str, refund_id: str) -> Refund:
+    r = s.scalar(select(Refund).where(Refund.id == refund_id, Refund.tenant_id == tenant_id))
+    if r is None:
+        raise NotFound("refund not found")
+    return r
+
+
+def list_refunds(s: Session, tenant_id: str, *, sale_id: str | None = None,
+                 business_date: date | None = None) -> list[Refund]:
+    q = select(Refund).where(Refund.tenant_id == tenant_id)
+    if sale_id is not None:
+        q = q.where(Refund.original_sale_id == sale_id)
+    if business_date is not None:
+        q = q.where(Refund.business_date == business_date)
+    return list(s.scalars(q.order_by(Refund.refund_no)))
+
+
 # ------------------------------------------------------------------------- reports
 
 
@@ -507,7 +864,42 @@ def daily_summary(s: Session, tenant_id: str, business_date: date) -> dict:
             b["gross_cents"] += ln.gross_cents
             b["vat_cents"] += ln.vat_cents
             b["net_cents"] += ln.net_cents
+
+    refunds = list_refunds(s, tenant_id, business_date=business_date)
+    refund_by_rate: dict[int, dict[str, int]] = {}
+    for rf in refunds:
+        r = by_register.setdefault(rf.register_id, {"sale_count": 0, "total_cents": 0,
+                                                    "cash_collected_cents": 0})
+        r["refund_count"] = r.get("refund_count", 0) + 1
+        r["cash_refunded_cents"] = r.get("cash_refunded_cents", 0) + rf.cash_paid_cents
+        for ln in rf.lines:
+            b = refund_by_rate.setdefault(ln.vat_rate_bp,
+                                          {"gross_cents": 0, "vat_cents": 0, "net_cents": 0})
+            b["gross_cents"] += ln.gross_cents
+            b["vat_cents"] += ln.vat_cents
+            b["net_cents"] += ln.net_cents
+    for r in by_register.values():
+        r.setdefault("refund_count", 0)
+        r.setdefault("cash_refunded_cents", 0)
+
+    sales_total = sum(x.total_cents for x in sales)
+    sales_vat = sum(x.vat_cents for x in sales)
+    cash_in = sum(x.cash_due_cents for x in sales if x.payment_method == "cash")
+    refund_total = sum(x.total_cents for x in refunds)
+    refund_vat = sum(x.vat_cents for x in refunds)
+    cash_out = sum(x.cash_paid_cents for x in refunds if x.payment_method == "cash")
     return {
+        "refund_count": len(refunds),
+        "refund_total_cents": refund_total,
+        "refund_vat_cents": refund_vat,
+        "refund_net_cents": refund_total - refund_vat,
+        "refund_cash_rounding_cents": sum(x.cash_rounding_cents for x in refunds),
+        "cash_refunded_cents": cash_out,
+        "refund_vat_breakdown": [{"vat_rate_bp": r, **v} for r, v in sorted(refund_by_rate.items())],
+        # Sales minus refunds recorded on this business day.
+        "net_total_cents": sales_total - refund_total,
+        "net_vat_cents": sales_vat - refund_vat,
+        "net_cash_cents": cash_in - cash_out,
         "business_date": business_date.isoformat(),
         "sale_count": len(sales),
         "total_cents": sum(x.total_cents for x in sales),
@@ -563,4 +955,51 @@ def render_receipt_text(sale: Sale, tenant_name: str, settings: Settings) -> str
     out.append(row("Tagasi", sale.change_cents))
     out.append("-" * width)
     out.append(f"ID {sale.id}")
+    return "\n".join(out)
+
+
+def _vat_rows(lines, row) -> list[str]:
+    rates: dict[int, list[int]] = {}
+    for ln in lines:
+        r = rates.setdefault(ln.vat_rate_bp, [0, 0])
+        r[0] += ln.net_cents
+        r[1] += ln.vat_cents
+    out = []
+    for bp, (net, vat) in sorted(rates.items()):
+        pct = f"{bp // 100}%" if bp % 100 == 0 else f"{bp / 100:.2f}%"
+        out.append(row(f"KM {pct} (neto {format_eur(net)})", vat))
+    return out
+
+
+def render_refund_receipt_text(refund: Refund, tenant_name: str, settings: Settings) -> str:
+    local = refund.created_at.astimezone(ZoneInfo(settings.business_timezone))
+    width = 40
+
+    def row(label: str, cents: int) -> str:
+        return f"{label}{format_eur(cents):>{width - len(label)}}"
+
+    out = [
+        tenant_name.center(width),
+        "TAGASTUS — SIMULEERITUD / DEMO".center(width),
+        "-" * width,
+        f"Tagastus nr {refund.refund_no}",
+        f"Algne tšekk nr {refund.original_sale.receipt_no}",
+        f"{refund.register.location.name} · {refund.register.name}"[:width],
+        f"Aeg {local:%d.%m.%Y %H:%M}",
+        f"Kinnitas {refund.approved_by} ({refund.approver_role})"[:width],
+        f"Põhjus: {refund.reason}"[:width],
+        "-" * width,
+    ]
+    for ln in refund.lines:
+        out.append(ln.name[:width])
+        qty = f"  -{ln.quantity} x {format_eur(ln.unit_price_cents)}"
+        out.append(f"{qty}{format_eur(-ln.gross_cents):>{width - len(qty)}}")
+    out.append("-" * width)
+    out.append(row("TAGASTATUD KOKKU", refund.total_cents))
+    out.extend(_vat_rows(refund.lines, row))
+    if refund.cash_rounding_cents:
+        out.append(row("Ümardus", refund.cash_rounding_cents))
+    out.append(row("Sularahas välja", refund.cash_paid_cents))
+    out.append("-" * width)
+    out.append(f"ID {refund.id}")
     return "\n".join(out)
