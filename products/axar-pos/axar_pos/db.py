@@ -7,7 +7,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from .models import Base, Product, TaxRate, Tenant
+from .models import Base, Location, Product, Register, TaxRate, Tenant
 
 # Estonian VAT. Standard rate rose 22 % -> 24 % on 2025-07-01.
 # Must be re-verified with an accountant before any real use.
@@ -28,12 +28,25 @@ def make_engine(url: str) -> Engine:
     engine = create_engine(url, **kwargs)
 
     if url.startswith("sqlite"):
+        # pysqlite's implicit BEGIN is DEFERRED: two transactions can both read
+        # "drawer open" and then race to upgrade to a write lock (SQLITE_BUSY /
+        # lost update). We take over transaction control and start every
+        # transaction with BEGIN IMMEDIATE so writers are serialized from
+        # their first read. Correctness does NOT rely on this alone: the sale
+        # path also uses a conditional UPDATE ... WHERE status='open', which is
+        # what protects PostgreSQL (row lock + READ COMMITTED re-check).
 
         @event.listens_for(engine, "connect")
-        def _sqlite_pragmas(dbapi_conn, _rec):  # pragma: no cover - trivial
+        def _sqlite_connect(dbapi_conn, _rec):
+            dbapi_conn.isolation_level = None  # disable pysqlite's own BEGIN
             cur = dbapi_conn.cursor()
             cur.execute("PRAGMA foreign_keys=ON")
+            cur.execute("PRAGMA busy_timeout=10000")
             cur.close()
+
+        @event.listens_for(engine, "begin")
+        def _sqlite_begin(conn):
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
 
     return engine
 
@@ -64,6 +77,13 @@ def seed_demo(factory: sessionmaker[Session], tenant_id: str = "demo") -> None:
         if s.get(Tenant, tenant_id) is None:
             s.add(Tenant(id=tenant_id, name="Demo kohvik"))
             s.flush()
+            loc = Location(tenant_id=tenant_id, code="POOD1", name="Kesklinna kohvik")
+            s.add(loc)
+            s.flush()
+            s.add_all([
+                Register(tenant_id=tenant_id, location_id=loc.id, code="KASSA1", name="Kassa 1"),
+                Register(tenant_id=tenant_id, location_id=loc.id, code="KASSA2", name="Kassa 2"),
+            ])
             for sku, name, price, cat in DEMO_PRODUCTS:
                 s.add(Product(tenant_id=tenant_id, sku=sku, name=name,
                               price_cents=price, tax_category=cat))

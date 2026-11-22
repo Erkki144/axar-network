@@ -7,7 +7,7 @@ corrections must be new auditable records, never edits).
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     Date,
@@ -17,6 +17,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
     event,
     text,
@@ -24,8 +25,32 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
 
+class UTCDateTime(TypeDecorator):
+    """Timezone-aware UTC timestamps on every backend.
+
+    SQLite drops tzinfo on round-trip; a naive value read back would then be
+    interpreted in the *host's* local zone by ``astimezone()``. We store naive
+    UTC and always return aware UTC. Naive input is rejected.
+    """
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("naive datetime not allowed; pass an aware UTC datetime")
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        return value.replace(tzinfo=timezone.utc)
+
+
 class Base(DeclarativeBase):
-    pass
+    type_annotation_map = {datetime: UTCDateTime}
 
 
 class Tenant(Base):
@@ -33,6 +58,34 @@ class Tenant(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
+
+
+class Location(Base):
+    __tablename__ = "locations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    code: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(200))
+
+    __table_args__ = (UniqueConstraint("tenant_id", "code"),)
+
+
+class Register(Base):
+    """A physical till. Each register has its own cash drawer sessions."""
+
+    __tablename__ = "registers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"))
+    code: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(200))
+    active: Mapped[bool] = mapped_column(default=True)
+
+    location: Mapped[Location] = relationship(lazy="joined")
+
+    __table_args__ = (UniqueConstraint("tenant_id", "code"),)
 
 
 class TaxRate(Base):
@@ -68,23 +121,29 @@ class DrawerSession(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    register_id: Mapped[int] = mapped_column(ForeignKey("registers.id"), index=True)
     status: Mapped[str] = mapped_column(String(16), default="open")  # open|closed
     opened_by: Mapped[str] = mapped_column(String(64))
-    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    opened_at: Mapped[datetime]
     opening_float_cents: Mapped[int] = mapped_column(Integer)
+    # Running totals, changed ONLY by a conditional UPDATE ... WHERE
+    # status='open' inside the sale transaction (see services._claim_drawer).
+    cash_sales_cents: Mapped[int] = mapped_column(Integer, default=0)
+    sale_count: Mapped[int] = mapped_column(Integer, default=0)
     closed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    cash_sales_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(nullable=True)
     expected_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     counted_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     variance_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    register: Mapped[Register] = relationship(lazy="joined")
+
     __table_args__ = (
-        # At most one open drawer per tenant, enforced by the database.
+        # At most one open drawer per register, enforced by the database.
         Index(
-            "uq_one_open_drawer_per_tenant",
-            "tenant_id",
+            "uq_one_open_drawer_per_register",
+            "register_id",
             unique=True,
             sqlite_where=text("status = 'open'"),
             postgresql_where=text("status = 'open'"),
@@ -98,12 +157,13 @@ class Sale(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
     receipt_no: Mapped[int] = mapped_column(Integer)
-    drawer_session_id: Mapped[int] = mapped_column(ForeignKey("drawer_sessions.id"))
+    register_id: Mapped[int] = mapped_column(ForeignKey("registers.id"), index=True)
+    drawer_session_id: Mapped[int] = mapped_column(ForeignKey("drawer_sessions.id"), index=True)
     cashier_id: Mapped[str] = mapped_column(String(64))
     idempotency_key: Mapped[str] = mapped_column(String(128))
     request_hash: Mapped[str] = mapped_column(String(64))
     correlation_id: Mapped[str] = mapped_column(String(36))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime]
     business_date: Mapped[date] = mapped_column(Date, index=True)
     payment_method: Mapped[str] = mapped_column(String(16), default="cash")
     net_cents: Mapped[int] = mapped_column(Integer)
@@ -117,6 +177,7 @@ class Sale(Base):
     lines: Mapped[list["SaleLine"]] = relationship(
         back_populates="sale", order_by="SaleLine.line_no", lazy="selectin"
     )
+    register: Mapped[Register] = relationship(lazy="selectin")
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "idempotency_key", name="uq_sale_idempotency"),
@@ -157,7 +218,7 @@ class OutboxEvent(Base):
     type: Mapped[str] = mapped_column(String(64))
     version: Mapped[int] = mapped_column(Integer)
     source: Mapped[str] = mapped_column(String(64))
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    occurred_at: Mapped[datetime]
     correlation_id: Mapped[str] = mapped_column(String(36))
     payload: Mapped[str] = mapped_column(Text)  # canonical JSON
     payload_hash: Mapped[str] = mapped_column(String(64))

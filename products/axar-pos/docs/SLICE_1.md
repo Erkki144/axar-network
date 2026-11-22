@@ -62,8 +62,9 @@ Slice 1 (now):
 2. Lookups by ID include `tenant_id` in the WHERE clause, so another tenant's
    record returns **404**, indistinguishable from non-existent (no
    enumeration oracle).
-3. Uniqueness (idempotency key, receipt number, SKU, open drawer) is per
-   tenant.
+3. Uniqueness (idempotency key, receipt number, SKU, location/register code)
+   is per tenant; the open-drawer rule is per register. A register id from
+   another tenant behaves as non-existent (404) for open, sell and read.
 4. Identity comes from `X-Tenant-ID` / `X-Cashier-ID` **only** when
    `AXAR_POS_DEMO_IDENTITY=1`. Default is off → tenant APIs answer 503. There
    is no implicit demo identity.
@@ -81,15 +82,78 @@ Next (#2):
 4. Role checks: cashier (sell, open drawer), manager (close drawer with
    variance, reports), owner (catalog).
 
+## Review round 1 (P1 items from AION on PR #7)
+
+### Tenant → location → register → drawer session
+
+`locations` and `registers` tables (tenant-scoped). Drawer sessions belong to a
+register; the DB enforces **one open drawer per register** (partial unique
+index), so several registers at one location run independent drawers and
+reconciliations. Sales record `register_id` and `drawer_session_id`; the
+request hash includes `register_id`, so an idempotency key cannot be replayed
+onto another register. Daily report has a `by_register` breakdown; receipts
+show location and register.
+
+### Sale vs close race — what is fixed and how it is proven
+
+Before: `close_drawer` summed sales, then flipped the status in a separate
+step; `create_cash_sale` read "drawer open" and later inserted. A sale could
+commit into a drawer that had just been closed, and the closed `expected`
+could miss it.
+
+Now, two layers:
+
+1. **Conditional claim (DB-agnostic, the real guard).** Inside the sale
+   transaction: `UPDATE drawer_sessions SET cash_sales_cents += due,
+   sale_count += 1 WHERE id=? AND tenant_id=? AND status='open'`. Zero rows →
+   rollback, 409 `no_open_drawer`, nothing written. Close is one
+   `UPDATE … SET status='closed', expected = float + cash_sales_cents …
+   WHERE status='open'`, so expected is computed atomically with the status
+   flip. After closing, the running totals are compared with the immutable
+   ledger (`Σ sales.cash_due`, count); a mismatch rolls back with 500
+   `ledger_mismatch` and the drawer stays open for a human.
+2. **SQLite write serialization.** Every SQLite transaction starts with
+   `BEGIN IMMEDIATE` (pysqlite's own deferred BEGIN disabled), so writers
+   cannot interleave at all on the local store.
+
+Evidence:
+
+- `test_stale_open_drawer_read_cannot_commit_into_closed_drawer` forces the
+  exact bad interleaving (sale reads "open" → close commits → sale claims).
+  **Mutation check:** with the claim guard replaced by `return True`, this
+  test fails; with the guard it passes.
+- `test_parallel_sales_vs_close_keep_drawer_consistent` (5 variants): 12
+  parallel sales + 1 close; asserts every accepted sale is in the closed
+  drawer's totals, rejected ones are 409 and absent from the ledger, and no
+  ledger sale is timestamped after the close. Note: on SQLite this test also
+  passes *without* the claim guard, because `BEGIN IMMEDIATE` already
+  serializes — it proves end-to-end consistency, not the guard itself.
+- `test_close_refuses_when_running_total_disagrees_with_ledger`.
+
+**Remaining risk (PostgreSQL, not yet tested):** the claim relies on
+PostgreSQL row locking plus READ COMMITTED re-evaluation of the `WHERE` after a
+concurrent update commits. That is documented PostgreSQL behaviour, but it is
+**not exercised by CI** until #2 adds a PostgreSQL service container. #2 must
+run the concurrency tests against PostgreSQL before any multi-process
+deployment.
+
+### Timezone fix
+
+SQLite drops `tzinfo`; values read back were naive and `astimezone()` then
+used the **host's** zone (wrong receipt time on any non-UTC server). New
+`UTCDateTime` column type stores UTC and always returns aware UTC, and it
+rejects naive input. Test renders a receipt with `TZ=America/New_York` and
+still gets Tallinn time.
+
 ## Known limitations
 
-- Drawer close vs in-flight sale is not serialized: a sale that commits
-  between "compute expected" and "close" could be attributed to a closed
-  drawer. Fix in #3 with `SELECT … FOR UPDATE` on PostgreSQL.
-- Receipt numbering uses `max+1` guarded by a unique index; a collision
-  returns 409 and the client retries with the same key. Use a per-tenant
-  sequence row on PostgreSQL.
-- Schema is created with `create_all`; no migrations yet.
+- Receipt numbering is per tenant via `max+1` guarded by a unique index
+  (serialized on SQLite). Use a per-tenant (or per-register, if fiscal rules
+  require) sequence row on PostgreSQL.
+- SQLite `BEGIN IMMEDIATE` also serializes read requests; fine for a local
+  single-site demo, not a production pattern.
+- Schema is created with `create_all`; no migrations yet. **Delete an old
+  local `axar_pos.db`** created before review round 1 (schema changed).
 - VAT rates and the 5-cent cash rounding rule must be confirmed by an
   accountant before any real use.
 

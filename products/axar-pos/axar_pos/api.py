@@ -30,12 +30,17 @@ class SaleLineIn(Strict):
     quantity: Qty
 
 
+Id = Annotated[int, Field(strict=True, ge=1)]
+
+
 class CashSaleIn(Strict):
+    register_id: Id
     lines: Annotated[list[SaleLineIn], Field(min_length=1, max_length=200)]
     tendered_cents: Cents
 
 
 class DrawerOpenIn(Strict):
+    register_id: Id
     opening_float_cents: Cents
 
 
@@ -55,6 +60,7 @@ def _sale_out(sale: Sale) -> dict:
     return {
         "id": sale.id,
         "receipt_no": sale.receipt_no,
+        "register_id": sale.register_id,
         "drawer_session_id": sale.drawer_session_id,
         "cashier_id": sale.cashier_id,
         "correlation_id": sale.correlation_id,
@@ -87,25 +93,26 @@ def _sale_out(sale: Sale) -> dict:
     }
 
 
-def _drawer_out(d: DrawerSession, cash_sales_so_far: int | None = None) -> dict:
-    out = {
+def _drawer_out(d: DrawerSession) -> dict:
+    return {
         "id": d.id,
+        "register_id": d.register_id,
         "status": d.status,
         "opened_by": d.opened_by,
         "opened_at": d.opened_at.isoformat(),
         "opening_float_cents": d.opening_float_cents,
         "closed_by": d.closed_by,
         "closed_at": d.closed_at.isoformat() if d.closed_at else None,
+        "sale_count": d.sale_count,
         "cash_sales_cents": d.cash_sales_cents,
-        "expected_cents": d.expected_cents,
+        # While open: running expectation. Once closed: frozen at close.
+        "expected_cents": d.expected_cents
+        if d.status == "closed"
+        else d.opening_float_cents + d.cash_sales_cents,
         "counted_cents": d.counted_cents,
         "variance_cents": d.variance_cents,
         "note": d.note,
     }
-    if d.status == "open" and cash_sales_so_far is not None:
-        out["cash_sales_cents"] = cash_sales_so_far
-        out["expected_cents"] = d.opening_float_cents + cash_sales_so_far
-    return out
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -167,18 +174,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for p in services.list_products(s, who.tenant_id)
         ]
 
-    @app.get("/api/v1/drawer/current")
-    def drawer_current(who: Who, s: Db):
-        d = services.get_open_drawer(s, who.tenant_id)
-        if d is None:
-            return {"drawer": None}
-        return {"drawer": _drawer_out(d, services.drawer_cash_sales(s, who.tenant_id, d.id))}
+    @app.get("/api/v1/registers")
+    def registers(who: Who, s: Db):
+        out = []
+        for r in services.list_registers(s, who.tenant_id):
+            d = services.get_open_drawer(s, who.tenant_id, r.id)
+            out.append({
+                "id": r.id, "code": r.code, "name": r.name,
+                "location": {"id": r.location.id, "code": r.location.code, "name": r.location.name},
+                "open_drawer": _drawer_out(d) if d else None,
+            })
+        return out
+
+    @app.get("/api/v1/registers/{register_id}/drawer")
+    def drawer_current(register_id: int, who: Who, s: Db):
+        services.get_register(s, who.tenant_id, register_id)
+        d = services.get_open_drawer(s, who.tenant_id, register_id)
+        return {"drawer": _drawer_out(d) if d else None}
+
+    @app.get("/api/v1/drawer/{drawer_id}")
+    def drawer_get(drawer_id: int, who: Who, s: Db):
+        return _drawer_out(services.get_drawer(s, who.tenant_id, drawer_id))
 
     @app.post("/api/v1/drawer/open", status_code=201)
     def drawer_open(body: DrawerOpenIn, who: Who, s: Db):
-        d = services.open_drawer(s, who.tenant_id, who.cashier_id,
+        d = services.open_drawer(s, who.tenant_id, body.register_id, who.cashier_id,
                                  body.opening_float_cents, settings.clock())
-        return _drawer_out(d, 0)
+        return _drawer_out(d)
 
     @app.post("/api/v1/drawer/{drawer_id}/close")
     def drawer_close(drawer_id: int, body: DrawerCloseIn, who: Who, s: Db):
@@ -196,6 +218,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         sale, replayed = services.create_cash_sale(
             s,
             tenant_id=who.tenant_id,
+            register_id=body.register_id,
             cashier_id=who.cashier_id,
             idempotency_key=idempotency_key,
             lines=[services.LineRequest(ln.product_id, ln.quantity) for ln in body.lines],

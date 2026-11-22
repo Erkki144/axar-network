@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from axar_pos.api import create_app
 from axar_pos.config import Settings
-from axar_pos.models import Product, Tenant
+from axar_pos.models import Location, Product, Register, Tenant
 
 
 class Clock:
@@ -48,6 +48,15 @@ def app(settings):
                     tax_category="reduced"),
             Product(tenant_id="t-b", sku="B-SECRET", name="B toode", price_cents=1000),
         ])
+        la = Location(tenant_id="t-a", code="L1", name="Kohvik A kesklinn")
+        lb = Location(tenant_id="t-b", code="L1", name="Pood B")
+        s.add_all([la, lb])
+        s.flush()
+        s.add_all([
+            Register(tenant_id="t-a", location_id=la.id, code="R1", name="Kassa 1"),
+            Register(tenant_id="t-a", location_id=la.id, code="R2", name="Kassa 2"),
+            Register(tenant_id="t-b", location_id=lb.id, code="R1", name="B kassa"),
+        ])
     return app
 
 
@@ -67,15 +76,25 @@ class Api:
     def product_id(self, sku: str) -> int:
         return next(p["id"] for p in self.get("/api/v1/products").json() if p["sku"] == sku)
 
-    def open_drawer(self, float_cents=5000):
-        r = self.post("/api/v1/drawer/open", {"opening_float_cents": float_cents})
+    def register_id(self, code: str = "R1") -> int:
+        return next(r["id"] for r in self.get("/api/v1/registers").json() if r["code"] == code)
+
+    def open_drawer(self, float_cents=5000, register="R1"):
+        r = self.post("/api/v1/drawer/open", {"register_id": self.register_id(register),
+                                              "opening_float_cents": float_cents})
         assert r.status_code == 201, r.text
         return r.json()
 
-    def sell(self, lines, tendered, key=None):
-        body = {"lines": [{"product_id": self.product_id(sku), "quantity": q} for sku, q in lines],
+    def drawer(self, register="R1"):
+        return self.get(f"/api/v1/registers/{self.register_id(register)}/drawer").json()["drawer"]
+
+    def sale_body(self, lines, tendered, register="R1"):
+        return {"register_id": self.register_id(register),
+                "lines": [{"product_id": self.product_id(sku), "quantity": q} for sku, q in lines],
                 "tendered_cents": tendered}
-        return self.post("/api/v1/sales/cash", body,
+
+    def sell(self, lines, tendered, key=None, register="R1"):
+        return self.post("/api/v1/sales/cash", self.sale_body(lines, tendered, register),
                          headers={"Idempotency-Key": key or str(uuid.uuid4())})
 
 

@@ -82,14 +82,30 @@ def test_insufficient_tender_rejected_and_nothing_written(a, app):
 )
 def test_rejects_floats_strings_and_client_prices(a, body):
     a.open_drawer()
+    body = {**body, "register_id": a.register_id()}
     r = a.post("/api/v1/sales/cash", body, headers={"Idempotency-Key": "k-validation-1"})
+    assert r.status_code == 422
+
+
+def test_valid_body_baseline_for_validation_cases(a):
+    """Guards the test above: the same shape with valid values succeeds."""
+    a.open_drawer()
+    body = {"register_id": a.register_id(),
+            "lines": [{"product_id": a.product_id("KOHV"), "quantity": 1}], "tendered_cents": 250}
+    assert a.post("/api/v1/sales/cash", body,
+                  headers={"Idempotency-Key": "k-validation-ok"}).status_code == 201
+
+
+def test_register_id_required(a):
+    a.open_drawer()
+    body = {"lines": [{"product_id": a.product_id("KOHV"), "quantity": 1}], "tendered_cents": 250}
+    r = a.post("/api/v1/sales/cash", body, headers={"Idempotency-Key": "k-no-register"})
     assert r.status_code == 422
 
 
 def test_idempotency_key_required(a):
     a.open_drawer()
-    r = a.post("/api/v1/sales/cash", {"lines": [{"product_id": 1, "quantity": 1}],
-                                       "tendered_cents": 250})
+    r = a.post("/api/v1/sales/cash", a.sale_body([("KOHV", 1)], 250))
     assert r.status_code == 422
 
 
@@ -179,8 +195,7 @@ def test_concurrent_retries_with_same_key_create_one_sale(a, app):
     from concurrent.futures import ThreadPoolExecutor
 
     a.open_drawer()
-    pid = a.product_id("KOHV")
-    body = {"lines": [{"product_id": pid, "quantity": 1}], "tendered_cents": 250}
+    body = a.sale_body([("KOHV", 1)], 250)
 
     def fire(_):
         return a.post("/api/v1/sales/cash", body, headers={"Idempotency-Key": "storm-key-0001"})

@@ -4,9 +4,10 @@ from axar_pos.config import Settings
 from axar_pos.services import business_date_for
 
 
-def test_cannot_open_two_drawers(a):
+def test_cannot_open_two_drawers_on_same_register(a):
     a.open_drawer()
-    r = a.post("/api/v1/drawer/open", {"opening_float_cents": 0})
+    r = a.post("/api/v1/drawer/open", {"register_id": a.register_id("R1"),
+                                       "opening_float_cents": 0})
     assert r.status_code == 409
     assert r.json()["error"] == "drawer_already_open"
 
@@ -15,8 +16,9 @@ def test_drawer_reconciliation_balanced(a):
     d = a.open_drawer(5000)
     a.sell([("KOHV", 2), ("SAI", 1)], 1000)   # cash due 7.00
     a.sell([("KOHV", 1)], 250)                 # 2.50
-    cur = a.get("/api/v1/drawer/current").json()["drawer"]
+    cur = a.drawer()
     assert cur["expected_cents"] == 5000 + 700 + 250
+    assert cur["sale_count"] == 2
 
     r = a.post(f"/api/v1/drawer/{d['id']}/close", {"counted_cents": 5950})
     assert r.status_code == 200, r.text

@@ -10,12 +10,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import Settings
-from .models import DrawerSession, OutboxEvent, Product, Sale, SaleLine, TaxRate
+from .models import DrawerSession, OutboxEvent, Product, Register, Sale, SaleLine, TaxRate
 from .money import format_eur, round_cash, vat_from_gross
 
 
@@ -58,6 +58,11 @@ class InsufficientTender(DomainError):
 class TaxRateMissing(DomainError):
     status_code = 500
     code = "tax_rate_missing"
+
+
+class LedgerMismatch(DomainError):
+    status_code = 500
+    code = "ledger_mismatch"
 
 
 # --------------------------------------------------------------------------- time
@@ -108,45 +113,79 @@ def tax_rate_for(s: Session, category: str, on: date) -> int:
 # -------------------------------------------------------------------------- drawer
 
 
-def get_open_drawer(s: Session, tenant_id: str) -> DrawerSession | None:
+def list_registers(s: Session, tenant_id: str) -> list[Register]:
+    return list(
+        s.scalars(
+            select(Register)
+            .where(Register.tenant_id == tenant_id, Register.active.is_(True))
+            .order_by(Register.code)
+        )
+    )
+
+
+def get_register(s: Session, tenant_id: str, register_id: int) -> Register:
+    r = s.scalar(
+        select(Register).where(
+            Register.id == register_id,
+            Register.tenant_id == tenant_id,
+            Register.active.is_(True),
+        )
+    )
+    if r is None:
+        raise NotFound("register not found")
+    return r
+
+
+def get_open_drawer(s: Session, tenant_id: str, register_id: int) -> DrawerSession | None:
     return s.scalar(
         select(DrawerSession).where(
-            DrawerSession.tenant_id == tenant_id, DrawerSession.status == "open"
+            DrawerSession.tenant_id == tenant_id,
+            DrawerSession.register_id == register_id,
+            DrawerSession.status == "open",
         )
     )
 
 
 def open_drawer(
-    s: Session, tenant_id: str, cashier_id: str, float_cents: int, now: datetime
+    s: Session,
+    tenant_id: str,
+    register_id: int,
+    cashier_id: str,
+    float_cents: int,
+    now: datetime,
 ) -> DrawerSession:
-    if get_open_drawer(s, tenant_id) is not None:
-        raise DrawerAlreadyOpen("a cash drawer session is already open")
+    get_register(s, tenant_id, register_id)
+    if get_open_drawer(s, tenant_id, register_id) is not None:
+        raise DrawerAlreadyOpen("this register already has an open drawer session")
     d = DrawerSession(
         tenant_id=tenant_id,
+        register_id=register_id,
         opened_by=cashier_id,
         opened_at=now,
         opening_float_cents=float_cents,
+        cash_sales_cents=0,
+        sale_count=0,
         status="open",
     )
     s.add(d)
     try:
         s.commit()
-    except IntegrityError:  # concurrent open lost the race
+    except IntegrityError:  # concurrent open on the same register lost the race
         s.rollback()
-        raise DrawerAlreadyOpen("a cash drawer session is already open") from None
+        raise DrawerAlreadyOpen("this register already has an open drawer session") from None
     return d
 
 
-def drawer_cash_sales(s: Session, tenant_id: str, drawer_id: int) -> int:
-    return int(
-        s.scalar(
-            select(func.coalesce(func.sum(Sale.cash_due_cents), 0)).where(
-                Sale.tenant_id == tenant_id,
-                Sale.drawer_session_id == drawer_id,
-                Sale.payment_method == "cash",
-            )
+def ledger_cash_sales(s: Session, tenant_id: str, drawer_id: int) -> tuple[int, int]:
+    """(Σ cash_due, count) recomputed from the immutable sales ledger."""
+    total, n = s.execute(
+        select(func.coalesce(func.sum(Sale.cash_due_cents), 0), func.count(Sale.id)).where(
+            Sale.tenant_id == tenant_id,
+            Sale.drawer_session_id == drawer_id,
+            Sale.payment_method == "cash",
         )
-    )
+    ).one()
+    return int(total), int(n)
 
 
 def get_drawer(s: Session, tenant_id: str, drawer_id: int) -> DrawerSession:
@@ -160,6 +199,31 @@ def get_drawer(s: Session, tenant_id: str, drawer_id: int) -> DrawerSession:
     return d
 
 
+def _claim_drawer(s: Session, tenant_id: str, drawer_id: int, cash_due: int) -> bool:
+    """Atomically add a sale to a drawer *only if it is still open*.
+
+    This single conditional UPDATE is the concurrency guard between sales and
+    close: on PostgreSQL it takes the row lock and, under READ COMMITTED,
+    re-evaluates ``status='open'`` after a concurrent close commits, so it
+    matches 0 rows. On SQLite writers are already serialized (BEGIN
+    IMMEDIATE). Either way a sale can never land in a closed drawer.
+    """
+    res = s.execute(
+        update(DrawerSession)
+        .where(
+            DrawerSession.id == drawer_id,
+            DrawerSession.tenant_id == tenant_id,
+            DrawerSession.status == "open",
+        )
+        .values(
+            cash_sales_cents=DrawerSession.cash_sales_cents + cash_due,
+            sale_count=DrawerSession.sale_count + 1,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return res.rowcount == 1
+
+
 def close_drawer(
     s: Session,
     tenant_id: str,
@@ -169,18 +233,46 @@ def close_drawer(
     note: str | None,
     now: datetime,
 ) -> DrawerSession:
-    d = get_drawer(s, tenant_id, drawer_id)
-    if d.status != "open":
+    get_drawer(s, tenant_id, drawer_id)  # 404 for other tenants
+    # Atomic close: expected is computed from the running total *inside* the
+    # same UPDATE that flips the status, so no sale can slip in between.
+    res = s.execute(
+        update(DrawerSession)
+        .where(
+            DrawerSession.id == drawer_id,
+            DrawerSession.tenant_id == tenant_id,
+            DrawerSession.status == "open",
+        )
+        .values(
+            status="closed",
+            closed_by=cashier_id,
+            closed_at=now,
+            note=note,
+            counted_cents=counted_cents,
+            expected_cents=DrawerSession.opening_float_cents + DrawerSession.cash_sales_cents,
+            variance_cents=counted_cents
+            - (DrawerSession.opening_float_cents + DrawerSession.cash_sales_cents),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if res.rowcount != 1:
+        s.rollback()
         raise Conflict("drawer session is already closed")
-    cash_sales = drawer_cash_sales(s, tenant_id, d.id)
-    d.cash_sales_cents = cash_sales
-    d.expected_cents = d.opening_float_cents + cash_sales
-    d.counted_cents = counted_cents
-    d.variance_cents = counted_cents - d.expected_cents
-    d.closed_by = cashier_id
-    d.closed_at = now
-    d.note = note
-    d.status = "closed"
+
+    d = s.scalar(
+        select(DrawerSession)
+        .where(DrawerSession.id == drawer_id)
+        .execution_options(populate_existing=True)
+    )
+    # Invariant: running total must equal the immutable ledger. If not, refuse
+    # to close (rollback) — a human must investigate.
+    ledger_total, ledger_n = ledger_cash_sales(s, tenant_id, drawer_id)
+    if (ledger_total, ledger_n) != (d.cash_sales_cents, d.sale_count):
+        s.rollback()
+        raise LedgerMismatch(
+            f"drawer running total {d.cash_sales_cents}/{d.sale_count} != "
+            f"ledger {ledger_total}/{ledger_n}"
+        )
     s.commit()
     return d
 
@@ -194,10 +286,11 @@ class LineRequest:
     quantity: int
 
 
-def _request_hash(lines: list[LineRequest], tendered_cents: int) -> str:
+def _request_hash(register_id: int, lines: list[LineRequest], tendered_cents: int) -> str:
     return _sha256(
         _canonical(
             {
+                "register_id": register_id,
                 "payment_method": "cash",
                 "tendered_cents": tendered_cents,
                 "lines": [[ln.product_id, ln.quantity] for ln in lines],
@@ -224,6 +317,7 @@ def create_cash_sale(
     s: Session,
     *,
     tenant_id: str,
+    register_id: int,
     cashier_id: str,
     idempotency_key: str,
     lines: list[LineRequest],
@@ -231,20 +325,21 @@ def create_cash_sale(
     settings: Settings,
     now: datetime,
 ) -> tuple[Sale, bool]:
-    """Create a cash sale. Returns ``(sale, replayed)``.
+    """Create a cash sale on one register. Returns ``(sale, replayed)``.
 
     A retry with the same key and identical body returns the original sale and
     creates nothing. The same key with a different body is a 409.
     """
-    req_hash = _request_hash(lines, tendered_cents)
+    req_hash = _request_hash(register_id, lines, tendered_cents)
 
     existing = _find_by_key(s, tenant_id, idempotency_key)
     if existing is not None:
         return _replay_or_conflict(existing, req_hash)
 
-    drawer = get_open_drawer(s, tenant_id)
+    get_register(s, tenant_id, register_id)
+    drawer = get_open_drawer(s, tenant_id, register_id)
     if drawer is None:
-        raise NoOpenDrawer("open the cash drawer before selling")
+        raise NoOpenDrawer("open this register's cash drawer before selling")
 
     bdate = business_date_for(now, settings)
     sale_id = str(uuid.uuid4())
@@ -298,10 +393,17 @@ def create_cash_sale(
         + 1
     )
 
+    # The read above may be stale (another request may have closed the drawer
+    # since). The conditional UPDATE is authoritative.
+    if not _claim_drawer(s, tenant_id, drawer.id, cash_due):
+        s.rollback()
+        raise NoOpenDrawer("the cash drawer was closed; sale not recorded")
+
     sale = Sale(
         id=sale_id,
         tenant_id=tenant_id,
         receipt_no=receipt_no,
+        register_id=register_id,
         drawer_session_id=drawer.id,
         cashier_id=cashier_id,
         idempotency_key=idempotency_key,
@@ -338,6 +440,8 @@ def _sale_completed_event(sale: Sale, lines: list[SaleLine], now: datetime) -> O
     payload = {
         "sale_id": sale.id,
         "receipt_no": sale.receipt_no,
+        "register_id": sale.register_id,
+        "drawer_session_id": sale.drawer_session_id,
         "business_date": sale.business_date.isoformat(),
         "payment_method": sale.payment_method,
         "total_cents": sale.total_cents,
@@ -391,7 +495,13 @@ def list_sales(s: Session, tenant_id: str, business_date: date | None = None) ->
 def daily_summary(s: Session, tenant_id: str, business_date: date) -> dict:
     sales = list_sales(s, tenant_id, business_date)
     by_rate: dict[int, dict[str, int]] = {}
+    by_register: dict[int, dict[str, int]] = {}
     for sale in sales:
+        r = by_register.setdefault(sale.register_id, {"sale_count": 0, "total_cents": 0,
+                                                      "cash_collected_cents": 0})
+        r["sale_count"] += 1
+        r["total_cents"] += sale.total_cents
+        r["cash_collected_cents"] += sale.cash_due_cents
         for ln in sale.lines:
             b = by_rate.setdefault(ln.vat_rate_bp, {"gross_cents": 0, "vat_cents": 0, "net_cents": 0})
             b["gross_cents"] += ln.gross_cents
@@ -408,6 +518,7 @@ def daily_summary(s: Session, tenant_id: str, business_date: date) -> dict:
         "first_receipt_no": sales[0].receipt_no if sales else None,
         "last_receipt_no": sales[-1].receipt_no if sales else None,
         "vat_breakdown": [{"vat_rate_bp": r, **v} for r, v in sorted(by_rate.items())],
+        "by_register": [{"register_id": r, **v} for r, v in sorted(by_register.items())],
     }
 
 
@@ -422,6 +533,7 @@ def render_receipt_text(sale: Sale, tenant_name: str, settings: Settings) -> str
         "SIMULEERITUD TŠEKK / DEMO".center(width),
         "-" * width,
         f"Tšekk nr {sale.receipt_no}",
+        f"{sale.register.location.name} · {sale.register.name}"[:width],
         f"Aeg {local:%d.%m.%Y %H:%M}",
         f"Kassiir {sale.cashier_id}",
         "-" * width,

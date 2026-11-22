@@ -9,11 +9,12 @@ AXAR POS is a separate future product from the existing AXAR Network content-mar
 - Estonian touchscreen cash-sale UI at `/`
 - FastAPI + SQLAlchemy; server-owned prices, integer-cent money, versioned VAT, 5-cent cash rounding
 - Idempotent cash sales, sequential receipts, immutable sale snapshots, transactional outbox event
-- Cash drawer open/close with expected vs counted variance
+- Tenant → location → register → drawer session; independent drawers per register
+- Cash drawer open/close with expected vs counted variance, race-safe against concurrent sales
 - Europe/Tallinn business-day report with VAT breakdown
 - Tenant-scoped queries with cross-tenant tests; demo identity must be switched on explicitly
 
-Details, tenant-boundary plan, limitations and rollback: [`docs/SLICE_1.md`](docs/SLICE_1.md).
+Details, tenant-boundary plan, limitations and rollback: [`docs/SLICE_1.md`](docs/SLICE_1.md). Rules for coding agents: [`AGENTS.md`](AGENTS.md).
 
 The earlier Sprint 0 ZIP (`axar-pos-sprint0.zip`) is **not** in this repository; Slice 1 was written from the architecture docs.
 
@@ -51,10 +52,12 @@ AXAR_POS_DEMO_IDENTITY=1 AXAR_POS_SEED_DEMO=1 uvicorn axar_pos.main:app --host 1
 | --- | --- | --- |
 | GET | `/health` | no identity required |
 | GET | `/api/v1/products` | tenant catalog |
-| GET | `/api/v1/drawer/current` | open drawer with running expected cash |
-| POST | `/api/v1/drawer/open` | `{opening_float_cents}` |
-| POST | `/api/v1/drawer/{id}/close` | `{counted_cents, note?}` → variance |
-| POST | `/api/v1/sales/cash` | header `Idempotency-Key`; `{lines:[{product_id, quantity}], tendered_cents}` |
+| GET | `/api/v1/registers` | registers with location and open drawer |
+| GET | `/api/v1/registers/{id}/drawer` | open drawer with running expected cash |
+| GET | `/api/v1/drawer/{id}` | drawer session (open or closed) |
+| POST | `/api/v1/drawer/open` | `{register_id, opening_float_cents}` |
+| POST | `/api/v1/drawer/{id}/close` | `{counted_cents, note?}` → variance; refuses on ledger mismatch |
+| POST | `/api/v1/sales/cash` | header `Idempotency-Key`; `{register_id, lines:[{product_id, quantity}], tendered_cents}` |
 | GET | `/api/v1/sales[?business_date=]` | |
 | GET | `/api/v1/sales/{id}` | |
 | GET | `/api/v1/sales/{id}/receipt.txt` | Estonian plain-text receipt |
