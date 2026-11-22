@@ -55,3 +55,25 @@ payload in Claude's PR #7, verifies the SHA-256 checksum and validates sale
 amounts. It constructs a journal-preview input, without any network or posting.
 This adapter must run *only* on authenticated trusted internal events: a hash is
 an integrity check, **not** a digital signature or authorization mechanism.
+
+
+## Refunding (PR #7 Slice 2) — new v0.4 adapter
+
+`from_pos_refund_outbox_v1(...)` accepts only the exact trusted, checksum-verified
+`pos.refund.completed` v1 *simulated cash* event, rejecting malformed money,
+negative net line allocations, wrong event versions, unsupported payment types
+and inaccurate line totals. `preview_cash_refund_journal(...)` produces a
+**balanced, non-posting accounting reversal preview**. It does not issue a
+payment or contact an accounting provider.
+
+**Important issue for Claude:** partial-return VAT cannot always be computed
+independently per one-unit refund. For a sale of 100 × €0.01, original VAT is
+€0.19 at 24%; if 99 units are refunded one at a time with zero VAT, allocating
+remaining €0.19 VAT to the final €0.01 refund produces **negative €0.18 net**.
+Our adapter rejects this, but the POS refund allocation itself needs a fix.
+Cash rounding across many partial refunds also needs cumulative allocation to
+ensure a fully reversed sale repays exactly the originally collected amount.
+
+**Not yet proven:** cumulative per-sale refunded VAT/quantity/cash caps across
+all separate events, ledger mapping approval, verified transport identity,
+PostgreSQL concurrency, external bank/payment/accounting integration.
