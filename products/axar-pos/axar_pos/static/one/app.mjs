@@ -16,6 +16,10 @@ const DEMO_MANAGER = { 'X-Role': 'manager' };
 const TIMEOUT_MS = 8000;
 const LS_REGISTER = 'axar.one.register';
 const LS_DEMO = 'axar.one.demo.v1';
+// Crash-safe journal of the ONE in-flight money operation (sale or refund).
+// Written BEFORE the POST, cleared only after a definitive server answer.
+const LS_PENDING = 'axar.one.pending.v1';
+const PENDING_PATHS = [/^\/api\/v1\/sales\/cash$/, /^\/api\/v1\/sales\/[0-9a-f-]{36}\/refunds$/];
 const TABLES = ['Laud 01', 'Laud 02', 'Laud 03', 'Laud 04', 'Terrass 01', 'Terrass 02', 'Terrass 03', 'Terrass 04'];
 const ICONS = { Kohv: ['☕', 'sand'], Toit: ['🥐', 'rose'], Joogid: ['💧', 'sky'], Muud: ['📦', 'lilac'] };
 
@@ -66,6 +70,8 @@ const S = {
   quote: null, quoteSig: '', quoteError: '', quoteSeq: 0, quoteTimer: null,
   payment: null,              // pending/last payment attempt
   refund: null,               // pending refund attempt
+  recovery: null,             // blocking recovery of a persisted pending op
+  storageOk: true,            // false => money operations are blocked
   online: true,
 };
 let demo = loadDemo();
@@ -101,7 +107,51 @@ function cartLines(cart = currentCart()) {
 }
 const requestLines = (lines) => lines.map((x) => ({ product_id: x.product.id, quantity: x.quantity }));
 const cartSig = (lines) => JSON.stringify([S.registerId, requestLines(lines)]);
-const paymentLocked = () => S.payment && ['sending', 'unconfirmed'].includes(S.payment.state);
+const paymentLocked = () => Boolean(
+  (S.payment && ['sending', 'unconfirmed'].includes(S.payment.state))
+  || (S.refund && ['sending', 'unconfirmed'].includes(S.refund.state))
+  || S.recovery,
+);
+
+// ------------------------------------------------------- pending-op journal
+
+function storageWorks() {
+  try {
+    localStorage.setItem('axar.one.probe', '1');
+    localStorage.removeItem('axar.one.probe');
+    return true;
+  } catch { return false; }
+}
+
+/** {state:'none'} | {state:'ok', rec} | {state:'corrupt'} */
+function readPending() {
+  let raw;
+  try { raw = localStorage.getItem(LS_PENDING); } catch { return { state: 'none' }; }
+  if (raw == null) return { state: 'none' };
+  try {
+    const rec = JSON.parse(raw);
+    const ok = rec && rec.v === 1 && ['sale', 'refund'].includes(rec.op)
+      && typeof rec.key === 'string' && rec.key.length >= 8 && rec.key.length <= 128
+      && typeof rec.path === 'string' && PENDING_PATHS.some((re) => re.test(rec.path))
+      && rec.body && typeof rec.body === 'object' && Number.isSafeInteger(rec.body.register_id);
+    return ok ? { state: 'ok', rec } : { state: 'corrupt' };
+  } catch { return { state: 'corrupt' }; }
+}
+
+/** Throws if the record cannot be stored: the caller must then NOT send. */
+function writePending(rec) {
+  const raw = JSON.stringify({ v: 1, ...rec });
+  localStorage.setItem(LS_PENDING, raw);
+  if (localStorage.getItem(LS_PENDING) !== raw) throw new Error('verify failed');
+}
+
+function clearPending(key) {
+  try {
+    const cur = readPending();
+    // Only remove our own record (another tab may have written a newer one).
+    if (key == null || (cur.state === 'ok' && cur.rec.key === key) || cur.state === 'corrupt') localStorage.removeItem(LS_PENDING);
+  } catch { /* nothing stored */ }
+}
 
 function setOnline(on) {
   S.online = on;
@@ -217,15 +267,17 @@ function renderTotals() {
   $('rounding').textContent = `${r > 0 ? '+' : ''}${formatEuro(r)}`;
   $('total').textContent = q ? formatEuro(q.cash_due_cents) : lines.length ? '…' : formatEuro(0);
   const state = $('quote-state');
-  state.classList.toggle('bad', Boolean(S.quoteError) || !S.drawer);
-  if (!S.drawer) state.textContent = 'Kassa on suletud – ava kassa, et müüa.';
+  state.classList.toggle('bad', Boolean(S.quoteError) || !S.drawer || !S.storageOk || Boolean(S.recovery));
+  if (!S.storageOk) state.textContent = 'Seadme salvestus ei tööta – makseid ei saa turvaliselt teha (topelttehingu oht).';
+  else if (S.recovery) state.textContent = 'Pooleli tehing ootab lõpetamist.';
+  else if (!S.drawer) state.textContent = 'Kassa on suletud – ava kassa, et müüa.';
   else if (S.quoteError) state.textContent = `Hinda ei saanud serverist: ${S.quoteError}`;
   else if (lines.length && !ready) state.textContent = 'Arvutan serveris…';
   else if (ready) state.textContent = 'Summad arvutas server.';
   else state.textContent = '';
   const pay = $('pay-button');
   const resuming = S.payment?.state === 'unconfirmed' && S.payment.sig === cartSig(lines);
-  pay.disabled = !(S.drawer && ready && lines.length) && !resuming;
+  pay.disabled = !S.storageOk || Boolean(S.recovery) || (!(S.drawer && ready && lines.length) && !resuming);
   pay.firstChild.textContent = resuming ? 'Lõpeta pooleli makse ' : 'Võta sularaha ';
 }
 
@@ -435,6 +487,7 @@ function openModal(build) {
 }
 function closeModal() {
   if (S.payment?.state === 'sending' || S.refund?.state === 'sending') return; // never abandon an in-flight request
+  if (S.recovery) return; // recovery screen is blocking until resolved
   $('modal').hidden = true;
   renderBasket();
   const pay = $('pay-button'); if (!pay.hidden && !pay.disabled) pay.focus();
@@ -593,20 +646,40 @@ async function submitPayment() {
   } else if (!p.key || p.bodySig !== bodySig) {
     p.key = newKey(); p.bodySig = bodySig;
   }
+  // Persist BEFORE sending. If that fails, do not send at all.
+  const blocked = guardJournal(p.key, { op: 'sale', key: p.key, path: '/api/v1/sales/cash', body, headers: {}, cartKey: p.cartKey, createdAt: new Date().toISOString() });
+  if (blocked) { p.state = 'error'; p.error = blocked; p.key = null; p.bodySig = null; renderPayment($('modal-content')); return; }
   p.state = 'sending'; p.error = '';
   renderPayment($('modal-content'));
   try {
     const { data: sale } = await api('/api/v1/sales/cash', { method: 'POST', body, headers: { 'Idempotency-Key': p.key } });
     p.state = 'done'; p.sale = sale;
     clearPaidCart(p.cartKey);
+    clearPending(p.key);
     await showReceipt(sale);
     refreshDrawer();
   } catch (e) {
-    if (isUncertain(e)) { p.state = 'unconfirmed'; p.error = e.message; }
-    else { p.state = 'error'; p.error = e.message; p.key = null; p.bodySig = null; if (e.code === 'no_open_drawer') refreshDrawer(); }
+    if (isUncertain(e)) { p.state = 'unconfirmed'; p.error = e.message; } // journal stays
+    else {
+      clearPending(p.key); // definitive: server did not record it
+      p.state = 'error'; p.error = e.message; p.key = null; p.bodySig = null;
+      if (e.code === 'no_open_drawer') refreshDrawer();
+    }
     if (!$('modal').hidden) renderPayment($('modal-content'));
     renderTotals();
   }
+}
+
+/** Writes the journal record; returns an error text if sending must be blocked. */
+function guardJournal(key, rec) {
+  const cur = readPending();
+  if (cur.state === 'corrupt') return 'seadmes on loetamatu pooleli tehing – laadi leht uuesti';
+  if (cur.state === 'ok' && cur.rec.key !== key) return 'teises aknas või varem on pooleli tehing – lõpeta see enne';
+  try { writePending({ ...rec, registerId: rec.body.register_id }); } catch {
+    S.storageOk = false; renderTotals();
+    return 'seadme salvestus ei tööta, tehingut ei saadetud (topelttehingu oht)';
+  }
+  return null;
 }
 
 function clearPaidCart(key) {
@@ -715,25 +788,116 @@ async function submitRefund() {
   if (r.state === 'unconfirmed') {
     if (bodySig !== r.bodySig) { r.error = 'muutunud tagastust ei saa korrata'; renderRefund($('modal-content')); return; }
   } else if (!r.key || r.bodySig !== bodySig) { r.key = newKey(); r.bodySig = bodySig; }
+  const path = `/api/v1/sales/${r.saleId}/refunds`;
+  const blocked = guardJournal(r.key, { op: 'refund', key: r.key, path, body, headers: DEMO_MANAGER, saleId: r.saleId, createdAt: new Date().toISOString() });
+  if (blocked) { r.state = 'error'; r.error = blocked; r.key = null; r.bodySig = null; renderRefund($('modal-content')); return; }
   r.state = 'sending'; r.error = '';
   renderRefund($('modal-content'));
   try {
-    const { data } = await api(`/api/v1/sales/${r.saleId}/refunds`, { method: 'POST', body, headers: { 'Idempotency-Key': r.key, ...DEMO_MANAGER } });
+    const { data } = await api(path, { method: 'POST', body, headers: { 'Idempotency-Key': r.key, ...DEMO_MANAGER } });
     r.state = 'done'; r.result = data;
-    const c = $('modal-content'); c.replaceChildren();
-    const title = el('h2', null, 'Tagastus kinnitatud'); title.id = 'dialog-title';
-    const amount = el('div', 'amount', `Välja ${formatEuro(data.cash_paid_cents)}`); amount.id = 'refund-paid';
-    const receipt = el('pre', 'receipt', 'Laadin tagastuse tšekki…'); receipt.id = 'refund-receipt';
-    const done = el('button', 'primary-btn', 'Valmis'); done.type = 'button';
-    done.addEventListener('click', () => { S.refund = null; closeModal(); if (S.mode === 'manager') renderManager(); });
-    c.append(title, amount, receipt, done);
-    refreshDrawer();
-    try { receipt.textContent = (await api(`/api/v1/refunds/${data.id}/receipt.txt`)).data; } catch (e) { receipt.textContent = `Tagastus on salvestatud; tšeki laadimine ebaõnnestus (${e.message}).`; }
+    clearPending(r.key);
+    await showRefundResult(data);
   } catch (e) {
-    if (isUncertain(e)) { r.state = 'unconfirmed'; r.error = e.message; }
-    else { r.state = 'error'; r.error = e.message; r.key = null; r.bodySig = null; }
+    if (isUncertain(e)) { r.state = 'unconfirmed'; r.error = e.message; } // journal stays
+    else { clearPending(r.key); r.state = 'error'; r.error = e.message; r.key = null; r.bodySig = null; }
     renderRefund($('modal-content'));
   }
+}
+
+async function showRefundResult(data) {
+  const c = $('modal-content'); c.replaceChildren();
+  const title = el('h2', null, 'Tagastus kinnitatud'); title.id = 'dialog-title';
+  const amount = el('div', 'amount', `Välja ${formatEuro(data.cash_paid_cents)}`); amount.id = 'refund-paid';
+  const receipt = el('pre', 'receipt', 'Laadin tagastuse tšekki…'); receipt.id = 'refund-receipt';
+  const done = el('button', 'primary-btn', 'Valmis'); done.type = 'button';
+  done.addEventListener('click', () => { S.refund = null; closeModal(); if (S.mode === 'manager') renderManager(); });
+  c.append(title, amount, receipt, done);
+  refreshDrawer();
+  try { receipt.textContent = (await api(`/api/v1/refunds/${data.id}/receipt.txt`)).data; } catch (e) { receipt.textContent = `Tagastus on salvestatud; tšeki laadimine ebaõnnestus (${e.message}).`; }
+}
+
+// -------------------------------------------------------------- recovery
+
+/** Blocking screen for a persisted pending operation found on boot or from
+ * another tab. The only ways out are a definitive server answer for the SAME
+ * key and body, or (for an unreadable record) an explicit two-step discard. */
+function showRecovery(found) {
+  S.recovery = found;
+  $('close-modal').hidden = true;
+  openModal((c) => renderRecovery(c));
+  renderTotals();
+}
+
+function renderRecovery(c, note = '', cls = 'unconfirmed') {
+  const found = S.recovery;
+  c.replaceChildren();
+  const box = el('div'); box.id = 'recovery';
+  const title = el('h2', null, found.state === 'corrupt' ? 'Pooleli tehingu kirje on loetamatu'
+    : found.rec.op === 'sale' ? 'Pooleli makse' : 'Pooleli tagastus');
+  title.id = 'dialog-title';
+  box.append(title);
+  if (found.state === 'corrupt') {
+    box.append(stateBox('error', 'Seadmes on pooleli rahatehingu kirje, mida ei saa lugeda. Kontrolli juhi vaates tänaseid müüke ja tagastusi, enne kui kirjest loobud. Uut müüki enne seda ei tehta.'));
+    const discard = el('button', 'secondary-btn', 'Loobu kirjest (kontrollisin)'); discard.type = 'button'; discard.id = 'recover-discard';
+    discard.addEventListener('click', () => {
+      discard.remove();
+      const sure = el('button', 'primary-btn', 'Kinnitan: loobu loetamatust kirjest'); sure.type = 'button'; sure.id = 'recover-discard-confirm';
+      sure.addEventListener('click', () => { clearPending(null); endRecovery(); });
+      box.append(sure);
+    });
+    box.append(discard);
+  } else {
+    const { rec } = found;
+    const what = rec.op === 'sale'
+      ? `Kassa vastuvõetud summa ${formatEuro(rec.body.tendered_cents)}, ${rec.body.lines.length} rida.`
+      : `Tagastus tšekist, ${rec.body.lines.length} rida. Põhjus: ${rec.body.reason}`;
+    box.append(el('p', 'muted', `${what} Alustatud ${new Date(rec.createdAt).toLocaleString('et-EE', { timeZone: 'Europe/Tallinn' })}.`));
+    box.append(stateBox(cls, note || 'Server võis selle tehingu juba salvestada. Ära võta raha uuesti vastu ega maksa välja. Vajuta „Proovi uuesti“ – sama tehingut ei registreerita kaks korda.'));
+    const retry = el('button', 'primary-btn', 'Proovi uuesti (sama tehing)'); retry.type = 'button'; retry.id = 'recover-retry';
+    retry.addEventListener('click', () => recoverPending(retry));
+    box.append(retry);
+  }
+  c.append(box);
+}
+
+async function recoverPending(btn) {
+  const { rec } = S.recovery;
+  btn.disabled = true; btn.textContent = 'Saadan…';
+  try {
+    const { data } = await api(rec.path, { method: 'POST', body: rec.body, headers: { 'Idempotency-Key': rec.key, ...(rec.headers || {}) } });
+    clearPending(rec.key);
+    if (rec.op === 'sale' && rec.cartKey) clearPaidCart(rec.cartKey);
+    if (S.payment?.key === rec.key) S.payment = null;
+    if (S.refund?.key === rec.key) S.refund = null;
+    S.recovery = null; $('close-modal').hidden = false;
+    if (rec.op === 'sale') await showReceipt(data); else await showRefundResult(data);
+  } catch (e) {
+    if (isUncertain(e)) { renderRecovery($('modal-content'), `Server ei vastanud (${e.message}). Proovi hetke pärast uuesti.`); return; }
+    clearPending(rec.key); // definitive: not recorded
+    S.recovery = null; $('close-modal').hidden = false;
+    $('modal-content').replaceChildren(stateBox('error', `Tehingut ei salvestatud: ${e.message}`));
+    renderTotals();
+  }
+}
+
+function endRecovery() {
+  S.recovery = null;
+  $('close-modal').hidden = false;
+  closeModal();
+  renderTotals();
+}
+
+function checkPendingJournal() {
+  if (S.recovery) return;
+  const found = readPending();
+  if (found.state === 'none') return;
+  // Our own in-flight attempt in this tab is handled by its own dialog.
+  if (found.state === 'ok' && (S.payment?.key === found.rec.key || S.refund?.key === found.rec.key)) return;
+  if (found.state === 'ok' && found.rec.registerId && S.registers.some((r) => r.id === found.rec.registerId)) {
+    S.registerId = found.rec.registerId; renderRegisterSelect(); refreshDrawer();
+  }
+  showRecovery(found);
 }
 
 // ------------------------------------------------------------------------ boot
@@ -764,8 +928,10 @@ async function boot() {
   try { saved = Number(localStorage.getItem(LS_REGISTER)); } catch { /* ignore */ }
   S.registerId = S.registers.some((r) => r.id === saved) ? saved : S.registers[0].id;
   renderRegisterSelect();
+  S.storageOk = storageWorks();
   await refreshDrawer();
   activateMode('express');
+  checkPendingJournal(); // crash/reload recovery before any new sale
 }
 
 document.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => activateMode(b.dataset.mode)));
@@ -780,6 +946,12 @@ document.addEventListener('keydown', (e) => {
     const input = $('product-search');
     if (input && document.activeElement !== input) { e.preventDefault(); input.focus(); }
   }
+});
+// Another tab started or finished a money operation.
+window.addEventListener('storage', (e) => {
+  if (e.key !== LS_PENDING) return;
+  if (e.newValue == null) { if (S.recovery) endRecovery(); return; }
+  checkPendingJournal();
 });
 window.addEventListener('offline', () => setOnline(false));
 window.addEventListener('online', () => { setOnline(true); refreshDrawer(); });

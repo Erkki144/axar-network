@@ -53,6 +53,61 @@ simple UI stays at `/classic`). Static files are sent with
   server would also deduplicate it via the same key.
 - Refunds follow the same machine with their own key.
 
+## Review round 1 (AION P0): crash-safe pending operations
+
+**Defect (confirmed):** the idempotency key of an unconfirmed payment or refund
+lived only in page memory. Consider this sequence: the server commits, the
+response is lost, then the tab reloads or crashes. The pending key was gone,
+so the cashier could rebuild the cart and pay again with a new key, a
+**duplicate sale** (or a duplicate cash payout for refunds). The new tests
+below fail on the old code (5 of 6; the sixth passed trivially).
+
+**Fix: a write-ahead journal in `localStorage` (`axar.one.pending.v1`).**
+- **Before** any sale or refund POST, one versioned record is stored with:
+  - operation type, register, API path;
+  - the immutable request body and the Idempotency-Key;
+  - the cart key or sale id, and the timestamp.
+
+  It holds no PII and no card data. It is read back to verify. **If it cannot
+  be written, the request is not sent**, and payments stay disabled while
+  storage is broken.
+- The record is cleared **only** after a definitive server answer: 2xx (cart
+  cleared first) or 4xx (not recorded). Network errors, timeouts and 5xx keep it.
+- **On boot, and when another tab writes it**, a valid record opens a
+  **blocking recovery screen**: it cannot be closed, and sales, register
+  changes and table switches are locked. Its only action re-sends the **same
+  body and key**, so the server either records the operation once or replays
+  the original.
+- An **unreadable record** blocks the till. It can only be discarded through
+  a two-step confirmation, after checking today's sales in the manager view.
+- **Second tab:** both tabs can only retry the same key, so there is never a
+  second record. A tab refuses to start a new operation while another tab's
+  record exists.
+
+Tests in `tests_e2e/test_crash_recovery.py` (7):
+- sale committed → response dropped → **hard reload** → recovery → same key →
+  exactly 1 sale and 1 drawer increment;
+- the same for a refund → exactly 1 payout;
+- a definitive 409 clears the record;
+- a corrupted record blocks until a two-step discard;
+- storage unavailable → the pay button stays locked even after the server quote;
+- storage failing at submit → **no request sent**;
+- second tab recovers, then the first tab retries → still 1 sale.
+
+Mutation checks:
+- no recovery on boot → 4 tests fail;
+- sending despite a failed journal write → 1–2 tests fail.
+
+**Limits of browser-only recovery** (documented, not solved here):
+- The journal is per browser profile. A crash followed by a switch to
+  **another device** cannot be recovered client-side; the cashier must check
+  the manager view.
+- The server-side idempotency key is the real guarantee. A server
+  "operation status by key" endpoint, and server-side open orders, would make
+  recovery device-independent (proposed for the orders slice).
+- A cashier can still clear site data by hand. Nothing in a browser prevents
+  that.
+
 ## Acceptance tests (issue #11) → evidence
 
 Browser tests: `tests_e2e/test_cashier_ui.py`. Each test runs a fresh uvicorn
