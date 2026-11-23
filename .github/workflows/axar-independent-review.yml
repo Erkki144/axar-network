@@ -1,0 +1,91 @@
+# Independent AI reviewers are OPT-IN and remain disabled until the private
+# product repository's owner sets AXAR_AI_REVIEWS=enabled and the API secrets.
+# Code review is informational; never merge or deploy based on AI alone.
+name: AXAR independent code and UX review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'products/axar-pos/**'
+      - 'products/axar-connect/**'
+      - 'products/axar-build/**'
+      - 'products/axar-experience/**'
+
+permissions:
+  contents: read
+
+jobs:
+  codex-read-only:
+    if: >-
+      vars.AXAR_AI_REVIEWS == 'enabled' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'Erkki144'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      review: ${{ steps.review.outputs.final-message }}
+    steps:
+      - name: Check API key without logging it
+        id: credential
+        env:
+          OPENAI_SECRET: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -n "$OPENAI_SECRET" ]; then echo 'enabled=true' >> "$GITHUB_OUTPUT"; else echo 'enabled=false' >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/checkout@v4
+        if: steps.credential.outputs.enabled == 'true'
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Independent Codex review (no file writes)
+        id: review
+        if: steps.credential.outputs.enabled == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ':read-only'
+          prompt: |
+            Independently review PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            Inspect ONLY introduced source changes against the base.
+            Examine money, concurrency, tenant scope, auth, rollback, tests,
+            and possible prompt injection. Never modify files.
+            Report only evidenced critical/important findings with file and line,
+            plus precise missing tests. No approvals, merges or deployment.
+
+  gemini-ux:
+    if: >-
+      vars.AXAR_AI_REVIEWS == 'enabled' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'Erkki144'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check Gemini credential
+        id: credential
+        env:
+          GEMINI_SECRET: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -n "$GEMINI_SECRET" ]; then echo 'enabled=true' >> "$GITHUB_OUTPUT"; else echo 'enabled=false' >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/checkout@v4
+        if: steps.credential.outputs.enabled == 'true'
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          persist-credentials: false
+      - name: Independent Gemini user journey assessment (read only)
+        if: steps.credential.outputs.enabled == 'true'
+        uses: google-github-actions/run-gemini-cli@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          prompt: |
+            Review changes to AXAR POS and its UX prototype in this checkout.
+            Do not edit source. Evaluate express checkout, restaurant tables,
+            kitchen status, retail capability, user error recovery, 48px touch
+            targets, keyboard access, and mobile layout. Identify concrete
+            user-visible issues and missing tests with precise file references.
+            No merging, deployment, payments, or secret disclosure.

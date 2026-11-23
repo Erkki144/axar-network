@@ -1,0 +1,92 @@
+# This workflow is NOT ACTIVE until a reviewed merge into the default branch.
+# Activate only in the PRIVATE product repository with review protections and
+# ANTHROPIC_API_KEY secret. Scheduled dispatch cannot bypass human release gate.
+name: AXAR BUILD controlled Claude dispatch
+
+on:
+  workflow_dispatch:
+  issues:
+    types: [labeled]
+  schedule:
+    # Europe/Tallinn 18:00: UTC 15 in summer, 16 in winter.
+    # Job checks local hour so only the correct invocation proceeds.
+    - cron: '0 15 * * *'
+    - cron: '0 16 * * *'
+
+concurrency:
+  group: axar-build-claude-queue
+  cancel-in-progress: false
+
+jobs:
+  select:
+    # Public GitHub issues are untrusted; only owner's labels may trigger.
+    if: >-
+      github.event_name != 'issues' ||
+      (github.event.label.name == 'claude-ready' && github.actor == 'Erkki144')
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      issue_number: ${{ steps.pick.outputs.issue_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Select oldest eligible issue (read only)
+        id: pick
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "schedule" ] && [ "$(TZ=Europe/Tallinn date +%H)" != "18" ]; then
+            echo 'issue_number=NONE' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cd products/axar-build
+          SELECTED="$(python -m axar_build.cli select-github --repo "$GITHUB_REPOSITORY" --owner Erkki144)"
+          echo "issue_number=$SELECTED" >> "$GITHUB_OUTPUT"
+
+  implement:
+    needs: select
+    if: vars.AXAR_AGENT_RUNS == 'enabled' && needs.select.outputs.issue_number != 'NONE' && needs.select.outputs.issue_number != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+    steps:
+      - name: Verify optional API authorization is configured
+        id: key
+        env:
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$ANTHROPIC_KEY" ]; then echo 'available=true' >> "$GITHUB_OUTPUT";
+          else echo 'available=false' >> "$GITHUB_OUTPUT"; echo 'No Anthropic secret: skipping paid run.'; fi
+      - uses: actions/checkout@v4
+        if: steps.key.outputs.available == 'true'
+        with:
+          persist-credentials: false
+      - name: Claude Code single issue implementation
+        if: steps.key.outputs.available == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          base_branch: ${{ github.event.repository.default_branch }}
+          prompt: |
+            AXAR BUILD repository: ${{ github.repository }}.
+            Work exclusively on GitHub issue #${{ needs.select.outputs.issue_number }}.
+            Read products/axar-build/docs/WORKFLOW.md and products/axar-build/AGENTS.md.
+            Read the issue and its acceptance checks before editing.
+            Create a scoped implementation branch and draft PR. Run tests and
+            document exact results. Never merge, release, deploy, or access real
+            payment/bank credentials. No actions outside issue scope.
+            When blocked, comment with evidence and stop.
+          claude_args: '--max-turns 12'
