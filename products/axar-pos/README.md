@@ -19,6 +19,22 @@ Details, tenant-boundary plan, limitations and rollback: [`docs/SLICE_1.md`](doc
 
 The earlier Sprint 0 ZIP (`axar-pos-sprint0.zip`) is **not** in this repository; Slice 1 was written from the architecture docs.
 
+## AXAR ONE cashier UI (issue #11)
+
+`/one/` serves AION's AXAR ONE design wired to this API: products, registers,
+drawer open/close, server-priced basket (`POST /api/v1/sales/quote`), idempotent
+cash payment with an honest "unconfirmed → retry same key" state, server
+receipts, manager report and partial refunds. Tables and kitchen are DEMO
+(this browser only). The older simple UI is at `/classic`. Details and test
+evidence: [`docs/SLICE_3_UI_INTEGRATION.md`](docs/SLICE_3_UI_INTEGRATION.md).
+
+Browser tests (headless Chromium, fresh server per test):
+
+```bash
+pip install -r requirements-e2e.txt && python -m playwright install chromium
+python -m pytest tests_e2e
+```
+
 ## Run tests
 
 ```bash
@@ -58,6 +74,7 @@ AXAR_POS_DEMO_IDENTITY=1 AXAR_POS_SEED_DEMO=1 uvicorn axar_pos.main:app --host 1
 | GET | `/api/v1/drawer/{id}` | drawer session (open or closed) |
 | POST | `/api/v1/drawer/open` | `{register_id, opening_float_cents}` |
 | POST | `/api/v1/drawer/{id}/close` | `{counted_cents, note?}` → variance; refuses on ledger mismatch |
+| POST | `/api/v1/sales/quote` | `{lines}` → server price preview, writes nothing |
 | POST | `/api/v1/sales/cash` | header `Idempotency-Key`; `{register_id, lines:[{product_id, quantity}], tendered_cents}` |
 | POST | `/api/v1/sales/{id}/refunds` | manager/owner; header `Idempotency-Key`; `{register_id, lines:[{line_no, quantity}], reason}` |
 | GET | `/api/v1/sales/{id}/refunds` | refunds of one sale |

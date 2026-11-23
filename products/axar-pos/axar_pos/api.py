@@ -6,9 +6,25 @@ from pathlib import Path
 from typing import Annotated, Iterator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+import mimetypes
+
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session, sessionmaker
+
+# ES modules must be served as JavaScript or browsers refuse to run them.
+mimetypes.add_type("text/javascript", ".mjs")
+
+
+class NoCacheStatic(StaticFiles):
+    """Static files with no-store, so a cashier device never runs stale UI code."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
 from . import __version__, services
 from .config import Settings
@@ -31,6 +47,10 @@ class SaleLineIn(Strict):
 
 
 Id = Annotated[int, Field(strict=True, ge=1)]
+
+
+class QuoteIn(Strict):
+    lines: Annotated[list[SaleLineIn], Field(min_length=1, max_length=200)]
 
 
 class CashSaleIn(Strict):
@@ -213,14 +233,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok", "version": __version__, "payments": "simulated-cash-only"}
 
     @app.get("/", include_in_schema=False)
-    def ui():
+    def ui_root():
+        return RedirectResponse("/one/", status_code=307)
+
+    @app.get("/classic", include_in_schema=False)
+    def ui_classic():
         return FileResponse(STATIC / "index.html", media_type="text/html; charset=utf-8")
+
+    # AXAR ONE cashier UI (issue #11), served same-origin so it can call the API.
+    app.mount("/one", NoCacheStatic(directory=STATIC / "one", html=True), name="one")
 
     @app.get("/api/v1/products")
     def products(who: Who, s: Db):
         return [
             {"id": p.id, "sku": p.sku, "name": p.name,
-             "price_cents": p.price_cents, "tax_category": p.tax_category}
+             "price_cents": p.price_cents, "tax_category": p.tax_category,
+             "category": p.category}
             for p in services.list_products(s, who.tenant_id)
         ]
 
@@ -257,6 +285,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         d = services.close_drawer(s, who.tenant_id, drawer_id, who.cashier_id,
                                   body.counted_cents, body.note, settings.clock())
         return _drawer_out(d)
+
+    @app.post("/api/v1/sales/quote")
+    def quote_sale(body: QuoteIn, who: Who, s: Db):
+        """Non-binding server price preview for the basket. Writes nothing."""
+        return services.quote_cash_sale(
+            s,
+            tenant_id=who.tenant_id,
+            lines=[services.LineRequest(ln.product_id, ln.quantity) for ln in body.lines],
+            settings=settings,
+            now=settings.clock(),
+        )
 
     @app.post("/api/v1/sales/cash")
     def create_cash_sale(

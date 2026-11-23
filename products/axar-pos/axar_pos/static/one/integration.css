@@ -1,0 +1,29 @@
+/* AXAR ONE integration additions (issue #11): register/drawer bar, server
+   quote state, payment states. Uses the prototype's palette. */
+.register-bar{padding:16px 22px 0;display:grid;gap:6px}
+.register-bar select{min-height:48px;border:1px solid #cfe0d8;border-radius:12px;padding:0 12px;font:inherit;font-weight:700;color:#1b303c;background:#f7fbf9}
+.drawer-status{font-size:12px;color:#55706a;display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-height:20px}
+.drawer-status .secondary-btn{margin-top:4px}
+.quote-state{min-height:18px;font-size:11px;color:#6b827c;margin:6px 0}
+.quote-state.bad{color:#a53030;font-weight:700}
+.pay-state{border-radius:12px;padding:12px 14px;margin:10px 0;font-size:13px;line-height:1.5}
+.pay-state.busy{background:#eef6f3;color:#205f56}
+.pay-state.unconfirmed{background:#fff4dc;color:#7a4b06;border:1px solid #f1cf8a}
+.pay-state.error{background:#fdecec;color:#8c2323;border:1px solid #f0b9b9}
+.pay-state.ok{background:#e8f6ee;color:#1d6a43}
+.status-pill.offline{background:#fdecec;color:#8c2323}
+.status-pill.online{background:#e8f6ee;color:#1d6a43}
+.form-row{display:grid;gap:6px;margin:12px 0}
+.form-row input,.form-row textarea{min-height:48px;border:1px solid #cfe0d8;border-radius:12px;padding:10px 12px;font:inherit;font-size:16px}
+.refund-line{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid #eef3f1}
+.refund-line small{color:#6b827c}
+.sales-table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+.sales-table th,.sales-table td{text-align:left;padding:10px 8px;border-bottom:1px solid #e8efec}
+.sales-table td.num,.sales-table th.num{text-align:right;font-variant-numeric:tabular-nums}
+.sales-table button{min-height:40px;border-radius:10px;border:1px solid #b8d7ca;background:#f3faf5;color:#205f56;font-weight:700;padding:0 12px}
+.demo-banner{background:#fff4dc;color:#7a4b06;border:1px dashed #f1cf8a;border-radius:12px;padding:10px 14px;font-size:12px;margin-bottom:14px}
+.manager-actions{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
+.manager-actions .secondary-btn{width:auto;margin-top:0}
+/* Server receipts are fixed-width text: keep their column alignment. */
+.dialog pre.receipt{white-space:pre;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.45}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid #f0a92e;outline-offset:2px}
