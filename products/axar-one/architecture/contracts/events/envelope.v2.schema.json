@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/envelope/2",
+  "title": "AXAR event envelope v2 (PROPOSED, ADR-0004) — not emitted yet",
+  "description": "Every domain event, any module. Stored in the producer's outbox in the SAME transaction as the state change; consumers dedupe on (consumer, event_id) in their inbox. Ordering is guaranteed only per (tenant_id, aggregate_type, aggregate_id) by aggregate_version.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "type", "schema_version", "source", "tenant_id", "aggregate_type", "aggregate_id",
+               "aggregate_version", "occurred_at", "recorded_seq", "correlation_id", "actor", "payload", "payload_hash"],
+  "properties": {
+    "event_id": {"type": "string", "format": "uuid"},
+    "type": {"type": "string", "pattern": "^[a-z]+(\\.[a-z_]+)+$"},
+    "schema_version": {"type": "integer", "minimum": 1},
+    "source": {"type": "string", "pattern": "^axar-[a-z]+$"},
+    "tenant_id": {"type": "string", "minLength": 1, "maxLength": 64},
+    "legal_entity_id": {"type": ["string", "null"]},
+    "location_id": {"type": ["integer", "null"]},
+    "aggregate_type": {"type": "string"},
+    "aggregate_id": {"type": "string"},
+    "aggregate_version": {"type": "integer", "minimum": 1},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "business_date": {"type": ["string", "null"], "format": "date"},
+    "recorded_seq": {"type": "integer", "minimum": 1, "description": "monotonic per tenant outbox sequence; SSE resume cursor"},
+    "correlation_id": {"type": "string", "format": "uuid"},
+    "causation_id": {"type": ["string", "null"], "format": "uuid"},
+    "actor": {
+      "type": "object", "additionalProperties": false, "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["staff", "guest", "system", "provider"]},
+        "staff_id": {"type": ["string", "null"]},
+        "device_id": {"type": ["string", "null"]},
+        "session_id": {"type": ["string", "null"]}
+      }
+    },
+    "currency": {"const": "EUR"},
+    "payload": {"type": "object"},
+    "payload_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
