@@ -59,7 +59,17 @@ async function api(path, { method = 'GET', body, headers = {} } = {}) {
 }
 
 /** Failures where the server may or may not have recorded the request. */
-const isUncertain = (e) => e instanceof NetworkError || (e instanceof ApiError && e.status >= 500);
+/**
+ * Only answers that PROVE the operation was not recorded are definitive. The
+ * server looks up the Idempotency-Key before any business check, so these
+ * business rejections on a retry mean "no record with this key". Everything
+ * else (network, 5xx, 401/403/429, 409 key-reused/conflict, unknown) is
+ * uncertain: the journal stays and only a same-key retry is allowed.
+ */
+const DEFINITIVE_CODES = new Set(['no_open_drawer', 'insufficient_tender', 'insufficient_drawer_cash',
+  'over_refund', 'invalid_refund', 'not_found']);
+const isDefinitive = (e) => e instanceof ApiError && (e.status === 422 || (DEFINITIVE_CODES.has(e.code) && [404, 409, 422].includes(e.status)));
+const isUncertain = (e) => !isDefinitive(e);
 
 // ----------------------------------------------------------------------- state
 
@@ -72,6 +82,7 @@ const S = {
   refund: null,               // pending refund attempt
   recovery: null,             // blocking recovery of a persisted pending op
   storageOk: true,            // false => money operations are blocked
+  locksOk: true,              // false => no cross-tab lock => money operations blocked
   online: true,
 };
 let demo = loadDemo();
@@ -83,7 +94,14 @@ function loadDemo() {
   } catch { /* storage unavailable: demo state stays in memory */ }
   return { tables: {}, sent: {}, tickets: [], next: 1 };
 }
-function saveDemo() { try { localStorage.setItem(LS_DEMO, JSON.stringify(demo)); } catch { /* ignore */ } }
+/** Returns false if the demo table state could not be persisted. */
+function saveDemo() {
+  try {
+    const raw = JSON.stringify(demo);
+    localStorage.setItem(LS_DEMO, raw);
+    return localStorage.getItem(LS_DEMO) === raw;
+  } catch { return false; }
+}
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -123,18 +141,44 @@ function storageWorks() {
   } catch { return false; }
 }
 
-/** {state:'none'} | {state:'ok', rec} | {state:'corrupt'} */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const isInt = (v, min, max) => Number.isSafeInteger(v) && v >= min && v <= max;
+const onlyKeys = (o, keys) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).every((k) => keys.includes(k));
+
+/** Full schema + op/path consistency check of a journal record. */
+function validRecord(rec) {
+  if (!onlyKeys(rec, ['v', 'op', 'key', 'path', 'body', 'headers', 'cartKey', 'saleId', 'registerId', 'createdAt'])) return false;
+  if (rec.v !== 1 || typeof rec.key !== 'string' || rec.key.length < 8 || rec.key.length > 128) return false;
+  if (typeof rec.createdAt !== 'string' || Number.isNaN(Date.parse(rec.createdAt))) return false;
+  const b = rec.body;
+  if (!b || !isInt(b.register_id, 1, Number.MAX_SAFE_INTEGER) || rec.registerId !== b.register_id) return false;
+  if (!Array.isArray(b.lines) || !b.lines.length || b.lines.length > 200) return false;
+  if (rec.op === 'sale') {
+    return rec.path === '/api/v1/sales/cash' && onlyKeys(b, ['register_id', 'lines', 'tendered_cents'])
+      && isInt(b.tendered_cents, 0, 100_000_000)
+      && b.lines.every((l) => onlyKeys(l, ['product_id', 'quantity']) && isInt(l.product_id, 1, Number.MAX_SAFE_INTEGER) && isInt(l.quantity, 1, 999))
+      && typeof rec.cartKey === 'string' && /^(walkin:\d+|table:\d+:\d+)$/.test(rec.cartKey)
+      && onlyKeys(rec.headers || {}, []);
+  }
+  if (rec.op === 'refund') {
+    return typeof rec.saleId === 'string' && UUID_RE.test(rec.saleId)
+      && rec.path === `/api/v1/sales/${rec.saleId}/refunds` && onlyKeys(b, ['register_id', 'lines', 'reason'])
+      && typeof b.reason === 'string' && b.reason.length >= 3 && b.reason.length <= 500
+      && b.lines.every((l) => onlyKeys(l, ['line_no', 'quantity']) && isInt(l.line_no, 1, 10_000) && isInt(l.quantity, 1, 999))
+      && onlyKeys(rec.headers || {}, ['X-Role']);
+  }
+  return false;
+}
+
+/** {state:'none'} | {state:'ok', rec} | {state:'corrupt'} | {state:'unreadable'} */
 function readPending() {
   let raw;
-  try { raw = localStorage.getItem(LS_PENDING); } catch { return { state: 'none' }; }
+  // A failing read is NOT "no record": fail closed.
+  try { raw = localStorage.getItem(LS_PENDING); } catch { return { state: 'unreadable' }; }
   if (raw == null) return { state: 'none' };
   try {
     const rec = JSON.parse(raw);
-    const ok = rec && rec.v === 1 && ['sale', 'refund'].includes(rec.op)
-      && typeof rec.key === 'string' && rec.key.length >= 8 && rec.key.length <= 128
-      && typeof rec.path === 'string' && PENDING_PATHS.some((re) => re.test(rec.path))
-      && rec.body && typeof rec.body === 'object' && Number.isSafeInteger(rec.body.register_id);
-    return ok ? { state: 'ok', rec } : { state: 'corrupt' };
+    return validRecord(rec) && PENDING_PATHS.some((re) => re.test(rec.path)) ? { state: 'ok', rec } : { state: 'corrupt' };
   } catch { return { state: 'corrupt' }; }
 }
 
@@ -267,8 +311,9 @@ function renderTotals() {
   $('rounding').textContent = `${r > 0 ? '+' : ''}${formatEuro(r)}`;
   $('total').textContent = q ? formatEuro(q.cash_due_cents) : lines.length ? '…' : formatEuro(0);
   const state = $('quote-state');
-  state.classList.toggle('bad', Boolean(S.quoteError) || !S.drawer || !S.storageOk || Boolean(S.recovery));
+  state.classList.toggle('bad', Boolean(S.quoteError) || !S.drawer || !S.storageOk || !S.locksOk || Boolean(S.recovery));
   if (!S.storageOk) state.textContent = 'Seadme salvestus ei tööta – makseid ei saa turvaliselt teha (topelttehingu oht).';
+  else if (!S.locksOk) state.textContent = 'Brauser ei toeta akende lukustust – makseid ei saa turvaliselt teha.';
   else if (S.recovery) state.textContent = 'Pooleli tehing ootab lõpetamist.';
   else if (!S.drawer) state.textContent = 'Kassa on suletud – ava kassa, et müüa.';
   else if (S.quoteError) state.textContent = `Hinda ei saanud serverist: ${S.quoteError}`;
@@ -277,7 +322,7 @@ function renderTotals() {
   else state.textContent = '';
   const pay = $('pay-button');
   const resuming = S.payment?.state === 'unconfirmed' && S.payment.sig === cartSig(lines);
-  pay.disabled = !S.storageOk || Boolean(S.recovery) || (!(S.drawer && ready && lines.length) && !resuming);
+  pay.disabled = !S.storageOk || !S.locksOk || Boolean(S.recovery) ||(!(S.drawer && ready && lines.length) && !resuming);
   pay.firstChild.textContent = resuming ? 'Lõpeta pooleli makse ' : 'Võta sularaha ';
 }
 
@@ -646,34 +691,67 @@ async function submitPayment() {
   } else if (!p.key || p.bodySig !== bodySig) {
     p.key = newKey(); p.bodySig = bodySig;
   }
-  // Persist BEFORE sending. If that fails, do not send at all.
-  const blocked = guardJournal(p.key, { op: 'sale', key: p.key, path: '/api/v1/sales/cash', body, headers: {}, cartKey: p.cartKey, createdAt: new Date().toISOString() });
-  if (blocked) { p.state = 'error'; p.error = blocked; p.key = null; p.bodySig = null; renderPayment($('modal-content')); return; }
-  p.state = 'sending'; p.error = '';
+  const retry = p.state === 'unconfirmed';
+  p.state = 'sending'; p.error = ''; // set before awaiting the lock: double-tap guard
   renderPayment($('modal-content'));
-  try {
-    const { data: sale } = await api('/api/v1/sales/cash', { method: 'POST', body, headers: { 'Idempotency-Key': p.key } });
-    p.state = 'done'; p.sale = sale;
-    clearPaidCart(p.cartKey);
-    clearPending(p.key);
-    await showReceipt(sale);
+  const rec = { op: 'sale', key: p.key, path: '/api/v1/sales/cash', body, headers: {}, cartKey: p.cartKey, createdAt: new Date().toISOString() };
+  const out = await runMoneyOperation(rec, () => clearPaidCart(p.cartKey));
+  if (out.blocked) {
+    p.error = out.blocked;
+    if (retry) p.state = 'unconfirmed'; else { p.state = 'error'; p.key = null; p.bodySig = null; }
+  } else if (out.data) {
+    p.state = 'done'; p.sale = out.data;
+    await showReceipt(out.data, out.cleaned ? '' : CLEANUP_WARNING);
     refreshDrawer();
-  } catch (e) {
-    if (isUncertain(e)) { p.state = 'unconfirmed'; p.error = e.message; } // journal stays
-    else {
-      clearPending(p.key); // definitive: server did not record it
-      p.state = 'error'; p.error = e.message; p.key = null; p.bodySig = null;
-      if (e.code === 'no_open_drawer') refreshDrawer();
-    }
-    if (!$('modal').hidden) renderPayment($('modal-content'));
-    renderTotals();
+    return;
+  } else if (isUncertain(out.err)) {
+    p.state = 'unconfirmed'; p.error = out.err.message; // journal stays
+  } else {
+    p.state = 'error'; p.error = out.err.message; p.key = null; p.bodySig = null;
+    if (out.err.code === 'no_open_drawer') refreshDrawer();
   }
+  if (!$('modal').hidden) renderPayment($('modal-content'));
+  renderTotals();
+}
+
+const CLEANUP_WARNING = 'Makse on serveris salvestatud, aga lauaarvet ei õnnestunud seadmest kustutada (salvestus ei tööta). Kassa on lukus; pärast salvestuse taastumist laadi leht uuesti – sama makset ei registreerita kaks korda.';
+
+/**
+ * One money operation (sale/refund/recovery) under an origin-wide Web Lock:
+ * journal check+write → POST (same key) → local cleanup → journal delete.
+ * The journal is deleted ONLY after a definitive answer AND successful cleanup,
+ * so a crash at any point leaves a record that a same-key retry resolves.
+ * Returns {blocked} | {data, cleaned} | {err}.
+ */
+async function runMoneyOperation(rec, cleanup) {
+  return withMoneyLock(async () => {
+    const blocked = guardJournal(rec.key, rec);
+    if (blocked) return { blocked };
+    try {
+      const { data } = await api(rec.path, { method: 'POST', body: rec.body, headers: { 'Idempotency-Key': rec.key, ...(rec.headers || {}) } });
+      const cleaned = cleanup ? cleanup() !== false : true;
+      if (cleaned) clearPending(rec.key); else { S.storageOk = false; renderTotals(); }
+      return { data, cleaned };
+    } catch (err) {
+      if (!isUncertain(err)) clearPending(rec.key); // proven not recorded
+      return { err };
+    }
+  });
+}
+
+async function withMoneyLock(fn) {
+  if (!S.locksOk) return { blocked: 'brauser ei toeta akende lukustust – makseid ei saa turvaliselt teha' };
+  let out = null;
+  try {
+    await navigator.locks.request('axar-one-money', { ifAvailable: true }, async (lock) => { if (lock) out = await fn(); });
+  } catch (e) { return { blocked: `lukustus ebaõnnestus (${e.message})` }; }
+  return out ?? { blocked: 'teises aknas on rahatehing pooleli – oota, kuni see lõpeb' };
 }
 
 /** Writes the journal record; returns an error text if sending must be blocked. */
 function guardJournal(key, rec) {
   const cur = readPending();
-  if (cur.state === 'corrupt') return 'seadmes on loetamatu pooleli tehing – laadi leht uuesti';
+  if (cur.state === 'corrupt' || cur.state === 'unreadable') return 'seadmes on loetamatu pooleli tehing – laadi leht uuesti';
   if (cur.state === 'ok' && cur.rec.key !== key) return 'teises aknas või varem on pooleli tehing – lõpeta see enne';
   try { writePending({ ...rec, registerId: rec.body.register_id }); } catch {
     S.storageOk = false; renderTotals();
@@ -683,11 +761,12 @@ function guardJournal(key, rec) {
 }
 
 function clearPaidCart(key) {
+  let ok = true;
   if (key.startsWith('table:')) {
     const [, reg, table] = key.split(':');
     if (demo.tables[reg]) delete demo.tables[reg][table];
     delete demo.sent[key];
-    saveDemo();
+    ok = saveDemo(); // must be durable before the journal may be deleted
   } else {
     const reg = key.split(':')[1];
     S.walkin[reg] = {};
@@ -695,9 +774,10 @@ function clearPaidCart(key) {
   S.quote = null; S.quoteSig = '';
   if (S.mode === 'tables') renderTables();
   renderBasket();
+  return ok;
 }
 
-async function showReceipt(sale) {
+async function showReceipt(sale, warning = '') {
   const c = $('modal-content');
   c.replaceChildren();
   const title = el('h2', null, 'Makse kinnitatud'); title.id = 'dialog-title';
@@ -705,7 +785,9 @@ async function showReceipt(sale) {
   const receipt = el('pre', 'receipt', 'Laadin tšekki…'); receipt.id = 'receipt';
   const done = el('button', 'primary-btn', 'Järgmine klient'); done.type = 'button'; done.id = 'next-customer';
   done.addEventListener('click', () => { S.payment = null; closeModal(); });
-  c.append(title, el('p', 'muted', `Tšekk nr ${sale.receipt_no} · server kinnitas makse.`), change, receipt, done);
+  c.append(title, el('p', 'muted', `Tšekk nr ${sale.receipt_no} · server kinnitas makse.`), change);
+  if (warning) c.append(stateBox('unconfirmed', warning));
+  c.append(receipt, done);
   announce(`Makse kinnitatud. Tagasi ${formatEuro(sale.change_cents)}`);
   try {
     const { data } = await api(`/api/v1/sales/${sale.id}/receipt.txt`);
@@ -788,21 +870,21 @@ async function submitRefund() {
   if (r.state === 'unconfirmed') {
     if (bodySig !== r.bodySig) { r.error = 'muutunud tagastust ei saa korrata'; renderRefund($('modal-content')); return; }
   } else if (!r.key || r.bodySig !== bodySig) { r.key = newKey(); r.bodySig = bodySig; }
-  const path = `/api/v1/sales/${r.saleId}/refunds`;
-  const blocked = guardJournal(r.key, { op: 'refund', key: r.key, path, body, headers: DEMO_MANAGER, saleId: r.saleId, createdAt: new Date().toISOString() });
-  if (blocked) { r.state = 'error'; r.error = blocked; r.key = null; r.bodySig = null; renderRefund($('modal-content')); return; }
+  const retry = r.state === 'unconfirmed';
   r.state = 'sending'; r.error = '';
   renderRefund($('modal-content'));
-  try {
-    const { data } = await api(path, { method: 'POST', body, headers: { 'Idempotency-Key': r.key, ...DEMO_MANAGER } });
-    r.state = 'done'; r.result = data;
-    clearPending(r.key);
-    await showRefundResult(data);
-  } catch (e) {
-    if (isUncertain(e)) { r.state = 'unconfirmed'; r.error = e.message; } // journal stays
-    else { clearPending(r.key); r.state = 'error'; r.error = e.message; r.key = null; r.bodySig = null; }
-    renderRefund($('modal-content'));
-  }
+  const rec = { op: 'refund', key: r.key, path: `/api/v1/sales/${r.saleId}/refunds`, body, headers: DEMO_MANAGER, saleId: r.saleId, createdAt: new Date().toISOString() };
+  const out = await runMoneyOperation(rec, null);
+  if (out.blocked) {
+    r.error = out.blocked;
+    if (retry) r.state = 'unconfirmed'; else { r.state = 'error'; r.key = null; r.bodySig = null; }
+  } else if (out.data) {
+    r.state = 'done'; r.result = out.data;
+    await showRefundResult(out.data);
+    return;
+  } else if (isUncertain(out.err)) { r.state = 'unconfirmed'; r.error = out.err.message; } // journal stays
+  else { r.state = 'error'; r.error = out.err.message; r.key = null; r.bodySig = null; }
+  renderRefund($('modal-content'));
 }
 
 async function showRefundResult(data) {
@@ -833,17 +915,24 @@ function renderRecovery(c, note = '', cls = 'unconfirmed') {
   const found = S.recovery;
   c.replaceChildren();
   const box = el('div'); box.id = 'recovery';
-  const title = el('h2', null, found.state === 'corrupt' ? 'Pooleli tehingu kirje on loetamatu'
+  const bad = found.state === 'corrupt' || found.state === 'unreadable';
+  const title = el('h2', null, bad ? 'Pooleli tehingu kirje on loetamatu'
     : found.rec.op === 'sale' ? 'Pooleli makse' : 'Pooleli tagastus');
   title.id = 'dialog-title';
   box.append(title);
-  if (found.state === 'corrupt') {
+  if (bad) {
     box.append(stateBox('error', 'Seadmes on pooleli rahatehingu kirje, mida ei saa lugeda. Kontrolli juhi vaates tänaseid müüke ja tagastusi, enne kui kirjest loobud. Uut müüki enne seda ei tehta.'));
-    const discard = el('button', 'secondary-btn', 'Loobu kirjest (kontrollisin)'); discard.type = 'button'; discard.id = 'recover-discard';
+    if (note) box.append(stateBox(cls, note));
+    // DEMO: this is NOT a verified manager authorization (that needs #2).
+    const discard = el('button', 'secondary-btn', 'Loobu kirjest (DEMO – pole päris juhi kinnitus)'); discard.type = 'button'; discard.id = 'recover-discard';
     discard.addEventListener('click', () => {
       discard.remove();
       const sure = el('button', 'primary-btn', 'Kinnitan: loobu loetamatust kirjest'); sure.type = 'button'; sure.id = 'recover-discard-confirm';
-      sure.addEventListener('click', () => { clearPending(null); endRecovery(); });
+      sure.addEventListener('click', () => {
+        clearPending(null);
+        if (readPending().state !== 'none') { renderRecovery(c, 'Kirjet ei õnnestunud kustutada: seadme salvestus ei tööta.', 'error'); return; }
+        endRecovery();
+      });
       box.append(sure);
     });
     box.append(discard);
@@ -864,21 +953,22 @@ function renderRecovery(c, note = '', cls = 'unconfirmed') {
 async function recoverPending(btn) {
   const { rec } = S.recovery;
   btn.disabled = true; btn.textContent = 'Saadan…';
-  try {
-    const { data } = await api(rec.path, { method: 'POST', body: rec.body, headers: { 'Idempotency-Key': rec.key, ...(rec.headers || {}) } });
-    clearPending(rec.key);
-    if (rec.op === 'sale' && rec.cartKey) clearPaidCart(rec.cartKey);
+  // Same lock + same order as a normal operation: cleanup BEFORE journal delete.
+  const cleanup = rec.op === 'sale' && rec.cartKey ? () => { demo = loadDemo(); return clearPaidCart(rec.cartKey); } : null;
+  const out = await runMoneyOperation(rec, cleanup);
+  if (out.blocked) { renderRecovery($('modal-content'), `Ei saanud jätkata: ${out.blocked}.`); return; }
+  if (out.data) {
     if (S.payment?.key === rec.key) S.payment = null;
     if (S.refund?.key === rec.key) S.refund = null;
+    if (!out.cleaned) { renderRecovery($('modal-content'), CLEANUP_WARNING, 'error'); return; } // journal kept
     S.recovery = null; $('close-modal').hidden = false;
-    if (rec.op === 'sale') await showReceipt(data); else await showRefundResult(data);
-  } catch (e) {
-    if (isUncertain(e)) { renderRecovery($('modal-content'), `Server ei vastanud (${e.message}). Proovi hetke pärast uuesti.`); return; }
-    clearPending(rec.key); // definitive: not recorded
-    S.recovery = null; $('close-modal').hidden = false;
-    $('modal-content').replaceChildren(stateBox('error', `Tehingut ei salvestatud: ${e.message}`));
-    renderTotals();
+    if (rec.op === 'sale') await showReceipt(out.data); else await showRefundResult(out.data);
+    return;
   }
+  if (isUncertain(out.err)) { renderRecovery($('modal-content'), `Tulemus on endiselt teadmata (${out.err.message}). Proovi hetke pärast uuesti.`); return; }
+  S.recovery = null; $('close-modal').hidden = false; // proven not recorded; journal cleared
+  $('modal-content').replaceChildren(stateBox('error', `Tehingut ei salvestatud: ${out.err.message}`));
+  renderTotals();
 }
 
 function endRecovery() {
@@ -929,6 +1019,7 @@ async function boot() {
   S.registerId = S.registers.some((r) => r.id === saved) ? saved : S.registers[0].id;
   renderRegisterSelect();
   S.storageOk = storageWorks();
+  S.locksOk = Boolean(globalThis.navigator?.locks && typeof navigator.locks.request === 'function');
   await refreshDrawer();
   activateMode('express');
   checkPendingJournal(); // crash/reload recovery before any new sale
@@ -949,8 +1040,22 @@ document.addEventListener('keydown', (e) => {
 });
 // Another tab started or finished a money operation.
 window.addEventListener('storage', (e) => {
+  if (e.key === LS_DEMO) { // another tab changed table bills: never act on stale ones
+    demo = loadDemo();
+    if (S.mode === 'tables') renderTables();
+    renderBasket(); scheduleQuote();
+    return;
+  }
   if (e.key !== LS_PENDING) return;
-  if (e.newValue == null) { if (S.recovery) endRecovery(); return; }
+  if (e.newValue == null) {
+    // Another tab settled the operation (confirmed + cleaned up, or proven not
+    // recorded). Reload its durable results instead of trusting our memory.
+    demo = loadDemo();
+    if (S.recovery) endRecovery();
+    if (S.mode === 'tables') renderTables();
+    renderBasket(); scheduleQuote(); refreshDrawer();
+    return;
+  }
   checkPendingJournal();
 });
 window.addEventListener('offline', () => setOnline(false));

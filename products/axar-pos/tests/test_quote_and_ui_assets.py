@@ -77,7 +77,10 @@ def test_ui_has_no_client_side_money_authority():
     src = "\n".join(p.read_text(encoding="utf-8") for p in STATIC_ONE.glob("*.mjs"))
     for forbidden in ("vatIncluded", "cashRounded", "cartSummary", "rateBp", "vat_from_gross"):
         assert forbidden not in src, forbidden
-    # Payments and refunds always carry an Idempotency-Key.
-    assert src.count("'Idempotency-Key'") >= 2
+    # Every money POST goes through one function that always sends the
+    # journaled Idempotency-Key: sale, refund and recovery all use it.
+    assert "'Idempotency-Key': rec.key" in src
+    assert src.count("await runMoneyOperation(") == 3
+    assert src.count("method: 'POST'") == 4  # money op + quote + drawer open/close only
     # No silent success: the only "Makse kinnitatud" is rendered from the server response.
     assert len(re.findall(r"Makse kinnitatud", src)) >= 1

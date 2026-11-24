@@ -108,6 +108,73 @@ Mutation checks:
 - A cashier can still clear site data by hand. Nothing in a browser prevents
   that.
 
+## Review round 2 (AION): ordering, cross-tab atomicity, uncertain 4xx
+
+All three findings were confirmed. 11 new tests in
+`tests_e2e/test_crash_recovery_round2.py` were run against the round-1 code:
+**10 failed**. One of them produced **2 real sales** when two tabs paid the
+same table at once.
+
+1. **Cleanup before journal delete.** Every money operation (sale, refund,
+   recovery) now runs through one function, `runMoneyOperation`, in this
+   order:
+   - journal check and write;
+   - POST with the same key;
+   - local cleanup (the table bill is saved **and read back**);
+   - only then, journal delete.
+
+   If the cleanup cannot be persisted, the journal stays, payments lock, and
+   the receipt shows a warning; a reload then finishes via a same-key replay.
+   Recovery used to delete the journal before cleanup; it now uses the same
+   ordered path. `saveDemo()` no longer swallows errors.
+2. **Cross-tab atomicity.** The whole operation runs under an origin-wide
+   **Web Lock** (`navigator.locks`, `ifAvailable`). A second tab gets "teises
+   aknas on rahatehing pooleli" and sends nothing. Without Web Locks,
+   payments are **disabled** (fail closed). When another tab deletes the
+   journal or changes table bills (`storage` event), this tab reloads the
+   durable table state instead of trusting its memory.
+3. **Only proven rejections are definitive.** The server looks up the
+   Idempotency-Key before any business check. Therefore only these answers
+   prove "not recorded" and clear the journal:
+   - `422`;
+   - `no_open_drawer`, `insufficient_tender`, `insufficient_drawer_cash`,
+     `over_refund`, `invalid_refund`, `not_found`.
+
+   Network errors, 5xx, **401, 403, 429, 409 `idempotency_key_reused` or
+   `conflict`**, and unknown answers keep the journal; only a same-key retry
+   is allowed.
+4. **Strict journal schema.**
+   - A read failure is `unreadable` (fail closed), not "no record".
+   - A record must match the exact schema (allowed keys, integer ranges,
+     line shapes).
+   - Its operation must match its path: sale ↔ `/sales/cash`; refund ↔
+     `/sales/{saleId}/refunds` with the same `saleId`.
+   - Anything else is `corrupt`, so the till blocks.
+
+   The corrupt-record discard is labelled as **DEMO, not a manager
+   authorization** (that needs #2), and it verifies the record is really gone.
+
+Tests:
+- cleanup failure keeps the journal → reload → replay → 1 sale, bill cleared;
+- crash after cleanup before delete → replay → 1 sale;
+- no Web Locks → payments disabled;
+- lock held by another tab → refused, 0 requests;
+- **simultaneous payment of the same table from 2 tabs → exactly 1 sale and
+  1 drawer increment** (round-1 code: 2 sales);
+- lost response then 401 / 403 / 429 / 409-reused → journal kept → replay →
+  1 sale;
+- op/path mismatch → corrupt;
+- unreadable storage → blocked.
+
+**Mutation check:** without the lock, the two-tab and lock-held tests fail.
+
+Still out of reach for a browser:
+- a crash followed by **another device**;
+- site data cleared by hand.
+
+The proper fix is server-side operation status by key plus persistent open
+orders (next slice).
+
 ## Acceptance tests (issue #11) → evidence
 
 Browser tests: `tests_e2e/test_cashier_ui.py`. Each test runs a fresh uvicorn
