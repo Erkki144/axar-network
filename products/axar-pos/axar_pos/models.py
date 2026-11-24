@@ -322,7 +322,99 @@ class OutboxEvent(Base):
     payload_hash: Mapped[str] = mapped_column(String(64))
 
 
-APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent)
+# ------------------------------------------------------------ restaurant orders
+# Server-side state for table service (issue #11 follow-up / slice 4). An open
+# order is the bill of one table; it is mutable only through version-checked
+# (optimistic) updates and becomes immutable once paid.
+
+
+class DiningTable(Base):
+    __tablename__ = "dining_tables"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"))
+    code: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(100))
+    active: Mapped[bool] = mapped_column(default=True)
+
+    __table_args__ = (UniqueConstraint("tenant_id", "code"),)
+
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"))
+    table_id: Mapped[int] = mapped_column(ForeignKey("dining_tables.id"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="open")  # open|paid
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    opened_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+    sale_id: Mapped[str | None] = mapped_column(ForeignKey("sales.id"), nullable=True, unique=True)
+
+    lines: Mapped[list["OrderLine"]] = relationship(
+        back_populates="order", order_by="OrderLine.id", lazy="selectin"
+    )
+    table: Mapped[DiningTable] = relationship(lazy="selectin")
+
+    __table_args__ = (
+        # One open bill per table, enforced by the database.
+        Index("uq_one_open_order_per_table", "table_id", unique=True,
+              sqlite_where=text("status = 'open'"), postgresql_where=text("status = 'open'")),
+    )
+
+
+class OrderLine(Base):
+    __tablename__ = "order_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.id"), index=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    quantity: Mapped[int] = mapped_column(Integer)
+    sent_quantity: Mapped[int] = mapped_column(Integer, default=0)  # already sent to kitchen
+
+    order: Mapped[Order] = relationship(back_populates="lines")
+
+    __table_args__ = (UniqueConstraint("order_id", "product_id"),)
+
+
+class KitchenTicket(Base):
+    __tablename__ = "kitchen_tickets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"))
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.id"), index=True)
+    ticket_no: Mapped[int] = mapped_column(Integer)
+    table_name: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(16), default="new")  # new|ready
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime]
+    ready_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    lines: Mapped[list["KitchenTicketLine"]] = relationship(lazy="selectin", order_by="KitchenTicketLine.id")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_ticket_idempotency"),
+        UniqueConstraint("tenant_id", "ticket_no", name="uq_ticket_no"),
+    )
+
+
+class KitchenTicketLine(Base):
+    __tablename__ = "kitchen_ticket_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[str] = mapped_column(ForeignKey("kitchen_tickets.id"), index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    name: Mapped[str] = mapped_column(String(200))
+    quantity: Mapped[int] = mapped_column(Integer)
+
+
+APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent, KitchenTicketLine)
 
 
 class AppendOnlyViolation(RuntimeError):

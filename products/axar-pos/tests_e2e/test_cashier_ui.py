@@ -291,13 +291,13 @@ def test_close_drawer_requires_confirmation_and_shows_variance(phone, server):
     assert server.api(f"/api/v1/registers/{reg['id']}/drawer")["drawer"] is None
 
 
-# ---------------------------------------------------------- tables (DEMO)
+# ------------------------------------------------- tables (server orders)
 
 
 def test_table_bill_survives_reload_and_is_paid_via_api(phone, server):
     open_drawer(phone)
     phone.click('[data-mode="tables"]')
-    expect(phone.locator(".demo-banner")).to_contain_text("DEMO")
+    expect(phone.locator(".demo-banner")).to_contain_text("serveris")
     phone.locator("#table-grid .table-card", has_text="Laud 02").click()
     add(phone, "Päevasupp", 2)
     phone.click("#send-button")
