@@ -27,6 +27,13 @@ class Settings:
     # identity in production).
     demo_identity: bool = False
     seed_demo_data: bool = False
+    # Server auth (RFC-0002). 32 bytes, urlsafe base64; encrypts TOTP seeds.
+    # Never commit it; set via the environment / secret store.
+    secret_key: str | None = None
+    till_idle_minutes: int = 15
+    session_absolute_hours: int = 12
+    admin_idle_minutes: int = 15
+    admin_absolute_hours: int = 8
     clock: Callable[[], datetime] = field(default=utc_now)
 
     @classmethod
@@ -39,4 +46,6 @@ class Settings:
             cash_rounding_step_cents=int(os.environ.get("AXAR_POS_CASH_ROUNDING", "5")),
             demo_identity=os.environ.get("AXAR_POS_DEMO_IDENTITY") == "1",
             seed_demo_data=os.environ.get("AXAR_POS_SEED_DEMO") == "1",
+            secret_key=os.environ.get("AXAR_POS_SECRET_KEY") or None,
+            till_idle_minutes=int(os.environ.get("AXAR_POS_TILL_IDLE_MINUTES", "15")),
         )

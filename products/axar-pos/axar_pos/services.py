@@ -83,6 +83,10 @@ class Forbidden(DomainError):
     code = "forbidden"
 
 
+class ApprovalRequired(Forbidden):
+    code = "approval_required"
+
+
 class InvalidRefund(DomainError):
     status_code = 422
     code = "invalid_refund"
@@ -305,7 +309,11 @@ def close_drawer(
     counted_cents: int,
     note: str | None,
     now: datetime,
+    variance_allowed=None,
 ) -> DrawerSession:
+    """``variance_allowed(s, drawer) -> bool`` is asked, inside the closing
+    transaction, only when the counted cash differs from expected; False
+    rolls the close back with ``ApprovalRequired`` (step-up, RFC-0002)."""
     get_drawer(s, tenant_id, drawer_id)  # 404 for other tenants
     # Atomic close: expected is computed from the running total *inside* the
     # same UPDATE that flips the status, so no sale can slip in between.
@@ -351,6 +359,13 @@ def close_drawer(
         raise LedgerMismatch(
             f"drawer refund total {d.cash_refunds_cents}/{d.refund_count} != "
             f"ledger {ref_total}/{ref_n}"
+        )
+    variance = d.variance_cents
+    if variance and variance_allowed is not None and not variance_allowed(s, d):
+        s.rollback()
+        raise ApprovalRequired(
+            f"counted cash differs from expected by {format_eur(variance)}; "
+            "a manager must approve this close"
         )
     s.commit()
     return d
@@ -476,6 +491,8 @@ def create_cash_sale(
     now: datetime,
     before_commit=None,
     hash_extra: dict | None = None,
+    actor_device_id: str | None = None,
+    actor_session_id: str | None = None,
 ) -> tuple[Sale, bool]:
     """Create a cash sale on one register. Returns ``(sale, replayed)``.
 
@@ -526,6 +543,8 @@ def create_cash_sale(
         register_id=register_id,
         drawer_session_id=drawer.id,
         cashier_id=cashier_id,
+        device_id=actor_device_id,
+        session_id=actor_session_id,
         idempotency_key=idempotency_key,
         request_hash=req_hash,
         correlation_id=correlation_id,
@@ -697,6 +716,10 @@ def _create_cash_refund(
     reason: str,
     settings: Settings,
     now: datetime,
+    approved_by: str | None = None,
+    actor_device_id: str | None = None,
+    actor_session_id: str | None = None,
+    before_commit=None,
 ) -> tuple[Refund, bool]:
     """Simulated cash refund against an existing sale. Returns ``(refund, replayed)``.
 
@@ -866,8 +889,10 @@ def _create_cash_refund(
         register_id=register_id,
         drawer_session_id=drawer.id,
         cashier_id=cashier_id,
-        approved_by=cashier_id,
+        approved_by=approved_by or cashier_id,
         approver_role=role,
+        device_id=actor_device_id,
+        session_id=actor_session_id,
         reason=reason,
         idempotency_key=idempotency_key,
         request_hash=req_hash,
@@ -884,6 +909,8 @@ def _create_cash_refund(
     s.add(refund)
     s.add_all(refund_lines)
     s.add(_refund_completed_event(refund, refund_lines, sale))
+    if before_commit is not None:  # e.g. consume the step-up approval atomically
+        before_commit(s, refund)  # a DomainError rolls back (create_cash_refund)
     try:
         s.commit()
     except IntegrityError:

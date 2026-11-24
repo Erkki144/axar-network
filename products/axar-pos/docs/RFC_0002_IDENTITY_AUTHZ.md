@@ -1,7 +1,9 @@
 # RFC-0002 — Identity, authorization and PostgreSQL migration (issue #2)
 
-Status: **DRAFT for owner decision.** No vendor is selected, no credentials are
-configured, no endpoint is activated. Nothing in this RFC is implemented yet.
+Status: **Option A + strong back-office login implemented in slice 6** (see
+[SLICE_6_AUTH.md](SLICE_6_AUTH.md)); PostgreSQL part in slice 5. Original
+draft text below. No vendor is selected, no credentials are
+configured.
 
 ## 1. Why
 

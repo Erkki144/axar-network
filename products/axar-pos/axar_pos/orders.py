@@ -189,6 +189,13 @@ def list_tickets(s: Session, tenant_id: str, limit: int = 50) -> list[KitchenTic
                           .order_by(KitchenTicket.ticket_no.desc()).limit(limit)))
 
 
+def get_ticket(s: Session, tenant_id: str, ticket_id: str) -> KitchenTicket:
+    t = s.scalar(select(KitchenTicket).where(KitchenTicket.id == ticket_id, KitchenTicket.tenant_id == tenant_id))
+    if t is None:
+        raise NotFound("ticket not found")
+    return t
+
+
 def mark_ready(s: Session, tenant_id: str, ticket_id: str, now: datetime) -> KitchenTicket:
     t = s.scalar(select(KitchenTicket).where(KitchenTicket.id == ticket_id, KitchenTicket.tenant_id == tenant_id))
     if t is None:
@@ -202,7 +209,8 @@ def mark_ready(s: Session, tenant_id: str, ticket_id: str, now: datetime) -> Kit
 
 def pay_order_cash(s: Session, *, tenant_id: str, order_id: str, expected_version: int, register_id: int,
                    cashier_id: str, tendered_cents: int, idempotency_key: str, settings: Settings,
-                   now: datetime) -> tuple[Sale, bool]:
+                   now: datetime, actor_device_id: str | None = None,
+                   actor_session_id: str | None = None) -> tuple[Sale, bool]:
     """Sale for the order's current lines + order -> paid, in ONE transaction."""
     # A replay with the same key returns the original sale even though the
     # order is already paid (lines of a paid order are immutable).
@@ -225,6 +233,7 @@ def pay_order_cash(s: Session, *, tenant_id: str, order_id: str, expected_versio
         idempotency_key=idempotency_key, lines=lines, tendered_cents=tendered_cents,
         settings=settings, now=now, before_commit=close_order,
         hash_extra={"order_id": order_id, "order_version": expected_version},
+        actor_device_id=actor_device_id, actor_session_id=actor_session_id,
     )
 
 
