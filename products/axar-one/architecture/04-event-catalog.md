@@ -14,6 +14,18 @@ Producers write events in the **same transaction** as the state change. A consum
 | `pos.sale.completed` | 1 | `services._sale_completed_event` | `contracts/events/pos.sale.completed.v1.schema.json` | CONNECT `from_pos_outbox_v1` (PR #8): 44/44 real events accepted |
 | `pos.refund.completed` | 1 | `services._refund_completed_event` | `contracts/events/pos.refund.completed.v1.schema.json` | CONNECT `from_pos_refund_outbox_v1`: 20/20 accepted |
 
+## Emitted since slice 7 (branch `claude/axar-pos-s9-events-0r9ip8`)
+
+Envelope v2 columns (`recorded_seq`, aggregate, actor, location, causation) are set on **every** event, including the v1 sale/refund payloads.
+
+| Type | v | Producer | Schema |
+| --- | --- | --- | --- |
+| `drawer.opened` / `drawer.closed` | 1 | `services.open_drawer/close_drawer` | `contracts/events/drawer.*.v1.schema.json` |
+| `order.opened` / `order.changed` / `order.closed` | 1 | `orders.py` | `contracts/events/order.*.v1.schema.json` |
+| `kitchen.ticket.created` / `kitchen.ticket.ready` | 1 | `orders.py` | `contracts/events/kitchen.ticket.*.v1.schema.json` |
+
+The realtime feed (`GET /api/v1/events/stream`) sends invalidations derived from these events.
+
 ## Planned (envelope v2, `contracts/events/envelope.v2.schema.json`)
 
 | Type | Aggregate | When | Consumers |

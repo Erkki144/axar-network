@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/order.changed/1",
+  "title": "order.changed v1 payload",
+  "description": "Lines changed or sent to the kitchen; version = new order version (orders.set_lines / send_to_kitchen). Invalidation only: read the order through the API.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "order_id",
+    "table_id",
+    "status",
+    "version"
+  ],
+  "properties": {
+    "order_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "table_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "const": "open"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

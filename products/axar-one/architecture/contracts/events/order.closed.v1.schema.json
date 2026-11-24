@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/order.closed/1",
+  "title": "order.closed v1 payload",
+  "description": "Bill paid: the sale and the close were ONE transaction (orders.pay_order_cash).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "order_id",
+    "table_id",
+    "status",
+    "version",
+    "sale_id"
+  ],
+  "properties": {
+    "order_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "table_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "const": "paid"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sale_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

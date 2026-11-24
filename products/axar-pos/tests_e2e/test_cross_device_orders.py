@@ -17,9 +17,11 @@ from test_cashier_ui import add, open_drawer, sales, wait_quote
 def device(browser, server):
     pages = []
 
-    def make():
+    def make(block_stream=False):
         ctx = browser.new_context(viewport={"width": 1024, "height": 768})
         page = ctx.new_page()
+        if block_stream:  # this device's realtime stream is down (it falls back to polling)
+            page.route("**/api/v1/events/stream*", lambda route: route.abort())
         page.errors = []  # type: ignore[attr-defined]
         page.on("pageerror", lambda e: page.errors.append(str(e)))
         page.goto(f"{server.base}/one/")
@@ -59,13 +61,13 @@ def test_bill_started_on_one_device_is_seen_and_extended_on_another(device, serv
 
 
 def test_stale_device_cannot_overwrite_and_is_told(device, server):
-    a, b = device(), device()
+    a, b = device(block_stream=True), device()
     open_table(a, "Laud 02")
     add(a, "Kohv")
     expect(a.locator("#basket-count")).to_have_text("1")
     open_table(b, "Laud 02")
     expect(b.locator("#basket-count")).to_have_text("1")
-    freeze_polling(a)                                           # A keeps its old view
+    freeze_polling(a)                                           # A keeps its old view (no stream, no poll)
     add(b, "Latte")
     expect(b.locator("#basket-count")).to_have_text("2")
     add(a, "Tee")                                               # based on version B already replaced
@@ -146,3 +148,30 @@ def test_lost_kitchen_answer_retry_does_not_duplicate_ticket(device, server):
     expect(waiter.locator("#order-message")).to_contain_text("saadetud")
     assert len(keys) == 2 and keys[0] == keys[1]
     assert len(server.api("/api/v1/kitchen/tickets")) == 1
+
+
+def test_realtime_stream_updates_other_device_without_polling(device, server):
+    """Owner requirement: cross-device realtime sync. The kitchen device does
+    not poll (hidden); the ticket arrives through the server-sent event feed."""
+    import time
+
+    waiter, kitchen = device(), device()
+    kitchen.click('[data-mode="kitchen"]')
+    expect(kitchen.locator("#net-status")).to_contain_text("reaalajas")
+    freeze_polling(kitchen)
+    open_table(waiter, "Terrass 03")
+    add(waiter, "Latte", 1)
+    expect(waiter.locator("#basket-count")).to_have_text("1")
+    t0 = time.monotonic()
+    waiter.click("#send-button")
+    expect(kitchen.locator(".ticket", has_text="Terrass 03")).to_contain_text("1 × Latte", timeout=5_000)
+    latency = time.monotonic() - t0
+    assert latency < 3.0, latency
+    from test_cashier_ui import record
+    record("realtime_kitchen_ticket_latency_s", value=round(latency, 3))
+    # Bill changes reach the other waiter device the same way.
+    other = device()
+    open_table(other, "Terrass 03")
+    freeze_polling(other)
+    add(waiter, "Tee", 1)
+    expect(other.locator("#basket-count")).to_have_text("2", timeout=5_000)

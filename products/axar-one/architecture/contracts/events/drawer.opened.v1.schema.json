@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/drawer.opened/1",
+  "title": "drawer.opened v1 payload",
+  "description": "Drawer session opened (services.open_drawer).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "drawer_id",
+    "register_id",
+    "opening_float_cents"
+  ],
+  "properties": {
+    "drawer_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "register_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "opening_float_cents": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

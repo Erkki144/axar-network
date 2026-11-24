@@ -6,7 +6,10 @@ from axar_pos.models import AppendOnlyViolation, OutboxEvent, Sale, SaleLine
 
 def count(app, model):
     with app.state.session_factory() as s:
-        return s.scalar(select(func.count()).select_from(model))
+        q = select(func.count()).select_from(model)
+        if model is OutboxEvent:  # drawer/order events exist too; count sale events
+            q = q.where(OutboxEvent.type == "pos.sale.completed")
+        return s.scalar(q)
 
 
 def test_health_and_ui(client):
@@ -156,7 +159,7 @@ def test_outbox_event_written_with_hash(a, app):
     a.open_drawer()
     sale = a.sell([("KOHV", 1)], 250).json()
     with app.state.session_factory() as s:
-        ev = s.scalar(select(OutboxEvent))
+        ev = s.scalar(select(OutboxEvent).where(OutboxEvent.type == "pos.sale.completed"))
     assert ev.type == "pos.sale.completed" and ev.version == 1
     assert ev.tenant_id == "t-a"
     assert ev.correlation_id == sale["correlation_id"]

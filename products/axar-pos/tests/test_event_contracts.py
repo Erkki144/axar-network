@@ -28,9 +28,13 @@ def half_up_vat(gross, rate_bp):
     return (2 * gross * rate_bp + d) // (2 * d)
 
 
+def table_id(api, code):
+    return next(t["id"] for t in api.get("/api/v1/tables").json() if t["code"] == code)
+
+
 @pytest.fixture
 def events(a, app):
-    a.open_drawer(100_000)
+    d = a.open_drawer(100_000)
     sales = []
     for lines in ([("KOHV", 1)], [("KOHV", 3), ("SAI", 2)], [("RAAMAT", 1), ("KOHV", 7)], [("SAI", 1)]):
         r = a.sell(lines, 20_000)
@@ -39,19 +43,49 @@ def events(a, app):
     m = a.as_role("manager")
     for sale, lines in ((sales[1], [(1, 1)]), (sales[1], [(1, 2), (2, 2)]), (sales[2], [(1, 1)])):
         assert m.refund(sale["id"], lines).status_code == 201
+    # table service: open, edit, kitchen, ready, pay
+    o = a.post(f"/api/v1/tables/{table_id(a, 'A1')}/order").json()
+    o = a.c.put(f"/api/v1/orders/{o['id']}/lines", headers=a.h, json={"version": o["version"], "lines": [
+        {"product_id": a.product_id("KOHV"), "quantity": 2}]}).json()
+    k = a.post(f"/api/v1/orders/{o['id']}/kitchen", {"version": o["version"]},
+               headers={"Idempotency-Key": "contract-kitchen-1"}).json()
+    assert a.post(f"/api/v1/kitchen/tickets/{k['ticket']['id']}/ready").status_code == 200
+    assert a.post(f"/api/v1/orders/{o['id']}/pay-cash", {"version": k["order"]["version"],
+                  "register_id": a.register_id(), "tendered_cents": 1000},
+                  headers={"Idempotency-Key": "contract-pay-0001"}).status_code == 201
+    assert a.post(f"/api/v1/drawer/{d['id']}/close", {"counted_cents": 0}).status_code == 200
     with app.state.session_factory() as s:
-        return list(s.scalars(select(OutboxEvent).order_by(OutboxEvent.occurred_at)))
+        return list(s.scalars(select(OutboxEvent).order_by(OutboxEvent.recorded_seq)))
+
+
+ALL_TYPES = {"pos.sale.completed", "pos.refund.completed", "drawer.opened", "drawer.closed", "order.opened",
+             "order.changed", "order.closed", "kitchen.ticket.created", "kitchen.ticket.ready"}
 
 
 def test_every_outbox_event_matches_its_committed_schema(events):
-    v = {"pos.sale.completed": validator("pos.sale.completed.v1.schema.json"),
-         "pos.refund.completed": validator("pos.refund.completed.v1.schema.json")}
-    assert {e.type for e in events} == set(v)
+    assert {e.type for e in events} == ALL_TYPES
+    cache = {}
     for e in events:
-        assert (e.version, e.source) == (1, "axar-pos")
-        payload = json.loads(e.payload)
-        errors = [err.message for err in v[e.type].iter_errors(payload)]
+        assert e.source == "axar-pos"
+        name = f"{e.type}.v{e.version}.schema.json"
+        assert (SCHEMAS / name).exists(), f"no committed schema for {name}"
+        v = cache.setdefault(name, validator(name))
+        errors = [err.message for err in v.iter_errors(json.loads(e.payload))]
         assert errors == [], (e.type, errors)
+
+
+def test_envelope_v2_fields_and_gap_free_sequence(events):
+    seqs = [e.recorded_seq for e in events]
+    assert seqs == list(range(1, len(events) + 1))            # per tenant, gap-free, commit order
+    for e in events:
+        assert e.aggregate_type and e.aggregate_id and e.aggregate_version >= 1
+        assert json.loads(e.actor)["kind"] in {"staff", "system"}
+    by_order = [e.aggregate_version for e in events if e.aggregate_type == "order"]
+    assert by_order == sorted(by_order) and len(set(by_order)) == len(by_order)   # per-aggregate order
+    closed = next(e for e in events if e.type == "order.closed")
+    sale = next(e for e in events if e.type == "pos.sale.completed"
+                and json.loads(e.payload)["sale_id"] == json.loads(closed.payload)["sale_id"])
+    assert sale.recorded_seq < closed.recorded_seq            # same transaction, sale first
 
 
 def test_payload_is_canonical_and_hash_matches(events):

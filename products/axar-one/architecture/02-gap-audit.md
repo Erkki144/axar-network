@@ -18,6 +18,13 @@ Severity: **P0** = blocks any real (pilot) use, **P1** = blocks the vertical sli
 | Whole POS suite on PostgreSQL 16 as the RLS-bound role | 211 passed (local), CI job `test-postgres` green on #17 |
 | Browser suite (independent contexts) | 40 passed |
 
+## Status updates
+
+- **G-EV-1:** partly fixed in slice 7. The consumer framework (lease, inbox, retries, dead letters, replay) exists; no consumer is registered yet.
+- **G-EV-2:** fixed for POS events (envelope v2 columns + sequence).
+- **G-EV-3:** fixed (order/kitchen/drawer events + SSE + live UI).
+- **G-OPS-1:** partly fixed (request IDs, JSON request log, event-health endpoint).
+
 ## Findings
 
 ### Event flow and integration
