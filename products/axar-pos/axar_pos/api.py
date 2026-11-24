@@ -28,7 +28,7 @@ class NoCacheStatic(StaticFiles):
 
 from . import __version__, orders, services
 from .config import Settings
-from .db import init_db, make_engine, seed_demo
+from .db import bind_tenant, init_db, make_engine, request_factory, seed_demo
 from .models import DrawerSession, Refund, Sale, Tenant
 
 STATIC = Path(__file__).parent / "static"
@@ -206,14 +206,21 @@ def _drawer_out(d: DrawerSession) -> dict:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
-    engine = make_engine(settings.database_url)
-    factory: sessionmaker[Session] = init_db(engine)
+    admin_engine = make_engine(settings.admin_database_url or settings.database_url)
+    admin_factory: sessionmaker[Session] = init_db(admin_engine)
     if settings.seed_demo_data:
-        seed_demo(factory)
+        seed_demo(admin_factory)
+    engine = make_engine(settings.database_url) if settings.admin_database_url else admin_engine
+    factory = request_factory(engine)
 
     app = FastAPI(title="AXAR POS (Slice 1, simulated cash)", version=__version__)
     app.state.settings = settings
-    app.state.session_factory = factory
+    # session_factory: owner/maintenance sessions (seeding, tests, admin CLI);
+    # NOT subject to RLS. request_factory: what API requests use.
+    app.state.session_factory = admin_factory
+    app.state.request_factory = factory
+    app.state.engine = engine
+    app.state.admin_engine = admin_engine
 
     @app.exception_handler(services.DomainError)
     async def _domain_error(_req: Request, exc: services.DomainError):
@@ -246,6 +253,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         role = x_role or "cashier"
         if role not in services.ROLES:
             raise HTTPException(403, "invalid role")
+        bind_tenant(s, tenant.id)
         return Identity(tenant.id, tenant.name, x_cashier_id[:64], role)
 
     Db = Annotated[Session, Depends(db)]

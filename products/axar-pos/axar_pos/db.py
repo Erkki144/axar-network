@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -51,15 +52,55 @@ def make_engine(url: str) -> Engine:
     return engine
 
 
+MIGRATIONS = Path(__file__).parent / "migrations"
+
+
+def migrate(engine: Engine) -> None:
+    """PostgreSQL: Alembic ``upgrade head`` (owner connection). SQLite (local
+    demo, fast tests): ``create_all`` — RLS and grants do not exist there."""
+    if engine.dialect.name != "postgresql":
+        Base.metadata.create_all(engine)
+        return
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(MIGRATIONS))
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.upgrade(cfg, "head")
+
+
 def init_db(engine: Engine) -> sessionmaker[Session]:
-    # Slice 1 uses create_all; Alembic migrations arrive with PostgreSQL (#2).
-    Base.metadata.create_all(engine)
+    """Migrate with the ADMIN (owner) engine and seed reference data."""
+    migrate(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory.begin() as s:
         if s.scalar(select(TaxRate.id).limit(1)) is None:
             for cat, bp, start, end in EE_TAX_RATES:
                 s.add(TaxRate(category=cat, rate_bp=bp, valid_from=start, valid_to=end))
     return factory
+
+
+def request_factory(engine: Engine) -> sessionmaker[Session]:
+    """Sessions used by API requests. Once ``bind_tenant`` was called, every
+    transaction of the session starts with ``SET LOCAL app.tenant_id`` so
+    PostgreSQL row-level security confines it to that tenant."""
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    @event.listens_for(factory, "after_begin")
+    def _set_tenant(session, _transaction, connection):
+        tenant = session.info.get("tenant_id")
+        if tenant and connection.dialect.name == "postgresql":
+            connection.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+
+    return factory
+
+
+def bind_tenant(s: Session, tenant_id: str) -> None:
+    s.info["tenant_id"] = tenant_id
+    if s.in_transaction() and s.get_bind().dialect.name == "postgresql":
+        s.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
 
 
 DEMO_TABLES = [(f"L{i:02d}", f"Laud {i:02d}") for i in range(1, 5)] + \

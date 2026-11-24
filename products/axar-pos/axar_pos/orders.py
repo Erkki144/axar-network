@@ -161,15 +161,14 @@ def send_to_kitchen(s: Session, tenant_id: str, order_id: str, expected_version:
     if not unsent:
         raise NothingToSend("everything on this order was already sent")
     _bump(s, tenant_id, order_id, expected_version, now)
-    no = (s.scalar(select(func.coalesce(func.max(KitchenTicket.ticket_no), 0))
-                   .where(KitchenTicket.tenant_id == tenant_id)) or 0) + 1
+    no = services.next_number(s, tenant_id, "kitchen_ticket", KitchenTicket, KitchenTicket.ticket_no)
     ticket = KitchenTicket(id=str(uuid.uuid4()), tenant_id=tenant_id, location_id=order.location_id,
                            order_id=order_id, ticket_no=no, table_name=order.table.name, status="new",
                            idempotency_key=idempotency_key, created_at=now)
     s.add(ticket)
     for ln in unsent:
         name = s.scalar(select(Product.name).where(Product.id == ln.product_id))
-        s.add(KitchenTicketLine(ticket_id=ticket.id, product_id=ln.product_id, name=name,
+        s.add(KitchenTicketLine(ticket_id=ticket.id, tenant_id=tenant_id, product_id=ln.product_id, name=name,
                                 quantity=ln.quantity - ln.sent_quantity))
         ln.sent_quantity = ln.quantity
     try:
