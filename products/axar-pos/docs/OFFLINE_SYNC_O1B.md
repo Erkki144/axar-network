@@ -38,7 +38,7 @@ mark rows acked / quarantined / rejected
 
 | Requirement | Mechanism | Test |
 |---|---|---|
-| Idempotency | Sale created with idempotency key `edge:<journal entry ULID>`; `device_inbox` is unique per (tenant, device, seq) | `test_lost_response_and_replayed_batches_never_duplicate` |
+| Idempotency | Sale created with idempotency key `edge:<journal entry ULID>`; `device_inbox` is unique per (tenant, device, seq) | `test_lost_response_and_replayed_batches_never_duplicate`, `test_retry_never_sells_twice_even_if_the_sale_already_exists` |
 | No duplicates | Re-sent entry with the same hash → `duplicate`, nothing changes; same seq, different content → `conflict` (audited, agent stops) | same + `test_forged_entry_and_reused_seq_are_refused` |
 | Parallel pushes | The device cursor row is locked (`SELECT … FOR UPDATE`) per entry; after a quarantine rollback the cursor is re-checked | `test_two_agents_pushing_the_same_device_in_parallel_apply_each_sale_once` (runs on PostgreSQL in CI) |
 | Order | An entry that does not follow the cursor is a `gap`; nothing after it is processed; the agent resends from `acked_through` | `test_out_of_order_entries_are_not_applied_until_the_gap_is_filled` |
@@ -92,3 +92,12 @@ O1b uses migration `0006` (parent `0005`, from PR #49). The payments PR #26
 currently also uses `0006`; whichever merges second is renumbered to `0007`.
 `tests/test_migration_history.py` fails if two heads exist, so this cannot be
 missed. Already-applied migrations 0001–0005 are not changed.
+
+## Verification (this PR)
+
+- `tests/test_offline_sync.py`: 13 tests, SQLite and PostgreSQL.
+- Full suites: SQLite 277 passed / 14 PostgreSQL-only skipped; PostgreSQL 291 passed;
+  migrations up/down/up + `alembic check` clean; browser e2e 44 passed; bandit clean.
+- Mutation check (each change must make a test fail): duplicate check ignoring the
+  hash, no gap check, a lost response treated as acked, no payload-hash check,
+  retry with a fresh idempotency key - all 5 caught.

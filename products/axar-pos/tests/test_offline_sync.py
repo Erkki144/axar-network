@@ -250,6 +250,28 @@ def test_unappliable_sales_are_quarantined_not_lost_then_retried_once(edge, a, a
     assert m.get("/api/v1/sync/quarantine").json() == []
 
 
+def test_retry_never_sells_twice_even_if_the_sale_already_exists(edge, central, app, clock):
+    """Defence in depth behind the row lock: the sale's idempotency key is the
+    journal entry id, so a retry of an entry whose sale already exists (state
+    repaired by hand, restored backup, ...) links to that sale, never a new one."""
+    edge.open_drawer(0)
+    sell_on_edge(edge, 1)
+    agent(edge, Net(central.c), clock).run_until_idle()
+    [sale] = central_sales(app)
+    with app.state.session_factory.begin() as s:
+        row = s.scalars(select(DeviceInbox)).one()
+        assert sale.idempotency_key == f"edge:{row.entry_id}" and row.sale_id == sale.id
+        row.status, row.sale_id = "quarantined", None              # inconsistent on purpose
+    m = central.as_role("manager")
+    [q] = m.get("/api/v1/sync/quarantine").json()
+    clock.at += timedelta(minutes=5)
+    r = m.post(f"/api/v1/sync/quarantine/{q['id']}/retry")
+    assert r.status_code == 200 and r.json()["status"] == "resolved", r.text
+    assert [x.id for x in central_sales(app)] == [sale.id]
+    with app.state.session_factory() as s:
+        assert s.scalars(select(DeviceInbox)).one().sale_id == sale.id
+
+
 def test_price_mismatch_is_quarantined_and_can_be_dismissed_with_a_reason(edge, central, app, clock):
     with app.state.session_factory.begin() as s:                      # central price changed meanwhile
         s.scalars(select(Product).where(Product.tenant_id == "t-a", Product.sku == "KOHV")).one().price_cents = 300
