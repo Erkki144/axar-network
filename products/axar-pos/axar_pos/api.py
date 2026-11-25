@@ -267,6 +267,11 @@ def _drawer_out(d: DrawerSession) -> dict:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    # Fail closed BEFORE touching any database.
+    if settings.profile not in ("dev", "pilot"):
+        raise RuntimeError(f"unknown AXAR_POS_PROFILE {settings.profile!r}")
+    if settings.profile == "pilot" and settings.pilot_problems():
+        raise RuntimeError("refusing to start the pilot profile: " + "; ".join(settings.pilot_problems()))
     admin_engine = make_engine(settings.admin_database_url or settings.database_url)
     admin_factory: sessionmaker[Session] = init_db(admin_engine)
     if settings.seed_demo_data:
