@@ -14,6 +14,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+import asyncio
+import json
+import logging
+import time
+import uuid
+
+from starlette.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
+
+log = logging.getLogger("axar.api")
+
 # ES modules must be served as JavaScript or browsers refuse to run them.
 mimetypes.add_type("text/javascript", ".mjs")
 
@@ -27,7 +38,7 @@ class NoCacheStatic(StaticFiles):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-from . import __version__, auth, orders, services
+from . import __version__, auth, events, orders, services
 from .config import Settings
 from .db import bind_tenant, init_db, make_engine, request_factory, seed_demo
 from .models import DrawerSession, Refund, Sale, Tenant
@@ -301,8 +312,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content={"error": exc.code, "message": exc.message},
         )
 
-    def db() -> Iterator[Session]:
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        """Request ID (trace) + one structured log line per request. No bodies,
+        tokens or PINs are logged."""
+        rid = request.headers.get("x-request-id", "")
+        if not (8 <= len(rid) <= 64 and all(ch.isalnum() or ch in "-_" for ch in rid)):
+            rid = str(uuid.uuid4())
+        request.state.request_id = rid
+        start = time.perf_counter()
+        status = 500
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            response.headers["X-Request-ID"] = rid
+            return response
+        finally:
+            route = request.scope.get("route")
+            log.info(json.dumps({"event": "http", "request_id": rid, "method": request.method,
+                                 "route": getattr(route, "path", request.url.path), "status": status,
+                                 "ms": round((time.perf_counter() - start) * 1000, 1)}))
+
+    def db(request: Request) -> Iterator[Session]:
         s = factory()
+        s.info["correlation_id"] = getattr(request.state, "request_id", None)
         try:
             yield s
         finally:
@@ -321,8 +354,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Server-side sessions only. X-Tenant-ID / X-Cashier-ID / X-Role
             # are ignored entirely here (RFC-0002 threat: role spoofing).
             bearer = authorization[7:] if authorization and authorization.startswith("Bearer ") else None
-            return auth.resolve_session(s, bearer=bearer, device_token=x_device_token,
-                                        settings=settings, now=settings.clock())
+            who = auth.resolve_session(s, bearer=bearer, device_token=x_device_token,
+                                       settings=settings, now=settings.clock(),
+                                       touch=request.url.path != "/api/v1/events/stream")
+            s.info["actor"] = {"kind": "staff", "staff_id": who.staff_id, "device_id": who.device_id,
+                               "session_id": who.session_id}
+            return who
         if not x_tenant_id or not x_cashier_id:
             raise HTTPException(401, "X-Tenant-ID and X-Cashier-ID headers required (demo identity)")
         tenant = s.get(Tenant, x_tenant_id)
@@ -332,6 +369,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if role not in services.ROLES:
             raise HTTPException(403, "invalid role")
         bind_tenant(s, tenant.id)
+        s.info["actor"] = {"kind": "staff", "staff_id": x_cashier_id[:64], "device_id": None, "session_id": None}
         return auth.Principal(tenant_id=tenant.id, tenant_name=tenant.name, staff_id=x_cashier_id[:64],
                               staff_name=x_cashier_id[:64], roles=frozenset({role}), demo=True)
 
@@ -679,6 +717,93 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def operation(idempotency_key: str, who: SalesReader, s: Db):
         """Was a sale/refund with this key recorded? (tenant-scoped)"""
         return orders.operation_status(s, who.tenant_id, idempotency_key)
+
+    # ------------------------------------------------------------ realtime (SSE)
+
+    @app.get("/api/v1/events/stream")
+    async def event_stream(
+        request: Request,
+        who: Who,
+        s: Db,
+        last_event_id: Annotated[str | None, Header()] = None,
+        max_s: Annotated[int, Query(ge=1, le=300)] = 300,
+        after: Annotated[int | None, Query(ge=0)] = None,
+    ):
+        """Server-sent events: invalidation messages (ids + versions, never
+        payload data) for the caller's tenant and location, in commit order.
+
+        Resume: ``Last-Event-ID`` (or ``?after=``) = last seen sequence; with
+        neither, the stream starts at the current head and the client loads a
+        snapshot first. The stream ends after ``max_s`` seconds (the client
+        reconnects with its cursor), when the session ends, or when the client
+        disconnects. A heartbeat comment keeps proxies from closing it.
+        """
+        s.close()  # do not hold a pooled connection for the life of the stream
+        bearer = request.headers.get("authorization", "")[7:] or None
+        device_token = request.headers.get("x-device-token")
+        cursor = after if after is not None else (
+            int(last_event_id) if last_event_id and last_event_id.isdigit() else None)
+
+        def fetch(cur: int | None) -> tuple[int, list[dict]]:
+            with factory() as s2:
+                bind_tenant(s2, who.tenant_id)
+                if cur is None:
+                    return events.latest_seq(s2, who.tenant_id), []
+                rows = events.events_after(s2, who.tenant_id, cur, 200)
+                head = rows[-1].recorded_seq if rows else cur  # also past events hidden by location
+                scope = who.visible_locations()  # current principal (refreshed on every re-check)
+                return head, [events.invalidation(e) for e in rows
+                              if scope is None or e.location_id is None or e.location_id in scope]
+
+        def still_valid() -> bool:
+            """Re-authorize with the CURRENT session state (revocation, idle,
+            roles); never extends the session. The scope used for the next
+            batches is the refreshed principal's."""
+            nonlocal who
+            if who.demo:
+                return True
+            with factory() as s3:
+                try:
+                    fresh = auth.resolve_session(s3, bearer=bearer, device_token=device_token, settings=settings,
+                                                 now=settings.clock(), touch=False)
+                except auth.Unauthorized:
+                    return False
+            if not fresh.roles:
+                return False
+            who = fresh
+            return True
+
+        async def gen():
+            nonlocal cursor
+            started = time.monotonic()
+            last_beat = last_auth = started
+            cursor, _ = (await run_in_threadpool(fetch, None)) if cursor is None else (cursor, [])
+            yield f"retry: 2000\nevent: hello\ndata: {json.dumps({'seq': cursor})}\n\n"
+            while time.monotonic() - started < max_s:
+                if await request.is_disconnected():
+                    return
+                cursor, items = await run_in_threadpool(fetch, cursor)
+                for item in items:
+                    yield f"id: {item['seq']}\nevent: {item['type']}\ndata: {json.dumps(item)}\n\n"
+                now_m = time.monotonic()
+                if now_m - last_auth >= settings.stream_auth_recheck_s:
+                    last_auth = now_m
+                    if not await run_in_threadpool(still_valid):
+                        yield "event: auth\ndata: {\"reason\": \"session ended\"}\n\n"
+                        return
+                if now_m - last_beat >= 15:
+                    last_beat = now_m
+                    yield ": heartbeat\n\n"
+                await asyncio.sleep(settings.stream_poll_s)
+            yield f"event: bye\ndata: {json.dumps({'seq': cursor})}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    @app.get("/api/v1/admin/event-health")
+    def event_health(who: Who, s: Db):
+        auth.require_admin(who)
+        return {"head": events.latest_seq(s, who.tenant_id), "consumers": events.consumer_health(s, who.tenant_id)}
 
     # ------------------------------------------------------------ auth (RFC-0002)
 

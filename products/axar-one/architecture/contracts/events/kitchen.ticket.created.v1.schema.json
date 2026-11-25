@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/kitchen.ticket.created/1",
+  "title": "kitchen.ticket.created v1 payload",
+  "description": "Ticket with the unsent quantities (orders.send_to_kitchen).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ticket_id",
+    "ticket_no",
+    "order_id",
+    "status"
+  ],
+  "properties": {
+    "ticket_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "ticket_no": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "order_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "status": {
+      "const": "new"
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/kitchen.ticket.ready/1",
+  "title": "kitchen.ticket.ready v1 payload",
+  "description": "Ticket marked ready; emitted exactly once even under concurrent taps (orders.mark_ready).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ticket_id",
+    "ticket_no",
+    "order_id",
+    "status"
+  ],
+  "properties": {
+    "ticket_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "ticket_no": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "order_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "status": {
+      "const": "ready"
+    }
+  }
+}

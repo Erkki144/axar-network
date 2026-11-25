@@ -335,7 +335,16 @@ class RefundLine(Base):
 
 
 class OutboxEvent(Base):
-    """Transactional outbox; written in the same transaction as the sale."""
+    """Transactional outbox (ADR-0004); written in the same transaction as the
+    state change it describes.
+
+    ``version`` is the PAYLOAD schema version of ``type``. The envelope-v2
+    columns (aggregate, sequence, causation, actor, location) are filled for
+    every event. ``recorded_seq`` is a gap-free per-tenant sequence assigned
+    in the last step before commit (``events.py``), so sequence order equals
+    commit order within a tenant: a reader that has seen ``seq = n`` can never
+    later find an event ``< n`` appear. It is the SSE / consumer cursor.
+    """
 
     __tablename__ = "outbox_events"
 
@@ -348,6 +357,93 @@ class OutboxEvent(Base):
     correlation_id: Mapped[str] = mapped_column(String(36))
     payload: Mapped[str] = mapped_column(Text)  # canonical JSON
     payload_hash: Mapped[str] = mapped_column(String(64))
+    recorded_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    aggregate_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    aggregate_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    aggregate_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    causation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    actor: Mapped[str | None] = mapped_column(Text, nullable=True)  # canonical JSON
+    location_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (UniqueConstraint("tenant_id", "recorded_seq", name="uq_outbox_seq"),)
+
+
+class EventConsumer(Base):
+    """Cursor + lease of one consumer for one tenant (ADR-0004)."""
+
+    __tablename__ = "event_consumers"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    cursor: Mapped[int] = mapped_column(BigInteger, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(nullable=True)
+    fencing_token: Mapped[int] = mapped_column(BigInteger, default=0)
+    failing_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    blocked_at: Mapped[datetime | None] = mapped_column(nullable=True)  # block policy: waits for operator
+    updated_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class InboxEntry(Base):
+    """Dedup record: (consumer, event) was applied. Written in the SAME
+    transaction as the consumer's effect, so a redelivery is a no-op."""
+
+    __tablename__ = "event_inbox"
+
+    consumer: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    recorded_seq: Mapped[int] = mapped_column(BigInteger)
+    processed_at: Mapped[datetime]
+
+
+class ExportQueue(Base):
+    """Dedicated outbox for EXTERNAL delivery (e.g. accounting, AXAR CONNECT).
+
+    Filled by the ``books.export`` consumer inside its transaction (no network
+    call there). A separate delivery step sends a row, and it is marked
+    ``acknowledged`` only with the receiver's verified receipt id.
+    """
+
+    __tablename__ = "export_queue"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    destination: Mapped[str] = mapped_column(String(32))
+    event_id: Mapped[str] = mapped_column(String(36))
+    event_type: Mapped[str] = mapped_column(String(64))
+    event_version: Mapped[int] = mapped_column(Integer)
+    recorded_seq: Mapped[int] = mapped_column(BigInteger)
+    payload: Mapped[str] = mapped_column(Text)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|acknowledged|failed
+    receipt_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime]
+
+    __table_args__ = (UniqueConstraint("tenant_id", "destination", "event_id", name="uq_export_event"),)
+
+
+class DeadLetter(Base):
+    """An event a consumer could not apply after bounded retries. Visible to
+    operators; replay is an explicit, audited command."""
+
+    __tablename__ = "event_dead_letters"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    consumer: Mapped[str] = mapped_column(String(64))
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    event_id: Mapped[str] = mapped_column(String(36))
+    recorded_seq: Mapped[int] = mapped_column(BigInteger)
+    attempts: Mapped[int] = mapped_column(Integer)
+    error: Mapped[str] = mapped_column(String(500))
+    created_at: Mapped[datetime]
+    resolved_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    resolution: Mapped[str | None] = mapped_column(String(32), nullable=True)  # replayed|skipped
+
+    __table_args__ = (UniqueConstraint("consumer", "event_id", name="uq_dead_letter"),)
 
 
 # ------------------------------------------------------------ restaurant orders

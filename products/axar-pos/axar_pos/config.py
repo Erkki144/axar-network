@@ -37,6 +37,9 @@ class Settings:
     session_absolute_hours: int = 12
     admin_idle_minutes: int = 15
     admin_absolute_hours: int = 8
+    # Realtime feed: DB poll interval per open stream and session re-check.
+    stream_poll_s: float = 0.5
+    stream_auth_recheck_s: float = 15.0
     clock: Callable[[], datetime] = field(default=utc_now)
 
     def pilot_problems(self) -> list[str]:

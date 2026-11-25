@@ -2,6 +2,7 @@
 threat table has a negative test here."""
 
 import base64
+import json
 import uuid
 from datetime import timedelta
 
@@ -595,3 +596,51 @@ def test_pilot_profile_refuses_unsafe_configuration(kw, reason):
     assert Settings(**good).pilot_problems() == []
     with pytest.raises(RuntimeError, match=reason):
         create_app(Settings(**{**good, **kw}))
+
+
+# ------------------------------------------------------ realtime stream scope
+
+
+def _stream(cl, params="max_s=1&after=0"):
+    frames = []
+    with cl.c.stream("GET", f"/api/v1/events/stream?{params}", headers=cl.h) as r:
+        if r.status_code != 200:
+            return r.status_code, []
+        cur = {}
+        for line in r.iter_lines():
+            if not line:
+                if cur:
+                    frames.append(cur)
+                cur = {}
+            elif ":" in line and not line.startswith(":"):
+                k, v = line.split(":", 1)
+                cur[k] = v.strip()
+    return 200, frames
+
+
+def test_open_or_reconnecting_stream_does_not_keep_an_idle_till_unlocked(shop, world, settings):
+    """AION review #21 finding 2: the UI reconnects its stream every few
+    minutes; that must not count as staff activity, or the till never locks."""
+    settings.stream_poll_s = 0.05
+    till = shop["till"]
+    world.clock.at += timedelta(minutes=settings.till_idle_minutes - 5)
+    assert _stream(till)[0] == 200                     # reconnect while the cashier is away
+    world.clock.at += timedelta(minutes=6)             # idle since the last REAL request
+    assert till.get("/api/v1/products").status_code == 401
+
+
+def test_stream_of_location_manager_back_office_session_is_location_scoped(shop, world, settings):
+    settings.stream_poll_s = 0.05
+    loc1, loc2 = shop["loc"], world.ids[("t-a", "L2")]
+    secret = shop["adm"].put(f"/api/v1/admin/staff/{shop['manager']}/credentials",
+                             {"login": "mart", "password": MGR_PW}).json()["totp_secret"]
+    mgr = world.admin(login="mart", password=MGR_PW, secret=secret)   # manager of L1 only
+    cash2 = world.staff(shop["adm"], "Liis", [("cashier", loc2)], "6183")
+    till2 = world.till(world.device(shop["adm"], loc="L2"), cash2, "6183")
+    open_drawer(till2, world.ids[("t-a", "L2", "R1")])                # event at L2
+    open_drawer(shop["till"], shop["reg"])                            # event at L1
+    _, frames = _stream(mgr)
+    locs = {json.loads(f["data"]).get("location_id") for f in frames if f.get("id")}
+    assert locs == {loc1}, locs
+    _, owner_frames = _stream(shop["adm"])
+    assert {json.loads(f["data"]).get("location_id") for f in owner_frames if f.get("id")} == {loc1, loc2}

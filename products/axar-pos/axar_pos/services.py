@@ -14,6 +14,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from . import events
 from .config import Settings
 from .models import (
     DrawerSession,
@@ -211,7 +212,7 @@ def open_drawer(
     float_cents: int,
     now: datetime,
 ) -> DrawerSession:
-    get_register(s, tenant_id, register_id)
+    reg = get_register(s, tenant_id, register_id)
     if get_open_drawer(s, tenant_id, register_id) is not None:
         raise DrawerAlreadyOpen("this register already has an open drawer session")
     d = DrawerSession(
@@ -226,6 +227,11 @@ def open_drawer(
     )
     s.add(d)
     try:
+        s.flush()
+        events.emit(s, tenant_id=tenant_id, type="drawer.opened", payload={
+            "drawer_id": d.id, "register_id": register_id, "opening_float_cents": float_cents},
+            aggregate_type="drawer_session", aggregate_id=str(d.id), aggregate_version=1, now=now,
+            location_id=reg.location_id)
         s.commit()
     except IntegrityError:  # concurrent open on the same register lost the race
         s.rollback()
@@ -367,6 +373,11 @@ def close_drawer(
             f"counted cash differs from expected by {format_eur(variance)}; "
             "a manager must approve this close"
         )
+    events.emit(s, tenant_id=tenant_id, type="drawer.closed", payload={
+        "drawer_id": d.id, "register_id": d.register_id, "expected_cents": d.expected_cents,
+        "counted_cents": d.counted_cents, "variance_cents": d.variance_cents},
+        aggregate_type="drawer_session", aggregate_id=str(d.id), aggregate_version=2, now=now,
+        location_id=d.register.location_id)
     s.commit()
     return d
 
@@ -510,7 +521,7 @@ def create_cash_sale(
     if existing is not None:
         return _replay_or_conflict(existing, req_hash)
 
-    get_register(s, tenant_id, register_id)
+    register = get_register(s, tenant_id, register_id)
     drawer = get_open_drawer(s, tenant_id, register_id)
     if drawer is None:
         raise NoOpenDrawer("open this register's cash drawer before selling")
@@ -561,7 +572,7 @@ def create_cash_sale(
     )
     s.add(sale)
     s.add_all(sale_lines)
-    s.add(_sale_completed_event(sale, sale_lines, now))
+    _sale_completed_event(s, sale, sale_lines, now, register.location_id)
     try:
         s.flush()  # assigns sale line ids
         s.add_all(
@@ -596,7 +607,8 @@ def create_cash_sale(
     return sale, False
 
 
-def _sale_completed_event(sale: Sale, lines: list[SaleLine], now: datetime) -> OutboxEvent:
+def _sale_completed_event(s: Session, sale: Sale, lines: list[SaleLine], now: datetime,
+                          location_id: int) -> OutboxEvent:
     payload = {
         "sale_id": sale.id,
         "receipt_no": sale.receipt_no,
@@ -621,18 +633,9 @@ def _sale_completed_event(sale: Sale, lines: list[SaleLine], now: datetime) -> O
             for ln in lines
         ],
     }
-    body = _canonical(payload)
-    return OutboxEvent(
-        id=str(uuid.uuid4()),
-        tenant_id=sale.tenant_id,
-        type="pos.sale.completed",
-        version=1,
-        source="axar-pos",
-        occurred_at=now,
-        correlation_id=sale.correlation_id,
-        payload=body,
-        payload_hash=_sha256(body),
-    )
+    return events.emit(s, tenant_id=sale.tenant_id, type="pos.sale.completed", version=1, payload=payload,
+                       aggregate_type="sale", aggregate_id=sale.id, aggregate_version=1, now=now,
+                       correlation_id=sale.correlation_id, location_id=location_id)
 
 
 def get_sale(s: Session, tenant_id: str, sale_id: str) -> Sale:
@@ -908,7 +911,7 @@ def _create_cash_refund(
     )
     s.add(refund)
     s.add_all(refund_lines)
-    s.add(_refund_completed_event(refund, refund_lines, sale))
+    _refund_completed_event(s, refund, refund_lines, sale)
     if before_commit is not None:  # e.g. consume the step-up approval atomically
         before_commit(s, refund)  # a DomainError rolls back (create_cash_refund)
     try:
@@ -923,7 +926,7 @@ def _create_cash_refund(
     return refund, False
 
 
-def _refund_completed_event(refund: Refund, lines: list[RefundLine], sale: Sale) -> OutboxEvent:
+def _refund_completed_event(s: Session, refund: Refund, lines: list[RefundLine], sale: Sale) -> OutboxEvent:
     payload = {
         "refund_id": refund.id,
         "refund_no": refund.refund_no,
@@ -947,18 +950,10 @@ def _refund_completed_event(refund: Refund, lines: list[RefundLine], sale: Sale)
             for ln in lines
         ],
     }
-    body = _canonical(payload)
-    return OutboxEvent(
-        id=str(uuid.uuid4()),
-        tenant_id=refund.tenant_id,
-        type="pos.refund.completed",
-        version=1,
-        source="axar-pos",
-        occurred_at=refund.created_at,
-        correlation_id=refund.correlation_id,
-        payload=body,
-        payload_hash=_sha256(body),
-    )
+    return events.emit(s, tenant_id=refund.tenant_id, type="pos.refund.completed", version=1, payload=payload,
+                       aggregate_type="refund", aggregate_id=refund.id, aggregate_version=1, now=refund.created_at,
+                       correlation_id=refund.correlation_id, causation_id=None,
+                       location_id=sale.register.location.id)
 
 
 def get_refund(s: Session, tenant_id: str, refund_id: str) -> Refund:

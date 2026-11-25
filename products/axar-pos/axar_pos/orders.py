@@ -23,7 +23,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import services
+from . import events, services
 from .config import Settings
 from .models import DiningTable, KitchenTicket, KitchenTicketLine, Order, OrderLine, Product, Refund, Sale
 from .services import Conflict, DomainError, IdempotencyConflict, NotFound
@@ -78,6 +78,20 @@ def get_order(s: Session, tenant_id: str, order_id: str) -> Order:
 # ---------------------------------------------------------------- mutations
 
 
+def _order_event(s: Session, o: Order, type_: str, now: datetime, version: int | None = None) -> None:
+    events.emit(s, tenant_id=o.tenant_id, type=type_, payload={
+        "order_id": o.id, "table_id": o.table_id, "status": "paid" if type_ == "order.closed" else o.status,
+        "version": version or o.version}, aggregate_type="order", aggregate_id=o.id,
+        aggregate_version=version or o.version, now=now, location_id=o.location_id)
+
+
+def _ticket_event(s: Session, t: KitchenTicket, type_: str, now: datetime, version: int) -> None:
+    events.emit(s, tenant_id=t.tenant_id, type=type_, payload={
+        "ticket_id": t.id, "ticket_no": t.ticket_no, "order_id": t.order_id, "status": t.status},
+        aggregate_type="kitchen_ticket", aggregate_id=t.id, aggregate_version=version, now=now,
+        location_id=t.location_id)
+
+
 def open_order(s: Session, tenant_id: str, table_id: int, cashier_id: str, now: datetime) -> Order:
     """Get-or-create the open order of a table (safe to call from many devices)."""
     table = get_table(s, tenant_id, table_id)
@@ -87,6 +101,7 @@ def open_order(s: Session, tenant_id: str, table_id: int, cashier_id: str, now: 
     o = Order(id=str(uuid.uuid4()), tenant_id=tenant_id, location_id=table.location_id, table_id=table.id,
               status="open", version=1, opened_by=cashier_id, created_at=now, updated_at=now)
     s.add(o)
+    _order_event(s, o, "order.opened", now)
     try:
         s.commit()
     except IntegrityError:  # another device opened it first
@@ -139,6 +154,7 @@ def set_lines(s: Session, tenant_id: str, order_id: str, expected_version: int,
     for pid, qty in wanted.items():
         if pid not in current:
             s.add(OrderLine(order_id=order_id, tenant_id=tenant_id, product_id=pid, quantity=qty, sent_quantity=0))
+    _order_event(s, order, "order.changed", now, version=expected_version + 1)
     s.commit()
     return get_order(s, tenant_id, order_id)
 
@@ -171,6 +187,8 @@ def send_to_kitchen(s: Session, tenant_id: str, order_id: str, expected_version:
         s.add(KitchenTicketLine(ticket_id=ticket.id, tenant_id=tenant_id, product_id=ln.product_id, name=name,
                                 quantity=ln.quantity - ln.sent_quantity))
         ln.sent_quantity = ln.quantity
+    _order_event(s, order, "order.changed", now, version=expected_version + 1)
+    _ticket_event(s, ticket, "kitchen.ticket.created", now, version=1)
     try:
         s.commit()
     except IntegrityError:
@@ -201,8 +219,12 @@ def mark_ready(s: Session, tenant_id: str, ticket_id: str, now: datetime) -> Kit
     if t is None:
         raise NotFound("ticket not found")
     if t.status != "ready":  # idempotent
-        t.status = "ready"
-        t.ready_at = now
+        res = s.execute(update(KitchenTicket).where(KitchenTicket.id == t.id, KitchenTicket.status != "ready")
+                        .values(status="ready", ready_at=now).execution_options(synchronize_session=False))
+        if res.rowcount == 1:  # exactly one "ready" event even if two screens tap at once
+            t = s.scalar(select(KitchenTicket).where(KitchenTicket.id == ticket_id)
+                         .execution_options(populate_existing=True))
+            _ticket_event(s, t, "kitchen.ticket.ready", now, version=2)
         s.commit()
     return t
 
@@ -227,6 +249,10 @@ def pay_order_cash(s: Session, *, tenant_id: str, order_id: str, expected_versio
             .execution_options(synchronize_session=False))
         if res.rowcount != 1:
             raise OrderChanged("order was changed or paid on another device")
+        events.emit(sess, tenant_id=tenant_id, type="order.closed", payload={
+            "order_id": order_id, "table_id": order.table_id, "status": "paid", "version": expected_version + 1,
+            "sale_id": sale.id}, aggregate_type="order", aggregate_id=order_id,
+            aggregate_version=expected_version + 1, now=now, location_id=order.location_id)
 
     return services.create_cash_sale(
         s, tenant_id=tenant_id, register_id=register_id, cashier_id=cashier_id,

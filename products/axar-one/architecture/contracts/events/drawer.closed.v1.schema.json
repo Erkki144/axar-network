@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/drawer.closed/1",
+  "title": "drawer.closed v1 payload",
+  "description": "Drawer session closed; variance = counted - expected (services.close_drawer). A non-zero variance by a non-manager required a step-up approval.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "drawer_id",
+    "register_id",
+    "expected_cents",
+    "counted_cents",
+    "variance_cents"
+  ],
+  "properties": {
+    "drawer_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "register_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "expected_cents": {
+      "type": "integer"
+    },
+    "counted_cents": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "variance_cents": {
+      "type": "integer"
+    }
+  }
+}

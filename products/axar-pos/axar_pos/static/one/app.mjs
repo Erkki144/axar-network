@@ -101,7 +101,7 @@ const S = {
   mode: 'express', category: 'Kõik',
   tables: [], tablesError: '', tableId: null, order: null, // server-side table bills
   orderBusy: false, orderQueue: Promise.resolve(), orderGen: 0, orderMsg: { text: '', cls: '' },
-  tickets: [], ticketsError: '', kitchenPending: null, pollTimer: null, pollBusy: false,
+  tickets: [], ticketsError: '', kitchenPending: null, pollTimer: null, pollBusy: false, lastPoll: 0,
   walkin: {},                 // registerId -> {productId: qty}, memory only
   quote: null, quoteSig: '', quoteError: '', quoteSeq: 0, quoteTimer: null,
   payment: null,              // pending/last payment attempt
@@ -661,12 +661,92 @@ function renderTicketGrid() {
 }
 
 const POLL_MS = 4000;
+// ---------------------------------------------------------------- realtime
+// Server-sent events read with fetch() (EventSource cannot send the Bearer and
+// device headers). Frames are invalidations only: on each we re-read the
+// affected view through the normal API. If the stream drops we reconnect with
+// the last sequence (no event is missed); polling covers the gap.
+
+const LIVE_SAFETY_POLL_MS = 30000;
+const LIVE = { ctl: null, cursor: null, connected: false, backoff: 1000, pending: new Set(), timer: null };
+
+function setLive(on) {
+  LIVE.connected = on;
+  const pill = $('net-status');
+  pill.dataset.live = on ? '1' : '0';
+  if (S.online) pill.textContent = on ? '● Server ühendatud · reaalajas' : '● Server ühendatud';
+}
+
+function stopLive() {
+  const ctl = LIVE.ctl; LIVE.ctl = null;
+  if (ctl) ctl.abort();
+  setLive(false);
+}
+
+async function startLive() {
+  stopLive();
+  const ctl = new AbortController(); LIVE.ctl = ctl;
+  let ended = false;
+  try {
+    const q = LIVE.cursor != null ? `?after=${LIVE.cursor}` : '';
+    const res = await fetch(`/api/v1/events/stream${q}`, { headers: authHeaders(), signal: ctl.signal, cache: 'no-store' });
+    if (res.status === 401) { if (AUTH.mode === 'server') sessionLost(); return; }
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    setLive(true); LIVE.backoff = 1000;
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) { ended = true; break; }
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) { liveFrame(buf.slice(0, i)); buf = buf.slice(i + 2); }
+    }
+  } catch { if (ctl.signal.aborted) return; }
+  if (LIVE.ctl !== ctl) return;           // replaced or stopped
+  setLive(false);
+  const wait = ended ? 200 : LIVE.backoff; // normal end (max duration): reconnect at once
+  if (!ended) LIVE.backoff = Math.min(LIVE.backoff * 2, 30000);
+  setTimeout(() => { if (LIVE.ctl === ctl) startLive(); }, wait);
+}
+
+function liveFrame(frame) {
+  let type = 'message', id = null, data = null;
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event:')) type = line.slice(6).trim();
+    else if (line.startsWith('id:')) id = line.slice(3).trim();
+    else if (line.startsWith('data:')) { try { data = JSON.parse(line.slice(5)); } catch { data = null; } }
+  }
+  if (type === 'auth') { if (AUTH.mode === 'server') sessionLost(); return; }
+  if (type === 'hello') {
+    if (LIVE.cursor == null && data) LIVE.cursor = data.seq;
+    LIVE.pending.add('snapshot');            // (re)connected: re-read what is on screen
+  } else if (id && /^\d+$/.test(id)) {
+    LIVE.cursor = Number(id);
+    if (type.startsWith('order.')) LIVE.pending.add('tables');
+    else if (type.startsWith('kitchen.')) { LIVE.pending.add('kitchen'); LIVE.pending.add('tables'); }
+    else if (type.startsWith('drawer.') || type.startsWith('pos.')) LIVE.pending.add('drawer');
+  }
+  clearTimeout(LIVE.timer);
+  LIVE.timer = setTimeout(applyLive, 80);   // coalesce bursts
+}
+
+async function applyLive() {
+  const p = LIVE.pending; LIVE.pending = new Set();
+  const all = p.has('snapshot');
+  if ((all || p.has('tables')) && S.mode === 'tables') await refreshTables();
+  if ((all || p.has('kitchen')) && S.mode === 'kitchen') await loadTickets();
+  if (all || p.has('drawer')) await refreshDrawer();
+}
+
 function startPolling() {
   clearInterval(S.pollTimer);
   S.pollTimer = ['tables', 'kitchen'].includes(S.mode) ? setInterval(poll, POLL_MS) : null;
 }
 async function poll() {
   if (document.hidden || S.pollBusy) return;
+  // With a live stream, polling is only a slow safety net.
+  if (LIVE.connected && Date.now() - S.lastPoll < LIVE_SAFETY_POLL_MS) return;
+  S.lastPoll = Date.now();
   S.pollBusy = true;
   try {
     if (S.mode === 'tables') await refreshTables();
@@ -1392,11 +1472,13 @@ async function showPinLogin(note = '') {
 
 function sessionLost() {
   if (!AUTH.session) return;
+  stopLive();
   AUTH.session = null; AUTH.me = null; writeStore(sessionStorage, SS_SESSION, null);
   showPinLogin('Sessioon lõppes (lukustus või aegumine). Logi uuesti sisse – pooleli tehing jätkub sama võtmega.');
 }
 
 async function lockTill() {
+  stopLive();
   try { await api('/api/v1/auth/logout', { method: 'POST' }); } catch { /* the session ends anyway */ }
   AUTH.session = null; AUTH.me = null; writeStore(sessionStorage, SS_SESSION, null);
   await showPinLogin();
@@ -1478,6 +1560,7 @@ async function loadWorkspace() {
   await refreshDrawer();
   activateMode(S.mode || 'express');
   checkPendingJournal(); // crash/reload recovery before any new sale
+  startLive();
 }
 
 document.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => activateMode(b.dataset.mode)));
