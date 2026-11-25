@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - "products/axar-pos/**"
+      - "products/axar-one/**"
       - ".github/workflows/axar-pos.yml"
   push:
     branches: [main]
     paths:
       - "products/axar-pos/**"
+      - "products/axar-one/**"
 
 permissions:
   contents: read
