@@ -1138,7 +1138,7 @@ async function showReceipt(sale, warning = '') {
   const receipt = el('pre', 'receipt', 'Laadin tšekki…'); receipt.id = 'receipt';
   const done = el('button', 'primary-btn', 'Järgmine klient'); done.type = 'button'; done.id = 'next-customer';
   done.addEventListener('click', () => { S.payment = null; closeModal(); });
-  c.append(title, el('p', 'muted', `Tšekk nr ${sale.receipt_no} · server kinnitas makse.`), change);
+  c.append(title, el('p', 'muted', `Tšekk nr ${sale.receipt_label || sale.receipt_no} · server kinnitas makse.`), change);
   if (warning) c.append(stateBox('unconfirmed', warning));
   c.append(receipt, done);
   announce(`Makse kinnitatud. Tagasi ${formatEuro(sale.change_cents)}`);
