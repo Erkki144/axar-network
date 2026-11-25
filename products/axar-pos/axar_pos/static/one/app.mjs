@@ -68,7 +68,8 @@ async function api(path, { method = 'GET', body, headers = {} } = {}) {
   const isJson = (res.headers.get('content-type') || '').includes('json');
   const data = isJson ? await res.json().catch(() => null) : await res.text();
   if (!res.ok) {
-    const msg = (data && (data.message || (typeof data.detail === 'string' ? data.detail : null))) || `Viga ${res.status}`;
+    let msg = (data && (data.message || (typeof data.detail === 'string' ? data.detail : null))) || `Viga ${res.status}`;
+    if (data && OFFLINE_MSG[data.error]) { msg = OFFLINE_MSG[data.error]; refreshOfflineBanner(); }
     // Session expired / locked / revoked: lock the till. Pending money state
     // (journal) stays and is resumed with the SAME key after the next login.
     if (res.status === 401 && AUTH.mode === 'server' && !path.startsWith('/api/v1/auth/')) sessionLost();
@@ -90,9 +91,13 @@ async function api(path, { method = 'GET', body, headers = {} } = {}) {
 // approval_invalid: the server checks the key (replay) BEFORE the approval, so
 // it proves "no record with this key". A plain 403 (role) does NOT: the role
 // is checked first and the original may have been sent by another session.
+// offline_limit_exceeded / clock_moved_back (423): the till's offline guard runs
+// AFTER the key lookup, so a same-key retry of a recorded sale would replay it;
+// a 423 therefore proves "nothing recorded with this key".
 const DEFINITIVE_CODES = new Set(['no_open_drawer', 'insufficient_tender', 'insufficient_drawer_cash',
-  'over_refund', 'invalid_refund', 'not_found', 'order_changed', 'approval_invalid']);
-const isDefinitive = (e) => e instanceof ApiError && (e.status === 422 || (DEFINITIVE_CODES.has(e.code) && [403, 404, 409, 422].includes(e.status)));
+  'over_refund', 'invalid_refund', 'not_found', 'order_changed', 'approval_invalid',
+  'offline_limit_exceeded', 'clock_moved_back']);
+const isDefinitive = (e) => e instanceof ApiError && (e.status === 422 || (DEFINITIVE_CODES.has(e.code) && [403, 404, 409, 422, 423].includes(e.status)));
 const isUncertain = (e) => !isDefinitive(e);
 
 // ----------------------------------------------------------------------- state
@@ -1557,6 +1562,56 @@ async function selectRegister(id) {
   activateMode(S.mode);
 }
 
+// ------------------------------------------------------ offline limit (O1c)
+// Only an edge till answers /api/v1/sync/status (404 centrally). The banner warns
+// before the offline limit locks the till and explains a lock. Sales already
+// made are never affected; they sync when the connection returns.
+
+const OFFLINE_MSG = {
+  offline_limit_exceeded: 'Kassa on lukus: keskserveriga pole ühendust olnud lubatud aja jooksul. Senised müügid on alles ja sünkroonitakse, kui ühendus taastub.',
+  clock_moved_back: 'Kassa kell on tagasi keeratud – müük on peatatud. Paranda kassa kell.',
+};
+const OFFLINE_WARN_S = 12 * 3600;
+const OFFLINE = { edge: null, timer: null };
+
+function fmtLeft(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? `${h} h ${m} min` : `${m} min`;
+}
+
+async function refreshOfflineBanner() {
+  if (OFFLINE.edge === false) return;
+  const box = $('offline-banner');
+  if (!box) return;
+  let st;
+  try {
+    const res = await fetch('/api/v1/sync/status', { headers: authHeaders(), cache: 'no-store' });
+    if (res.status === 404) { OFFLINE.edge = false; box.hidden = true; clearInterval(OFFLINE.timer); return; }
+    if (!res.ok) return;                 // e.g. not logged in yet: keep the last state
+    st = await res.json();
+  } catch { return; }                    // no connection to the till's own server: keep the last state
+  OFFLINE.edge = true;
+  let text = '', kind = '';
+  if (st.blocked) {
+    kind = 'blocked';
+    text = st.reason === 'never_connected' ? 'Kassa pole veel keskserveriga ühendunud. Ühenda kassa korra internetti, siis saab müüa.'
+      : OFFLINE_MSG[st.reason] || OFFLINE_MSG.offline_limit_exceeded;
+  } else if (st.remaining_s <= OFFLINE_WARN_S) {
+    kind = 'warn';
+    text = `Keskserveriga pole ühendust. Kassa lukustub ${fmtLeft(st.remaining_s)} pärast (piirang ${st.limit_hours} h), kui ühendus ei taastu. Müügid on alles.`;
+  }
+  box.hidden = !text;
+  box.className = `offline-banner ${kind}`;
+  box.textContent = text;
+  box.dataset.reason = st.reason || (kind ? 'warning' : '');
+}
+
+function startOfflineBanner() {
+  clearInterval(OFFLINE.timer);
+  refreshOfflineBanner();
+  OFFLINE.timer = setInterval(refreshOfflineBanner, 60_000);
+}
+
 async function boot() {
   try {
     AUTH.mode = (await api('/api/v1/auth/config')).data.mode;
@@ -1581,6 +1636,7 @@ async function boot() {
 }
 
 async function loadWorkspace() {
+  startOfflineBanner();
   const root = $('view-root');
   root.replaceChildren(el('p', 'muted-p', 'Laadin tooteid ja kassasid serverist…'));
   try {

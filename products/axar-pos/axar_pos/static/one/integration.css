@@ -91,3 +91,9 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 .inv-cost{border:1px solid #e3ebe7;border-radius:12px;padding:12px;background:#fbfdfc}
 .inv-summary .summary-line{font-size:14px}
 @media(max-width:640px){.inv-recipes{grid-template-columns:1fr}.nav-item{width:20%}}
+
+/* offline limit banner (O1c) */
+.offline-banner{margin:14px 34px 0;padding:12px 16px;border-radius:12px;font-size:13px;font-weight:700;line-height:1.5}
+.offline-banner.warn{background:#fff4dc;color:#7a4b06;border:1px solid #f0d49a}
+.offline-banner.blocked{background:#fde8e8;color:#8f1d1d;border:1px solid #f1b8b8}
+@media(max-width:640px){.offline-banner{margin:10px 17px 0}}
