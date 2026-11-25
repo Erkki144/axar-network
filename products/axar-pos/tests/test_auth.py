@@ -649,3 +649,21 @@ def test_stream_of_location_manager_back_office_session_is_location_scoped(shop,
     assert locs == {loc1}, locs
     _, owner_frames = _stream(shop["adm"])
     assert {json.loads(f["data"]).get("location_id") for f in owner_frames if f.get("id")} == {loc1, loc2}
+
+
+# ------------------------------------------------------ offline sync (O1b)
+
+
+def test_sync_push_only_for_the_devices_own_journal_and_quarantine_needs_a_manager(shop):
+    me = shop["till"].get("/api/v1/auth/device").json()["device"]
+    entry = {"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "seq": 1, "stream": "device:x", "type": "sale", "entity": "e",
+             "summary": "0" * 64, "at": "2026-03-10T10:00:00+00:00", "prev_hash": "0" * 64, "hash": "0" * 64}
+    body = {"device_id": "someone-elses-device", "entries": [{"entry": entry, "payload": "{}",
+                                                               "payload_hash": "0" * 64}]}
+    r = shop["till"].post("/api/v1/sync/push", body)
+    assert r.status_code == 403 and "own journal" in r.json()["message"]
+    body["device_id"] = me["id"]
+    r = shop["till"].post("/api/v1/sync/push", body)                 # authorised; this entry is invalid
+    assert r.status_code == 200 and r.json()["results"][0]["status"] == "chain_broken"
+    assert shop["till"].get("/api/v1/sync/quarantine").status_code == 403        # cashier
+    assert shop["adm"].get("/api/v1/sync/quarantine").status_code == 200         # owner back office
