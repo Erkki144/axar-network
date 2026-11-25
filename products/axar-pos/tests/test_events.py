@@ -364,7 +364,7 @@ def test_worker_stages_financial_events_for_books_exactly_once(a, b, app, settin
     assert [(r.tenant_id, r.event_type) for r in rows] == [
         ("t-a", "pos.sale.completed"), ("t-a", "pos.refund.completed"), ("t-b", "pos.sale.completed")]
     assert all(r.status == "pending" and len(r.payload_hash) == 64 for r in rows)
-    assert lag == {("books.export", "t-a"): 0, ("books.export", "t-b"): 0}
+    assert lag == {(name, tenant): 0 for name in ("books.export", "stock.consume") for tenant in ("t-a", "t-b")}
 
 
 def test_corrupt_financial_event_blocks_books_export_instead_of_skipping(a, app, settings, clock):

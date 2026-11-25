@@ -137,6 +137,10 @@ class Product(Base):
     # Menu grouping for the cashier UI only; no financial meaning.
     category: Mapped[str] = mapped_column(String(64), default="Muud")
     active: Mapped[bool] = mapped_column(default=True)
+    # What a sale of this menu offer consumes from stock (#14):
+    # none | recipe (ingredients, made to order) | item (finished/resale stock).
+    stock_mode: Mapped[str] = mapped_column(String(8), default="none", server_default="none")
+    stock_item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id"), nullable=True)
 
     __table_args__ = (UniqueConstraint("tenant_id", "sku"),)
 
@@ -539,6 +543,177 @@ class KitchenTicketLine(Base):
     quantity: Mapped[int] = mapped_column(Integer)
 
 
+# ------------------------------------------------------------ inventory (#14)
+# Quantities are integers in MICRO base units (1 kg = 1_000_000) — exact, no
+# floats. Values are integer euro cents (net, recoverable VAT excluded).
+# Stock movements are append-only; balances are a locked running total that
+# reconciliation proves equal to the sum of movements.
+
+QTY_SCALE = 1_000_000
+
+
+class Warehouse(Base):
+    __tablename__ = "warehouses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"))
+    code: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(100))
+    is_default: Mapped[bool] = mapped_column(default=False)  # where sales at this location consume
+
+    __table_args__ = (UniqueConstraint("tenant_id", "code"),)
+
+
+class Item(Base):
+    """Stock-keeping item (ingredient, finished, resale, packaging). NOT a menu
+    offer: menu offers are ``products`` and point here via recipe or item."""
+
+    __tablename__ = "items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    sku: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(200))
+    kind: Mapped[str] = mapped_column(String(16))  # ingredient|finished|resale|packaging
+    uom: Mapped[str] = mapped_column(String(8))    # kg|l|pcs (base unit)
+    active: Mapped[bool] = mapped_column(default=True)
+
+    __table_args__ = (UniqueConstraint("tenant_id", "sku"),)
+
+
+class Supplier(Base):
+    __tablename__ = "suppliers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    code: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(200))
+
+    __table_args__ = (UniqueConstraint("tenant_id", "code"),)
+
+
+class SupplierDocument(Base):
+    """Delivery note (saateleht) or purchase invoice. draft -> posted.
+    Unique per (tenant, supplier, type, number): a document cannot be posted twice."""
+
+    __tablename__ = "supplier_documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    supplier_id: Mapped[int] = mapped_column(ForeignKey("suppliers.id"))
+    doc_type: Mapped[str] = mapped_column(String(16))  # delivery_note|invoice
+    doc_no: Mapped[str] = mapped_column(String(64))
+    doc_date: Mapped[date] = mapped_column(Date)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"))
+    matches_document_id: Mapped[str | None] = mapped_column(String(36), nullable=True)  # invoice -> delivery note
+    status: Mapped[str] = mapped_column(String(16), default="draft")  # draft|posted
+    freight_cents: Mapped[int] = mapped_column(BigInteger, default=0)
+    created_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime]
+    posted_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    posted_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    lines: Mapped[list["SupplierDocumentLine"]] = relationship(lazy="selectin", order_by="SupplierDocumentLine.line_no")
+
+    __table_args__ = (UniqueConstraint("tenant_id", "supplier_id", "doc_type", "doc_no", name="uq_supplier_document"),)
+
+
+class SupplierDocumentLine(Base):
+    __tablename__ = "supplier_document_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("supplier_documents.id"), index=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))
+    line_no: Mapped[int] = mapped_column(Integer)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
+    qty_micro: Mapped[int] = mapped_column(BigInteger)
+    net_cents: Mapped[int] = mapped_column(BigInteger)      # line total net of discounts
+    vat_rate_bp: Mapped[int] = mapped_column(Integer)
+    vat_recoverable: Mapped[bool] = mapped_column(default=True)
+
+
+class StockBalance(Base):
+    __tablename__ = "stock_balances"
+
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), primary_key=True)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), primary_key=True)
+    qty_micro: Mapped[int] = mapped_column(BigInteger, default=0)
+    value_cents: Mapped[int] = mapped_column(BigInteger, default=0)
+    last_unit_cost_micro: Mapped[int] = mapped_column(BigInteger, default=0)  # cents per base unit * 1e6
+
+
+class StockMovement(Base):
+    """Append-only. kind: receipt | supplier_return | sale_consumption |
+    production_consumption | production_output | invoice_adjustment |
+    cogs_adjustment (qty 0, value moved to COGS)."""
+
+    __tablename__ = "stock_movements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), index=True)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"))
+    kind: Mapped[str] = mapped_column(String(24))
+    qty_micro: Mapped[int] = mapped_column(BigInteger)       # signed
+    value_cents: Mapped[int] = mapped_column(BigInteger)     # signed, stock value change
+    cogs_cents: Mapped[int] = mapped_column(BigInteger, default=0)  # cost recognized as COGS by this movement
+    ref_type: Mapped[str] = mapped_column(String(24))
+    ref_id: Mapped[str] = mapped_column(String(64))
+    ref_line: Mapped[int] = mapped_column(Integer, default=0)
+    negative_stock: Mapped[bool] = mapped_column(default=False)
+    business_date: Mapped[date] = mapped_column(Date)
+    created_at: Mapped[datetime]
+
+    __table_args__ = (UniqueConstraint("tenant_id", "kind", "ref_type", "ref_id", "ref_line", "item_id",
+                                       name="uq_stock_movement_ref"),)
+
+
+class Recipe(Base):
+    """Versioned recipe of a menu offer; ingredients per ONE portion."""
+
+    __tablename__ = "recipes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True)
+    output_item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id"), nullable=True)  # batch recipes
+    version: Mapped[int] = mapped_column(Integer)
+    valid_from: Mapped[date] = mapped_column(Date)
+    yield_micro: Mapped[int] = mapped_column(BigInteger, default=QTY_SCALE)  # output per batch of lines
+    created_at: Mapped[datetime]
+
+    lines: Mapped[list["RecipeLine"]] = relationship(lazy="selectin", order_by="RecipeLine.id")
+
+
+class RecipeLine(Base):
+    __tablename__ = "recipe_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    recipe_id: Mapped[int] = mapped_column(ForeignKey("recipes.id"), index=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
+    qty_micro: Mapped[int] = mapped_column(BigInteger)
+
+
+class ProductionBatch(Base):
+    __tablename__ = "production_batches"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    recipe_id: Mapped[int] = mapped_column(ForeignKey("recipes.id"))
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"))
+    output_item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
+    output_qty_micro: Mapped[int] = mapped_column(BigInteger)
+    cost_cents: Mapped[int] = mapped_column(BigInteger)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    created_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime]
+
+    __table_args__ = (UniqueConstraint("tenant_id", "idempotency_key", name="uq_batch_idempotency"),)
+
+
 # ------------------------------------------------------------ identity (RFC-0002)
 # Secrets are never stored in clear: PINs/passwords as argon2id hashes, device
 # and session tokens as SHA-256 of 256-bit random values, TOTP secrets
@@ -675,7 +850,7 @@ class AuthEvent(Base):
     detail: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
 
-APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent, KitchenTicketLine, AuthEvent)
+APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent, KitchenTicketLine, AuthEvent, StockMovement)
 
 
 class AppendOnlyViolation(RuntimeError):

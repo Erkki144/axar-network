@@ -69,6 +69,7 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     "kitchen.read": ROLES,
     "kitchen.update": ("kitchen", "manager", "owner"),
     "admin": MANAGER_ROLES,
+    "inventory": MANAGER_ROLES,  # receipts, recipes, production, stock & margin reports
 }
 
 PIN_MIN, PIN_MAX = 4, 8
