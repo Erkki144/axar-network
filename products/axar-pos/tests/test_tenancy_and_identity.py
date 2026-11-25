@@ -78,9 +78,11 @@ def test_unknown_tenant(client):
 
 
 def test_no_implicit_demo_identity_by_default(tmp_path):
-    # Settings() defaults demo_identity=False: tenant APIs must refuse.
+    # Settings() defaults demo_identity=False: server sessions only; identity
+    # headers (incl. a forged X-Role) grant nothing.
     app = create_app(Settings(database_url=f"sqlite:///{tmp_path / 'p.db'}"))
     with TestClient(app) as c:
-        r = c.get("/api/v1/products", headers={"X-Tenant-ID": "demo", "X-Cashier-ID": "x"})
-        assert r.status_code == 503
+        r = c.get("/api/v1/products", headers={"X-Tenant-ID": "demo", "X-Cashier-ID": "x", "X-Role": "owner"})
+        assert r.status_code == 401
         assert c.get("/health").status_code == 200
+        assert c.get("/api/v1/auth/config").json()["mode"] == "server"

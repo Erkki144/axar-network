@@ -3,14 +3,15 @@
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Annotated, Iterator
+from typing import Annotated, Iterator, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 import mimetypes
 
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 # ES modules must be served as JavaScript or browsers refuse to run them.
@@ -26,7 +27,7 @@ class NoCacheStatic(StaticFiles):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-from . import __version__, orders, services
+from . import __version__, auth, orders, services
 from .config import Settings
 from .db import bind_tenant, init_db, make_engine, request_factory, seed_demo
 from .models import DrawerSession, Refund, Sale, Tenant
@@ -103,12 +104,72 @@ class DrawerCloseIn(Strict):
     note: Annotated[str | None, Field(max_length=500)] = None
 
 
-@dataclass(frozen=True)
-class Identity:
-    tenant_id: str
-    tenant_name: str
-    cashier_id: str
-    role: str
+Identity = auth.Principal  # backwards-compatible name
+
+
+class EnrollIn(Strict):
+    code: Annotated[str, Field(min_length=8, max_length=40)]
+
+
+class PinLoginIn(Strict):
+    staff_id: Annotated[str, Field(min_length=1, max_length=36)]
+    pin: Annotated[str, Field(min_length=1, max_length=16)]
+
+
+class PasswordLoginIn(Strict):
+    tenant_id: Annotated[str, Field(min_length=1, max_length=64)]
+    login: Annotated[str, Field(min_length=1, max_length=64)]
+    password: Annotated[str, Field(min_length=1, max_length=200)]
+    totp: Annotated[str, Field(min_length=6, max_length=6)]
+
+
+class RefundApprovalRequest(Strict):
+    sale_id: Annotated[str, Field(min_length=1, max_length=36)]
+    register_id: Id
+    lines: Annotated[list[RefundLineIn], Field(min_length=1, max_length=200)]
+    reason: Annotated[str, Field(min_length=3, max_length=500)]
+
+
+class DrawerCloseApprovalRequest(Strict):
+    drawer_id: Id
+    counted_cents: Cents
+
+
+class ApprovalIn(Strict):
+    action: Literal["refund", "drawer_close"]
+    approver_id: Annotated[str, Field(min_length=1, max_length=36)]
+    pin: Annotated[str, Field(min_length=1, max_length=16)]
+    request: dict
+
+
+class RoleIn(Strict):
+    role: Literal["cashier", "waiter", "kitchen", "manager", "owner"]
+    location_id: Annotated[int | None, Field(strict=True, ge=1)] = None
+
+
+class StaffIn(Strict):
+    display_name: Annotated[str, Field(min_length=1, max_length=100)]
+    roles: Annotated[list[RoleIn], Field(min_length=1, max_length=20)]
+    pin: Annotated[str | None, Field(min_length=4, max_length=8)] = None
+
+
+class PinIn(Strict):
+    pin: Annotated[str, Field(min_length=4, max_length=8)]
+
+
+class CredentialsIn(Strict):
+    login: Annotated[str, Field(min_length=3, max_length=64, pattern=r"^[a-z0-9._-]+$")]
+    password: Annotated[str, Field(min_length=12, max_length=200)]
+
+
+class EnrollCodeIn(Strict):
+    location_id: Id
+    register_id: Annotated[int | None, Field(strict=True, ge=1)] = None
+    device_name: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+def drawer_close_hash(drawer_id: int, counted_cents: int) -> str:
+    return services._sha256(services._canonical({"drawer_id": drawer_id, "counted_cents": counted_cents}))
 
 
 def _sale_out(sale: Sale) -> dict:
@@ -206,6 +267,11 @@ def _drawer_out(d: DrawerSession) -> dict:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    # Fail closed BEFORE touching any database.
+    if settings.profile not in ("dev", "pilot"):
+        raise RuntimeError(f"unknown AXAR_POS_PROFILE {settings.profile!r}")
+    if settings.profile == "pilot" and settings.pilot_problems():
+        raise RuntimeError("refusing to start the pilot profile: " + "; ".join(settings.pilot_problems()))
     admin_engine = make_engine(settings.admin_database_url or settings.database_url)
     admin_factory: sessionmaker[Session] = init_db(admin_engine)
     if settings.seed_demo_data:
@@ -213,7 +279,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     engine = make_engine(settings.database_url) if settings.admin_database_url else admin_engine
     factory = request_factory(engine)
 
-    app = FastAPI(title="AXAR POS (Slice 1, simulated cash)", version=__version__)
+    if settings.demo_identity and settings.secret_key:
+        # Fail closed: header identity must never coexist with real auth.
+        raise RuntimeError("AXAR_POS_DEMO_IDENTITY cannot be enabled when AXAR_POS_SECRET_KEY is set")
+    box = auth.SecretBox(settings.secret_key) if settings.secret_key else None
+    login_limiter = auth.RateLimiter(limit=20, window_s=300)
+
+    app = FastAPI(title="AXAR POS (simulated cash)", version=__version__)
     app.state.settings = settings
     # session_factory: owner/maintenance sessions (seeding, tests, admin CLI);
     # NOT subject to RLS. request_factory: what API requests use.
@@ -237,14 +309,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             s.close()
 
     def identity(
+        request: Request,
         s: Annotated[Session, Depends(db)],
+        authorization: Annotated[str | None, Header()] = None,
+        x_device_token: Annotated[str | None, Header()] = None,
         x_tenant_id: Annotated[str | None, Header()] = None,
         x_cashier_id: Annotated[str | None, Header()] = None,
         x_role: Annotated[str | None, Header()] = None,
-    ) -> Identity:
+    ) -> auth.Principal:
         if not settings.demo_identity:
-            # Real authentication is issue #2. Refuse rather than guess.
-            raise HTTPException(503, "identity provider not configured")
+            # Server-side sessions only. X-Tenant-ID / X-Cashier-ID / X-Role
+            # are ignored entirely here (RFC-0002 threat: role spoofing).
+            bearer = authorization[7:] if authorization and authorization.startswith("Bearer ") else None
+            return auth.resolve_session(s, bearer=bearer, device_token=x_device_token,
+                                        settings=settings, now=settings.clock())
         if not x_tenant_id or not x_cashier_id:
             raise HTTPException(401, "X-Tenant-ID and X-Cashier-ID headers required (demo identity)")
         tenant = s.get(Tenant, x_tenant_id)
@@ -254,10 +332,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if role not in services.ROLES:
             raise HTTPException(403, "invalid role")
         bind_tenant(s, tenant.id)
-        return Identity(tenant.id, tenant.name, x_cashier_id[:64], role)
+        return auth.Principal(tenant_id=tenant.id, tenant_name=tenant.name, staff_id=x_cashier_id[:64],
+                              staff_name=x_cashier_id[:64], roles=frozenset({role}), demo=True)
+
+    def need(permission: str):
+        def dep(who: Annotated[auth.Principal, Depends(identity)]) -> auth.Principal:
+            if not who.can(permission):
+                raise services.Forbidden(f"your role may not do this ({permission})")
+            return who
+        return dep
+
+    def till_register(who: auth.Principal, register_id: int) -> None:
+        """Money and drawer actions: only on the register bound to this device."""
+        if who.demo:
+            return
+        if who.device_id is None:
+            raise auth.DeviceRequired("this action must be done on an enrolled till")
+        if who.register_id != register_id:
+            raise services.Forbidden("this device is bound to another register")
+
+    def same_location(who: auth.Principal, location_id: int | None) -> None:
+        """Till sessions see only their location's tables, bills and tickets."""
+        if who.demo or who.location_id is None:
+            return
+        if location_id != who.location_id:
+            raise services.NotFound("not found at this location")
+
+    def client_ip(request: Request) -> str | None:
+        return request.client.host if request.client else None
 
     Db = Annotated[Session, Depends(db)]
-    Who = Annotated[Identity, Depends(identity)]
+    Who = Annotated[auth.Principal, Depends(identity)]
+    Catalog = Annotated[auth.Principal, Depends(need("catalog.read"))]
+    Seller = Annotated[auth.Principal, Depends(need("sale"))]
+    SalesReader = Annotated[auth.Principal, Depends(need("sales.read"))]
+    DrawerUser = Annotated[auth.Principal, Depends(need("drawer"))]
+    Refunder = Annotated[auth.Principal, Depends(need("refund.request"))]
+    Reporter = Annotated[auth.Principal, Depends(need("reports"))]
+    Waiter = Annotated[auth.Principal, Depends(need("orders"))]
+    KitchenReader = Annotated[auth.Principal, Depends(need("kitchen.read"))]
+    KitchenUser = Annotated[auth.Principal, Depends(need("kitchen.update"))]
 
     @app.get("/health")
     def health():
@@ -275,7 +389,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.mount("/one", NoCacheStatic(directory=STATIC / "one", html=True), name="one")
 
     @app.get("/api/v1/products")
-    def products(who: Who, s: Db):
+    def products(who: Catalog, s: Db):
         return [
             {"id": p.id, "sku": p.sku, "name": p.name,
              "price_cents": p.price_cents, "tax_category": p.tax_category,
@@ -284,9 +398,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ]
 
     @app.get("/api/v1/registers")
-    def registers(who: Who, s: Db):
+    def registers(who: Catalog, s: Db):
         out = []
         for r in services.list_registers(s, who.tenant_id):
+            if not who.demo and who.register_id is not None and r.id != who.register_id:
+                continue  # a till sees only its own register
             d = services.get_open_drawer(s, who.tenant_id, r.id)
             out.append({
                 "id": r.id, "code": r.code, "name": r.name,
@@ -296,29 +412,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return out
 
     @app.get("/api/v1/registers/{register_id}/drawer")
-    def drawer_current(register_id: int, who: Who, s: Db):
+    def drawer_current(register_id: int, who: Catalog, s: Db):
         services.get_register(s, who.tenant_id, register_id)
         d = services.get_open_drawer(s, who.tenant_id, register_id)
         return {"drawer": _drawer_out(d) if d else None}
 
     @app.get("/api/v1/drawer/{drawer_id}")
-    def drawer_get(drawer_id: int, who: Who, s: Db):
+    def drawer_get(drawer_id: int, who: DrawerUser, s: Db):
         return _drawer_out(services.get_drawer(s, who.tenant_id, drawer_id))
 
     @app.post("/api/v1/drawer/open", status_code=201)
-    def drawer_open(body: DrawerOpenIn, who: Who, s: Db):
+    def drawer_open(body: DrawerOpenIn, who: DrawerUser, s: Db):
+        till_register(who, body.register_id)
         d = services.open_drawer(s, who.tenant_id, body.register_id, who.cashier_id,
                                  body.opening_float_cents, settings.clock())
         return _drawer_out(d)
 
     @app.post("/api/v1/drawer/{drawer_id}/close")
-    def drawer_close(drawer_id: int, body: DrawerCloseIn, who: Who, s: Db):
+    def drawer_close(drawer_id: int, body: DrawerCloseIn, who: DrawerUser, s: Db,
+                     x_approval_id: Annotated[str | None, Header(max_length=36)] = None):
+        d0 = services.get_drawer(s, who.tenant_id, drawer_id)
+        till_register(who, d0.register_id)
+        now = settings.clock()
+
+        def variance_allowed(sess, _d) -> bool:
+            # Managers may close with a variance; others need a step-up approval
+            # bound to exactly this drawer and counted amount.
+            if who.demo or who.roles & set(auth.MANAGER_ROLES):
+                return True
+            if not x_approval_id:
+                return False
+            a = auth.peek_approval(sess, who, x_approval_id, "drawer_close",
+                                   drawer_close_hash(drawer_id, body.counted_cents), now)
+            auth.consume_approval(sess, a.id, now)
+            return True
+
         d = services.close_drawer(s, who.tenant_id, drawer_id, who.cashier_id,
-                                  body.counted_cents, body.note, settings.clock())
+                                  body.counted_cents, body.note, now, variance_allowed=variance_allowed)
         return _drawer_out(d)
 
     @app.post("/api/v1/sales/quote")
-    def quote_sale(body: QuoteIn, who: Who, s: Db):
+    def quote_sale(body: QuoteIn, who: Catalog, s: Db):
         """Non-binding server price preview for the basket. Writes nothing."""
         return services.quote_cash_sale(
             s,
@@ -331,10 +465,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/sales/cash")
     def create_cash_sale(
         body: CashSaleIn,
-        who: Who,
+        who: Seller,
         s: Db,
         idempotency_key: Annotated[str, Header(min_length=8, max_length=128)],
     ):
+        till_register(who, body.register_id)
         sale, replayed = services.create_cash_sale(
             s,
             tenant_id=who.tenant_id,
@@ -345,6 +480,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tendered_cents=body.tendered_cents,
             settings=settings,
             now=settings.clock(),
+            actor_device_id=who.device_id,
+            actor_session_id=who.session_id,
         )
         return JSONResponse(
             status_code=200 if replayed else 201,
@@ -353,12 +490,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.get("/api/v1/sales")
-    def sales(who: Who, s: Db, business_date: date | None = None):
-        return [_sale_out(x) for x in services.list_sales(s, who.tenant_id, business_date)]
+    def sales(who: SalesReader, s: Db, business_date: date | None = None):
+        return [_sale_out(x) for x in services.list_sales(s, who.tenant_id, business_date)
+                if who.location_id is None or x.register.location_id == who.location_id]
+
+    def visible_sale(s: Session, who: auth.Principal, sale_id: str):
+        sale = services.get_sale(s, who.tenant_id, sale_id)
+        same_location(who, sale.register.location_id)
+        return sale
 
     @app.get("/api/v1/sales/{sale_id}")
-    def sale(sale_id: str, who: Who, s: Db):
-        sale = services.get_sale(s, who.tenant_id, sale_id)
+    def sale(sale_id: str, who: SalesReader, s: Db):
+        sale = visible_sale(s, who, sale_id)
         out = _sale_out(sale)
         state = services.refund_state(s, who.tenant_id, sale.id)
         for ln_out, ln in zip(out["lines"], sale.lines):
@@ -370,22 +513,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def create_refund(
         sale_id: str,
         body: CashRefundIn,
-        who: Who,
+        who: Refunder,
         s: Db,
         idempotency_key: Annotated[str, Header(min_length=8, max_length=128)],
+        x_approval_id: Annotated[str | None, Header(max_length=36)] = None,
     ):
+        till_register(who, body.register_id)
+        if not who.demo:
+            visible_sale(s, who, sale_id)
+        now = settings.clock()
+        lines = [services.RefundLineRequest(x.line_no, x.quantity) for x in body.lines]
+        role, approved_by, before_commit = who.role, None, None
+        if not who.demo:
+            existing = services._find_refund_by_key(s, who.tenant_id, idempotency_key)
+            if existing is not None:   # replay: approval was consumed by the original
+                role, approved_by = existing.approver_role, existing.approved_by
+            else:
+                req_hash = services._refund_request_hash(sale_id, body.register_id, lines, body.reason)
+                a = auth.peek_approval(s, who, x_approval_id, "refund", req_hash, now)
+                role, approved_by = a.approver_role, a.approver_id
+
+                def before_commit(sess, _refund, approval_id=a.id):
+                    auth.consume_approval(sess, approval_id, now)
         refund, replayed = services.create_cash_refund(
             s,
             tenant_id=who.tenant_id,
             register_id=body.register_id,
             cashier_id=who.cashier_id,
-            role=who.role,
+            role=role,
             sale_id=sale_id,
             idempotency_key=idempotency_key,
-            lines=[services.RefundLineRequest(x.line_no, x.quantity) for x in body.lines],
+            lines=lines,
             reason=body.reason,
             settings=settings,
-            now=settings.clock(),
+            now=now,
+            approved_by=approved_by,
+            actor_device_id=who.device_id,
+            actor_session_id=who.session_id,
+            before_commit=before_commit,
         )
         return JSONResponse(
             status_code=200 if replayed else 201,
@@ -394,26 +559,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.get("/api/v1/sales/{sale_id}/refunds")
-    def sale_refunds(sale_id: str, who: Who, s: Db):
-        services.get_sale(s, who.tenant_id, sale_id)
+    def sale_refunds(sale_id: str, who: SalesReader, s: Db):
+        visible_sale(s, who, sale_id)
         return [_refund_out(r) for r in services.list_refunds(s, who.tenant_id, sale_id=sale_id)]
 
     @app.get("/api/v1/refunds/{refund_id}")
-    def refund_get(refund_id: str, who: Who, s: Db):
-        return _refund_out(services.get_refund(s, who.tenant_id, refund_id))
+    def refund_get(refund_id: str, who: SalesReader, s: Db):
+        refund = services.get_refund(s, who.tenant_id, refund_id)
+        same_location(who, refund.register.location_id)
+        return _refund_out(refund)
 
     @app.get("/api/v1/refunds/{refund_id}/receipt.txt", response_class=PlainTextResponse)
-    def refund_receipt(refund_id: str, who: Who, s: Db):
+    def refund_receipt(refund_id: str, who: SalesReader, s: Db):
         refund = services.get_refund(s, who.tenant_id, refund_id)
+        same_location(who, refund.register.location_id)
         return services.render_refund_receipt_text(refund, who.tenant_name, settings)
 
     @app.get("/api/v1/sales/{sale_id}/receipt.txt", response_class=PlainTextResponse)
-    def receipt(sale_id: str, who: Who, s: Db):
-        sale = services.get_sale(s, who.tenant_id, sale_id)
+    def receipt(sale_id: str, who: SalesReader, s: Db):
+        sale = visible_sale(s, who, sale_id)
         return services.render_receipt_text(sale, who.tenant_name, settings)
 
     @app.get("/api/v1/reports/daily")
-    def daily(who: Who, s: Db, business_date: date | None = None):
+    def daily(who: Reporter, s: Db, business_date: date | None = None):
+        # The report is tenant-wide: only owners and tenant-wide managers.
+        if not who.demo and "owner" not in who.roles and None not in who.location_ids:
+            raise services.Forbidden("the tenant-wide report needs an owner or tenant-wide manager")
         bdate = business_date or services.business_date_for(settings.clock(), settings)
         return services.daily_summary(s, who.tenant_id, bdate)
 
@@ -437,9 +608,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "lines": [{"product_id": ln.product_id, "name": ln.name, "quantity": ln.quantity} for ln in t.lines]}
 
     @app.get("/api/v1/tables")
-    def tables(who: Who, s: Db):
+    def tables(who: Waiter, s: Db):
         out = []
         for t in orders.list_tables(s, who.tenant_id):
+            if who.location_id is not None and t.location_id != who.location_id:
+                continue
             o = orders.open_order_for_table(s, who.tenant_id, t.id)
             out.append({"id": t.id, "code": t.code, "name": t.name, "location_id": t.location_id,
                         "open_order": None if o is None else {
@@ -448,23 +621,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return out
 
     @app.post("/api/v1/tables/{table_id}/order")
-    def table_order(table_id: int, who: Who, s: Db):
+    def table_order(table_id: int, who: Waiter, s: Db):
         """Get-or-create the table's open order (idempotent by design)."""
+        same_location(who, orders.get_table(s, who.tenant_id, table_id).location_id)
         return order_out(orders.open_order(s, who.tenant_id, table_id, who.cashier_id, settings.clock()))
 
     @app.get("/api/v1/orders/{order_id}")
-    def order_get(order_id: str, who: Who, s: Db):
-        return order_out(orders.get_order(s, who.tenant_id, order_id))
+    def order_get(order_id: str, who: Waiter, s: Db):
+        return order_out(visible_order(s, who, order_id))
+
+    def visible_order(s: Session, who: auth.Principal, order_id: str):
+        o = orders.get_order(s, who.tenant_id, order_id)
+        same_location(who, o.location_id)
+        return o
 
     @app.put("/api/v1/orders/{order_id}/lines")
-    def order_lines(order_id: str, body: OrderLinesIn, who: Who, s: Db):
+    def order_lines(order_id: str, body: OrderLinesIn, who: Waiter, s: Db):
+        visible_order(s, who, order_id)
         o = orders.set_lines(s, who.tenant_id, order_id, body.version,
                              [(x.product_id, x.quantity) for x in body.lines], settings.clock())
         return order_out(o)
 
     @app.post("/api/v1/orders/{order_id}/kitchen")
-    def order_kitchen(order_id: str, body: OrderVersionIn, who: Who, s: Db,
+    def order_kitchen(order_id: str, body: OrderVersionIn, who: Waiter, s: Db,
                       idempotency_key: Annotated[str, Header(min_length=8, max_length=128)]):
+        visible_order(s, who, order_id)
         ticket, replayed = orders.send_to_kitchen(s, who.tenant_id, order_id, body.version,
                                                   idempotency_key, settings.clock())
         return JSONResponse(status_code=200 if replayed else 201, content={
@@ -472,26 +653,194 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers={"Idempotent-Replayed": "true" if replayed else "false"})
 
     @app.post("/api/v1/orders/{order_id}/pay-cash")
-    def order_pay(order_id: str, body: PayOrderIn, who: Who, s: Db,
+    def order_pay(order_id: str, body: PayOrderIn, who: Seller, s: Db,
                   idempotency_key: Annotated[str, Header(min_length=8, max_length=128)]):
+        till_register(who, body.register_id)
+        visible_order(s, who, order_id)
         sale, replayed = orders.pay_order_cash(
             s, tenant_id=who.tenant_id, order_id=order_id, expected_version=body.version,
             register_id=body.register_id, cashier_id=who.cashier_id, tendered_cents=body.tendered_cents,
-            idempotency_key=idempotency_key, settings=settings, now=settings.clock())
+            idempotency_key=idempotency_key, settings=settings, now=settings.clock(),
+            actor_device_id=who.device_id, actor_session_id=who.session_id)
         return JSONResponse(status_code=200 if replayed else 201, content=_sale_out(sale),
                             headers={"Idempotent-Replayed": "true" if replayed else "false"})
 
     @app.get("/api/v1/kitchen/tickets")
-    def kitchen_tickets(who: Who, s: Db):
-        return [ticket_out(t) for t in orders.list_tickets(s, who.tenant_id)]
+    def kitchen_tickets(who: KitchenReader, s: Db):
+        return [ticket_out(t) for t in orders.list_tickets(s, who.tenant_id)
+                if who.location_id is None or t.location_id == who.location_id]
 
     @app.post("/api/v1/kitchen/tickets/{ticket_id}/ready")
-    def kitchen_ready(ticket_id: str, who: Who, s: Db):
+    def kitchen_ready(ticket_id: str, who: KitchenUser, s: Db):
+        same_location(who, orders.get_ticket(s, who.tenant_id, ticket_id).location_id)
         return ticket_out(orders.mark_ready(s, who.tenant_id, ticket_id, settings.clock()))
 
     @app.get("/api/v1/operations/{idempotency_key}")
-    def operation(idempotency_key: str, who: Who, s: Db):
+    def operation(idempotency_key: str, who: SalesReader, s: Db):
         """Was a sale/refund with this key recorded? (tenant-scoped)"""
         return orders.operation_status(s, who.tenant_id, idempotency_key)
+
+    # ------------------------------------------------------------ auth (RFC-0002)
+
+    def require_box() -> auth.SecretBox:
+        if box is None:
+            raise HTTPException(503, "AXAR_POS_SECRET_KEY is not configured")
+        return box
+
+    def throttle(request: Request, what: str) -> None:
+        if not login_limiter.hit(f"{what}:{client_ip(request)}"):
+            raise auth.Locked("too many attempts from this address; wait a few minutes")
+
+    def staff_out(st) -> dict:
+        return {"id": st.id, "display_name": st.display_name, "active": st.active,
+                "roles": [{"role": r.role, "location_id": r.location_id} for r in st.roles],
+                "has_pin": st.pin_hash is not None, "login": st.login,
+                "has_back_office_login": st.password_hash is not None}
+
+    def device_out(d) -> dict:
+        return {"id": d.id, "name": d.name, "location_id": d.location_id, "register_id": d.register_id,
+                "created_at": d.created_at.isoformat(), "revoked": d.revoked_at is not None,
+                "last_seen_at": d.last_seen_at.isoformat() if d.last_seen_at else None}
+
+    def session_out(sess, raw: str, st) -> dict:
+        return {"token": raw, "expires_at": sess.expires_at.isoformat(), "kind": sess.kind,
+                "idle_minutes": settings.till_idle_minutes if sess.kind == "till" else settings.admin_idle_minutes,
+                "staff": {"id": st.id, "display_name": st.display_name}}
+
+    def the_device(s: Session, x_device_token: str | None):
+        d = auth.device_by_token(s, x_device_token)
+        if d is None:
+            raise auth.Unauthorized("this device is not enrolled (or was revoked)")
+        return d
+
+    @app.get("/api/v1/auth/config")
+    def auth_config():
+        return {"mode": "demo" if settings.demo_identity else "server",
+                "back_office_login": box is not None}
+
+    @app.post("/api/v1/auth/devices/enroll", status_code=201)
+    def enroll(body: EnrollIn, request: Request, s: Db):
+        throttle(request, "enroll")
+        dev, raw = auth.enroll_device(s, code=body.code, ip=client_ip(request), now=settings.clock())
+        return {"device_token": raw, "device": device_out(dev)}
+
+    @app.get("/api/v1/auth/device")
+    def device_info(s: Db, x_device_token: Annotated[str | None, Header()] = None):
+        d = the_device(s, x_device_token)
+        staff = auth.pin_staff_list(s, d)
+        tenant = s.get(Tenant, d.tenant_id)
+        reg = s.get(auth.Register, d.register_id) if d.register_id else None
+        loc = s.get(auth.Location, d.location_id)
+        return {"device": device_out(d), "tenant_name": tenant.name, "location_name": loc.name,
+                "register_name": reg.name if reg else None,
+                "staff": [{"id": x.id, "display_name": x.display_name,
+                           "can_approve": bool(auth.roles_at(x, d.location_id) & set(auth.MANAGER_ROLES))}
+                          for x in staff]}
+
+    @app.post("/api/v1/auth/pin-login")
+    def pin_login(body: PinLoginIn, request: Request, s: Db,
+                  x_device_token: Annotated[str | None, Header()] = None):
+        d = the_device(s, x_device_token)
+        sess, raw, st = auth.pin_login(s, device=d, staff_id=body.staff_id, pin=body.pin, settings=settings,
+                                       now=settings.clock(), ip=client_ip(request))
+        return session_out(sess, raw, st)
+
+    @app.post("/api/v1/auth/login")
+    def password_login(body: PasswordLoginIn, request: Request, s: Db):
+        throttle(request, "login")
+        sess, raw, st = auth.password_login(s, tenant_id=body.tenant_id, login=body.login, password=body.password,
+                                            totp=body.totp, box=require_box(), settings=settings,
+                                            now=settings.clock(), ip=client_ip(request))
+        return session_out(sess, raw, st)
+
+    @app.post("/api/v1/auth/logout", status_code=204)
+    def do_logout(who: Who, s: Db):
+        if not who.demo:
+            auth.logout(s, who, settings.clock())
+
+    @app.get("/api/v1/auth/me")
+    def me(who: Who):
+        return {"tenant_id": who.tenant_id, "tenant_name": who.tenant_name, "staff_id": who.staff_id,
+                "display_name": who.staff_name, "roles": sorted(who.roles), "kind": who.kind, "mfa": who.mfa,
+                "device_id": who.device_id, "location_id": who.location_id, "register_id": who.register_id,
+                "permissions": sorted(p for p in auth.PERMISSIONS if who.can(p)), "demo": who.demo}
+
+    @app.post("/api/v1/auth/approvals", status_code=201)
+    def approve(body: ApprovalIn, request: Request, who: Who, s: Db,
+                x_device_token: Annotated[str | None, Header()] = None):
+        if who.demo:
+            raise HTTPException(400, "approvals are not used in demo identity mode")
+        d = the_device(s, x_device_token)
+        if body.action == "refund":
+            r = RefundApprovalRequest.model_validate(body.request)
+            if not who.can("refund.request"):
+                raise services.Forbidden("your role may not request refunds")
+            req_hash = services._refund_request_hash(
+                r.sale_id, r.register_id, [services.RefundLineRequest(x.line_no, x.quantity) for x in r.lines],
+                r.reason)
+        else:
+            r = DrawerCloseApprovalRequest.model_validate(body.request)
+            req_hash = drawer_close_hash(r.drawer_id, r.counted_cents)
+        a = auth.create_approval(s, who, device=d, action=body.action, request_hash=req_hash,
+                                 approver_id=body.approver_id, pin=body.pin, now=settings.clock(),
+                                 ip=client_ip(request))
+        return {"approval_id": a.id, "expires_at": a.expires_at.isoformat(), "approver_role": a.approver_role}
+
+    # ------------------------------------------------- back office (MFA only)
+
+    @app.get("/api/v1/admin/staff")
+    def admin_staff(who: Who, s: Db):
+        auth.require_admin(who)
+        return [staff_out(x) for x in s.scalars(select(auth.Staff).where(auth.Staff.tenant_id == who.tenant_id)
+                                                 .order_by(auth.Staff.display_name))]
+
+    @app.post("/api/v1/admin/staff", status_code=201)
+    def admin_create_staff(body: StaffIn, who: Who, s: Db):
+        st = auth.create_staff(s, who, display_name=body.display_name,
+                               roles=[(r.role, r.location_id) for r in body.roles], pin=body.pin,
+                               now=settings.clock())
+        return staff_out(st)
+
+    @app.put("/api/v1/admin/staff/{staff_id}/pin", status_code=204)
+    def admin_set_pin(staff_id: str, body: PinIn, who: Who, s: Db):
+        auth.set_pin(s, who, staff_id, body.pin, settings.clock())
+
+    @app.put("/api/v1/admin/staff/{staff_id}/credentials")
+    def admin_credentials(staff_id: str, body: CredentialsIn, who: Who, s: Db):
+        secret = auth.set_back_office_credentials(s, who, staff_id, login=body.login, password=body.password,
+                                                  box=require_box(), now=settings.clock())
+        # Shown ONCE so it can be added to an authenticator app; never stored in clear.
+        return {"totp_secret": secret,
+                "otpauth_uri": auth.provisioning_uri(secret, f"{who.tenant_id}:{body.login}")}
+
+    @app.post("/api/v1/admin/staff/{staff_id}/deactivate")
+    def admin_deactivate(staff_id: str, who: Who, s: Db):
+        return staff_out(auth.deactivate_staff(s, who, staff_id, settings.clock()))
+
+    @app.post("/api/v1/admin/enrollment-codes", status_code=201)
+    def admin_enroll_code(body: EnrollCodeIn, who: Who, s: Db):
+        ec, code = auth.create_enrollment_code(s, who, location_id=body.location_id, register_id=body.register_id,
+                                               device_name=body.device_name, now=settings.clock())
+        return {"code": code, "expires_at": ec.expires_at.isoformat()}
+
+    @app.get("/api/v1/admin/devices")
+    def admin_devices(who: Who, s: Db):
+        auth.require_admin(who)
+        return [device_out(d) for d in s.scalars(select(auth.Device).where(auth.Device.tenant_id == who.tenant_id))
+                if "owner" in who.roles or None in who.location_ids or d.location_id in who.location_ids]
+
+    @app.post("/api/v1/admin/devices/{device_id}/revoke")
+    def admin_revoke(device_id: str, who: Who, s: Db):
+        return device_out(auth.revoke_device(s, who, device_id, settings.clock()))
+
+    @app.get("/api/v1/admin/auth-events")
+    def admin_events(who: Who, s: Db, limit: Annotated[int, Query(ge=1, le=500)] = 100):
+        auth.require_admin(who)
+        if "owner" not in who.roles and None not in who.location_ids:
+            raise services.Forbidden("the audit log needs an owner or tenant-wide manager")
+        rows = s.scalars(select(auth.AuthEvent).where(auth.AuthEvent.tenant_id == who.tenant_id)
+                         .order_by(auth.AuthEvent.id.desc()).limit(limit))
+        return [{"at": e.at.isoformat(), "event": e.event, "outcome": e.outcome, "staff_id": e.staff_id,
+                 "device_id": e.device_id, "detail": e.detail} for e in rows]
 
     return app

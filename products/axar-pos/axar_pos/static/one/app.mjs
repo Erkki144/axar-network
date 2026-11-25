@@ -12,9 +12,23 @@
 //   overwriting; paying a bill closes it in the same server transaction.
 import { centsToInput, formatEuro, parseEuroInput } from './format.mjs';
 
-// DEMO identity. These headers are NOT authentication (see RFC-0002 / #2).
+// Identity. In "server" mode (RFC-0002) every request carries the device
+// token (this enrolled till) and the staff session token from the PIN login.
+// In "demo" mode the server trusts these headers WITHOUT authentication.
 const IDENTITY = { 'X-Tenant-ID': 'demo', 'X-Cashier-ID': 'kassa1' };
 const DEMO_MANAGER = { 'X-Role': 'manager' };
+const LS_DEVICE = 'axar.one.device.v1';   // device token: survives reloads and logouts
+const SS_SESSION = 'axar.one.session.v1'; // staff session: this tab only, ends with the tab
+const AUTH = { mode: 'demo', device: null, session: null, me: null, deviceInfo: null };
+const readStore = (store, key) => { try { return store.getItem(key); } catch { return null; } };
+const writeStore = (store, key, v) => { try { if (v == null) store.removeItem(key); else store.setItem(key, v); } catch { /* ignore */ } };
+function authHeaders() {
+  if (AUTH.mode === 'demo') return IDENTITY;
+  const h = {};
+  if (AUTH.device) h['X-Device-Token'] = AUTH.device;
+  if (AUTH.session) h.Authorization = `Bearer ${AUTH.session}`;
+  return h;
+}
 const TIMEOUT_MS = 8000;
 const LS_REGISTER = 'axar.one.register';
 // Crash-safe journal of the ONE in-flight money operation (sale or refund).
@@ -38,7 +52,7 @@ async function api(path, { method = 'GET', body, headers = {} } = {}) {
   try {
     res = await fetch(path, {
       method,
-      headers: { ...IDENTITY, ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers },
+      headers: { ...authHeaders(), ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers },
       body: body ? JSON.stringify(body) : undefined,
       signal: ctl.signal,
       cache: 'no-store',
@@ -54,6 +68,9 @@ async function api(path, { method = 'GET', body, headers = {} } = {}) {
   const data = isJson ? await res.json().catch(() => null) : await res.text();
   if (!res.ok) {
     const msg = (data && (data.message || (typeof data.detail === 'string' ? data.detail : null))) || `Viga ${res.status}`;
+    // Session expired / locked / revoked: lock the till. Pending money state
+    // (journal) stays and is resumed with the SAME key after the next login.
+    if (res.status === 401 && AUTH.mode === 'server' && !path.startsWith('/api/v1/auth/')) sessionLost();
     throw new ApiError(res.status, data?.error, msg);
   }
   return { data, status: res.status };
@@ -69,9 +86,12 @@ async function api(path, { method = 'GET', body, headers = {} } = {}) {
  */
 // order_changed: the server looks the key up before the order CAS, so a
 // same-key retry of a RECORDED payment replays the sale instead.
+// approval_invalid: the server checks the key (replay) BEFORE the approval, so
+// it proves "no record with this key". A plain 403 (role) does NOT: the role
+// is checked first and the original may have been sent by another session.
 const DEFINITIVE_CODES = new Set(['no_open_drawer', 'insufficient_tender', 'insufficient_drawer_cash',
-  'over_refund', 'invalid_refund', 'not_found', 'order_changed']);
-const isDefinitive = (e) => e instanceof ApiError && (e.status === 422 || (DEFINITIVE_CODES.has(e.code) && [404, 409, 422].includes(e.status)));
+  'over_refund', 'invalid_refund', 'not_found', 'order_changed', 'approval_invalid']);
+const isDefinitive = (e) => e instanceof ApiError && (e.status === 422 || (DEFINITIVE_CODES.has(e.code) && [403, 404, 409, 422].includes(e.status)));
 const isUncertain = (e) => !isDefinitive(e);
 
 // ----------------------------------------------------------------------- state
@@ -163,7 +183,9 @@ function validRecord(rec) {
       && rec.path === `/api/v1/sales/${rec.saleId}/refunds` && onlyKeys(b, ['register_id', 'lines', 'reason'])
       && typeof b.reason === 'string' && b.reason.length >= 3 && b.reason.length <= 500
       && b.lines.every((l) => onlyKeys(l, ['line_no', 'quantity']) && isInt(l.line_no, 1, 10_000) && isInt(l.quantity, 1, 999))
-      && onlyKeys(rec.headers || {}, ['X-Role']);
+      && onlyKeys(rec.headers || {}, ['X-Role', 'X-Approval-Id'])
+      && (rec.headers?.['X-Role'] === undefined || rec.headers['X-Role'] === 'manager')
+      && (rec.headers?.['X-Approval-Id'] === undefined || UUID_RE.test(rec.headers['X-Approval-Id']));
   }
   return false;
 }
@@ -442,12 +464,12 @@ function filterProducts() {
 
 function renderExpress() { const root = $('view-root'); root.replaceChildren(); renderProductGrid(root); }
 
-const IDENTITY_NOTE = 'Ettevõte ja kassapidaja on DEMO päised, mitte sisselogimine (RFC-0002).';
+const identityNote = () => (AUTH.mode === 'server' ? '' : 'Ettevõte ja kassapidaja on DEMO päised, mitte sisselogimine (RFC-0002).');
 
 function renderTables() {
   const root = $('view-root'); root.replaceChildren();
   const section = el('section');
-  section.append(el('div', 'demo-banner', `Lauaarved ja köögipiletid on serveris: sama arvet näeb iga selle ettevõtte seade. ${IDENTITY_NOTE}`));
+  section.append(el('div', 'demo-banner', `Lauaarved ja köögipiletid on serveris: sama arvet näeb iga selle ettevõtte seade. ${identityNote()}`));
   const msg = el('div', 'order-message'); msg.id = 'order-message'; msg.setAttribute('role', 'status');
   const grid = el('div', 'table-grid'); grid.id = 'table-grid';
   section.append(msg, grid);
@@ -595,7 +617,7 @@ function mutateOrder(apply, okMsg = '') {
 
 function renderKitchen() {
   const root = $('view-root'); root.replaceChildren();
-  root.append(el('div', 'demo-banner', `Köögipiletid tulevad serverist ja uuenevad iga ${POLL_MS / 1000} sekundi järel. ${IDENTITY_NOTE}`));
+  root.append(el('div', 'demo-banner', `Köögipiletid tulevad serverist ja uuenevad iga ${POLL_MS / 1000} sekundi järel. ${identityNote()}`));
   const grid = el('div', 'kds-grid'); grid.id = 'kds-grid';
   root.append(grid);
   renderTicketGrid();
@@ -654,7 +676,7 @@ async function poll() {
 
 async function renderManager() {
   const root = $('view-root'); root.replaceChildren();
-  root.append(el('div', 'demo-banner', 'Tagastus kasutab DEMO juhi rolli (päis), mitte päris autentimist. Päris sisselogimine tuleb issue #2-ga.'));
+  if (AUTH.mode === 'demo') root.append(el('div', 'demo-banner', 'Tagastus kasutab DEMO juhi rolli (päis), mitte päris autentimist.'));
   const stats = el('div', 'stats-grid'); stats.id = 'report';
   const actions = el('div', 'manager-actions');
   const close = el('button', 'secondary-btn', 'Sulge vahetus ja loe raha'); close.type = 'button'; close.id = 'close-drawer';
@@ -664,9 +686,13 @@ async function renderManager() {
   const salesBox = el('section'); salesBox.id = 'sales-list';
   root.append(stats, actions, salesBox);
   stats.append(el('p', 'muted-p', 'Laadin aruannet…'));
+  // The tenant-wide report needs a manager/owner; the sales list (for
+  // refunds) is loaded independently so a cashier can still request refunds.
+  let bdate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Tallinn' }).format(new Date());
   try {
     const { data: rep } = await api('/api/v1/reports/daily');
     if (S.mode !== 'manager') return;
+    bdate = rep.business_date;
     stats.replaceChildren();
     for (const [label, value, note] of [
       ['Müük', formatEuro(rep.total_cents), `${rep.sale_count} tšekki`],
@@ -676,7 +702,13 @@ async function renderManager() {
     ]) {
       const d = el('div', 'stat'); d.append(el('small', null, label), el('strong', null, value), el('p', null, note)); stats.append(d);
     }
-    const { data: sales } = await api(`/api/v1/sales?business_date=${encodeURIComponent(rep.business_date)}`);
+  } catch (e) {
+    if (S.mode !== 'manager') return;
+    stats.replaceChildren(el('div', 'pay-state error', e instanceof ApiError && e.status === 403
+      ? 'Päevaaruannet näeb ainult juht või omanik.' : `Aruannet ei saanud laadida: ${e.message}`));
+  }
+  try {
+    const { data: sales } = await api(`/api/v1/sales?business_date=${encodeURIComponent(bdate)}`);
     if (S.mode !== 'manager') return;
     salesBox.replaceChildren(el('div', 'section-label', 'Tänased müügid'));
     if (!sales.length) { salesBox.append(el('p', 'muted-p', 'Täna pole veel müüke.')); return; }
@@ -698,7 +730,7 @@ async function renderManager() {
     table.append(thead, tbody);
     salesBox.append(table);
   } catch (e) {
-    stats.replaceChildren(el('div', 'pay-state error', `Aruannet ei saanud laadida: ${e.message}`));
+    salesBox.replaceChildren(el('div', 'pay-state error', `Müüke ei saanud laadida: ${e.message}`));
   }
 }
 
@@ -770,17 +802,39 @@ async function closeDrawerDialog() {
       c.replaceChildren(title, el('p', null, `Loetud ${formatEuro(counted)} · oodatud ${formatEuro(d.expected_cents)} · vahe ${formatEuro(preview)}`));
       const confirm = el('button', 'primary-btn', 'Kinnita sulgemine'); confirm.type = 'button'; confirm.id = 'confirm-close';
       const err = el('div', 'dialog-error'); err.setAttribute('role', 'alert');
+      const ap = { needed: false, approverId: '', approverPin: '', approvalId: null };
       confirm.addEventListener('click', async () => {
         confirm.disabled = true;
         try {
-          const { data } = await api(`/api/v1/drawer/${d.id}/close`, { method: 'POST', body: { counted_cents: counted } });
+          const headers = {};
+          if (ap.needed) {
+            if (!ap.approvalId) {
+              const { data: a } = await api('/api/v1/auth/approvals', { method: 'POST', body: {
+                action: 'drawer_close', approver_id: ap.approverId, pin: ap.approverPin,
+                request: { drawer_id: d.id, counted_cents: counted } } });
+              ap.approvalId = a.approval_id; ap.approverPin = '';
+            }
+            headers['X-Approval-Id'] = ap.approvalId;
+          }
+          const { data } = await api(`/api/v1/drawer/${d.id}/close`, { method: 'POST', body: { counted_cents: counted }, headers });
           await refreshDrawer();
           c.replaceChildren(title, stateBox(data.variance_cents === 0 ? 'ok' : 'unconfirmed',
             `Kassa suletud. Oodatud ${formatEuro(data.expected_cents)}, loetud ${formatEuro(data.counted_cents)}, vahe ${formatEuro(data.variance_cents)}.`));
           const done = el('button', 'primary-btn', 'Valmis'); done.type = 'button'; done.addEventListener('click', closeModal);
           c.append(done);
           if (S.mode === 'manager') renderManager();
-        } catch (e) { err.textContent = e.message; confirm.disabled = false; }
+        } catch (e) {
+          if (e instanceof ApiError && e.code === 'approval_required' && !ap.needed) {
+            // Counted cash differs: a manager approves exactly this count (step-up).
+            ap.needed = true;
+            c.insertBefore(approvalFields(ap, () => {}), err);
+            err.textContent = 'Kassas on vahe – sulgemise peab kinnitama juht oma PIN-iga.';
+          } else {
+            if (e instanceof ApiError && e.code === 'approval_invalid') ap.approvalId = null;
+            err.textContent = e.message;
+          }
+          confirm.disabled = false;
+        }
       });
       c.append(err, confirm);
     });
@@ -1032,7 +1086,8 @@ function sendToKitchen() {
 async function openRefundDialog(saleId) {
   let sale;
   try { ({ data: sale } = await api(`/api/v1/sales/${saleId}`)); } catch (e) { announce(e.message); return; }
-  S.refund = { saleId, sale, qty: {}, reason: '', key: null, bodySig: null, state: 'input', error: '', result: null };
+  S.refund = { saleId, sale, qty: {}, reason: '', key: null, bodySig: null, state: 'input', error: '', result: null,
+    approverId: '', approverPin: '', approvalId: null };
   openModal(renderRefund);
 }
 
@@ -1040,7 +1095,9 @@ function renderRefund(c) {
   const r = S.refund;
   c.replaceChildren();
   const title = el('h2', null, `Tagastus · tšekk #${r.sale.receipt_no}`); title.id = 'dialog-title';
-  c.append(title, el('p', 'muted', 'Simuleeritud sularaha tagastus. Juhi roll on DEMO (päis), mitte päris autentimine.'));
+  c.append(title, el('p', 'muted', AUTH.mode === 'server'
+    ? 'Simuleeritud sularaha tagastus. Tagastuse kinnitab teine juht oma PIN-iga.'
+    : 'Simuleeritud sularaha tagastus. Juhi roll on DEMO (päis), mitte päris autentimine.'));
   const locked = r.state === 'sending' || r.state === 'unconfirmed';
   for (const ln of r.sale.lines) {
     const remaining = ln.quantity - (ln.refunded_quantity || 0);
@@ -1063,11 +1120,13 @@ function renderRefund(c) {
   reason.addEventListener('input', () => { r.reason = reason.value; ok.disabled = !valid(); });
   fr.append(label, reason);
   c.append(fr);
+  if (AUTH.mode === 'server' && !locked) c.append(approvalFields(r, () => { ok.disabled = !valid(); }));
   if (r.state === 'sending') c.append(stateBox('busy', 'Saadan tagastust serverisse…'));
   if (r.state === 'unconfirmed') c.append(stateBox('unconfirmed', `Tagastuse olek on teadmata (${r.error}). Ära maksa raha uuesti välja – vajuta „Proovi uuesti“.`));
   if (r.state === 'error') c.append(stateBox('error', `Tagastust ei salvestatud: ${r.error}`));
   const ok = el('button', 'primary-btn', r.state === 'unconfirmed' ? 'Proovi uuesti (sama tagastus)' : 'Kinnita tagastus'); ok.type = 'button'; ok.id = 'confirm-refund';
-  const valid = () => r.state === 'unconfirmed' || (Object.values(r.qty).some((q) => q > 0) && r.reason.trim().length >= 3);
+  const valid = () => r.state === 'unconfirmed' || (Object.values(r.qty).some((q) => q > 0) && r.reason.trim().length >= 3
+    && (AUTH.mode !== 'server' || Boolean(r.approvalId) || (r.approverId && /^\d{4,8}$/.test(r.approverPin))));
   ok.disabled = r.state === 'sending' || !valid();
   ok.addEventListener('click', submitRefund);
   c.append(ok);
@@ -1081,11 +1140,28 @@ async function submitRefund() {
   const bodySig = JSON.stringify(body);
   if (r.state === 'unconfirmed') {
     if (bodySig !== r.bodySig) { r.error = 'muutunud tagastust ei saa korrata'; renderRefund($('modal-content')); return; }
-  } else if (!r.key || r.bodySig !== bodySig) { r.key = newKey(); r.bodySig = bodySig; }
+  } else if (!r.key || r.bodySig !== bodySig) { r.key = newKey(); r.bodySig = bodySig; r.approvalId = null; }
   const retry = r.state === 'unconfirmed';
   r.state = 'sending'; r.error = '';
   renderRefund($('modal-content'));
-  const rec = { op: 'refund', key: r.key, path: `/api/v1/sales/${r.saleId}/refunds`, body, headers: DEMO_MANAGER, saleId: r.saleId, createdAt: new Date().toISOString() };
+  let headers = DEMO_MANAGER;
+  if (AUTH.mode === 'server') {
+    // Step-up: a DIFFERENT manager approves exactly this refund with their PIN.
+    if (!r.approvalId) {
+      try {
+        const { data } = await api('/api/v1/auth/approvals', { method: 'POST', body: {
+          action: 'refund', approver_id: r.approverId, pin: r.approverPin,
+          request: { sale_id: r.saleId, ...body } } });
+        r.approvalId = data.approval_id;
+      } catch (e) {
+        r.state = retry ? 'unconfirmed' : 'error'; r.error = `juhi kinnitus ebaõnnestus: ${e.message}`;
+        if (!retry) { r.key = null; r.bodySig = null; }
+        renderRefund($('modal-content')); return;
+      } finally { r.approverPin = ''; }
+    }
+    headers = { 'X-Approval-Id': r.approvalId };
+  }
+  const rec = { op: 'refund', key: r.key, path: `/api/v1/sales/${r.saleId}/refunds`, body, headers, saleId: r.saleId, createdAt: new Date().toISOString() };
   const out = await runMoneyOperation(rec, null);
   if (out.blocked) {
     r.error = out.blocked;
@@ -1095,7 +1171,7 @@ async function submitRefund() {
     await showRefundResult(out.data);
     return;
   } else if (isUncertain(out.err)) { r.state = 'unconfirmed'; r.error = out.err.message; } // journal stays
-  else { r.state = 'error'; r.error = out.err.message; r.key = null; r.bodySig = null; }
+  else { r.state = 'error'; r.error = out.err.message; r.key = null; r.bodySig = null; r.approvalId = null; }
   renderRefund($('modal-content'));
 }
 
@@ -1219,6 +1295,130 @@ function checkPendingJournal() {
   showRecovery(found);
 }
 
+// ---------------------------------------------------------------- server auth
+
+/** Manager step-up fields: a DIFFERENT manager of this location + their PIN. */
+function approvalFields(state, onChange) {
+  const box = el('div', 'approval-box'); box.id = 'approval-box';
+  box.append(el('strong', null, 'Juhi kinnitus'));
+  const sel = el('select'); sel.id = 'approver-select'; sel.setAttribute('aria-label', 'Kinnitav juht');
+  sel.append(el('option', null, '– vali juht –'));
+  sel.firstChild.value = '';
+  for (const st of AUTH.deviceInfo?.staff || []) {
+    if (!st.can_approve || st.id === AUTH.me?.staff_id) continue;
+    const o = el('option', null, st.display_name); o.value = st.id; sel.append(o);
+  }
+  sel.value = state.approverId;
+  const pin = el('input'); pin.id = 'approver-pin'; pin.type = 'password'; pin.inputMode = 'numeric';
+  pin.autocomplete = 'off'; pin.maxLength = 8; pin.setAttribute('aria-label', 'Juhi PIN');
+  sel.addEventListener('change', () => { state.approverId = sel.value; state.approvalId = null; onChange(); });
+  pin.addEventListener('input', () => { state.approverPin = pin.value; state.approvalId = null; onChange(); });
+  box.append(sel, pin);
+  return box;
+}
+
+function showAuth(build) {
+  $('auth-screen').hidden = false;
+  const c = $('auth-content'); c.replaceChildren();
+  build(c);
+  const f = c.querySelector('input, button'); if (f) f.focus();
+}
+function hideAuth() { $('auth-screen').hidden = true; }
+
+function showEnroll(note = '') {
+  showAuth((c) => {
+    const h = el('h2', null, 'Seadme registreerimine'); h.id = 'auth-title';
+    c.append(h, el('p', 'muted', 'Sisesta juhi loodud ühekordne registreerimiskood. Seade seotakse ettevõtte, asukoha ja kassaga.'));
+    const input = el('input'); input.id = 'enroll-code'; input.autocomplete = 'off'; input.setAttribute('aria-label', 'Registreerimiskood');
+    const msg = el('div', 'dialog-error', note); msg.setAttribute('role', 'alert');
+    const ok = el('button', 'primary-btn', 'Registreeri seade'); ok.type = 'button'; ok.id = 'enroll-submit';
+    ok.addEventListener('click', async () => {
+      ok.disabled = true;
+      try {
+        const { data } = await api('/api/v1/auth/devices/enroll', { method: 'POST', body: { code: input.value.trim() } });
+        AUTH.device = data.device_token; writeStore(localStorage, LS_DEVICE, AUTH.device);
+        await showPinLogin();
+      } catch (e) { msg.textContent = e.message; ok.disabled = false; }
+    });
+    c.append(input, msg, ok);
+  });
+}
+
+async function showPinLogin(note = '') {
+  try {
+    AUTH.deviceInfo = (await api('/api/v1/auth/device')).data;
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) { // revoked or unknown device
+      AUTH.device = null; writeStore(localStorage, LS_DEVICE, null); showEnroll('Seade pole registreeritud või registreering tühistati.');
+    } else showAuth((c) => c.append(stateBox('error', `Serveriga ei saanud ühendust: ${e.message}`)));
+    return;
+  }
+  const info = AUTH.deviceInfo;
+  let chosen = null;
+  showAuth((c) => {
+    const h = el('h2', null, 'Sisselogimine'); h.id = 'auth-title';
+    c.append(h, el('p', 'muted', `${info.tenant_name} · ${info.location_name}${info.register_name ? ` · ${info.register_name}` : ''} · ${info.device.name}`));
+    if (note) c.append(stateBox('unconfirmed', note));
+    const grid = el('div', 'staff-grid');
+    for (const st of info.staff) {
+      const b = el('button', 'staff-btn', st.display_name); b.type = 'button'; b.dataset.staff = st.id;
+      b.addEventListener('click', () => { chosen = st.id; grid.querySelectorAll('.staff-btn').forEach((x) => x.classList.toggle('selected', x === b)); pin.focus(); });
+      grid.append(b);
+    }
+    if (!info.staff.length) grid.append(el('p', 'muted', 'Selles asukohas pole PIN-iga töötajaid. Lisa need juhi vaates.'));
+    const pin = el('input'); pin.id = 'pin-input'; pin.type = 'password'; pin.inputMode = 'numeric'; pin.autocomplete = 'off';
+    pin.maxLength = 8; pin.setAttribute('aria-label', 'PIN');
+    const msg = el('div', 'dialog-error'); msg.setAttribute('role', 'alert');
+    const ok = el('button', 'primary-btn', 'Logi sisse'); ok.type = 'button'; ok.id = 'pin-submit';
+    const submit = async () => {
+      if (!chosen) { msg.textContent = 'Vali enda nimi.'; return; }
+      ok.disabled = true;
+      try {
+        const { data } = await api('/api/v1/auth/pin-login', { method: 'POST', body: { staff_id: chosen, pin: pin.value } });
+        AUTH.session = data.token; writeStore(sessionStorage, SS_SESSION, AUTH.session);
+        pin.value = '';
+        await afterLogin();
+      } catch (e) {
+        pin.value = ''; ok.disabled = false;
+        msg.textContent = e instanceof ApiError && e.status === 429 ? 'Liiga palju valesid PIN-e. Oota veidi ja proovi uuesti.'
+          : e instanceof ApiError && e.status === 401 ? 'Vale PIN.' : e.message;
+      }
+    };
+    ok.addEventListener('click', submit);
+    pin.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+    c.append(grid, pin, msg, ok);
+  });
+}
+
+function sessionLost() {
+  if (!AUTH.session) return;
+  AUTH.session = null; AUTH.me = null; writeStore(sessionStorage, SS_SESSION, null);
+  showPinLogin('Sessioon lõppes (lukustus või aegumine). Logi uuesti sisse – pooleli tehing jätkub sama võtmega.');
+}
+
+async function lockTill() {
+  try { await api('/api/v1/auth/logout', { method: 'POST' }); } catch { /* the session ends anyway */ }
+  AUTH.session = null; AUTH.me = null; writeStore(sessionStorage, SS_SESSION, null);
+  await showPinLogin();
+}
+
+function renderIdentity() {
+  const me = AUTH.me;
+  const name = AUTH.mode === 'demo' ? 'DEMO kassapidaja' : me?.display_name || '';
+  $('cashier-name').textContent = name;
+  $('cashier-initials').textContent = name.split(/\s+/).map((x) => x[0] || '').join('').slice(0, 2).toUpperCase();
+  $('mode-pill').textContent = AUTH.mode === 'demo' ? '● DEMO' : `● ${(me?.roles || []).join(', ')}`;
+  $('lock-button').hidden = AUTH.mode !== 'server';
+  $('register-select').disabled = AUTH.mode === 'server' && Boolean(me?.register_id);
+}
+
+async function afterLogin() {
+  AUTH.me = (await api('/api/v1/auth/me')).data;
+  hideAuth();
+  renderIdentity();
+  await loadWorkspace();
+}
+
 // ------------------------------------------------------------------------ boot
 
 async function selectRegister(id) {
@@ -1231,6 +1431,29 @@ async function selectRegister(id) {
 }
 
 async function boot() {
+  try {
+    AUTH.mode = (await api('/api/v1/auth/config')).data.mode;
+  } catch (e) {
+    $('view-root').replaceChildren(stateBox('error', `Serveriga ei saanud ühendust: ${e.message}`));
+    const retry = el('button', 'primary-btn', 'Proovi uuesti'); retry.type = 'button'; retry.addEventListener('click', boot);
+    $('view-root').append(retry);
+    return;
+  }
+  if (AUTH.mode === 'demo') { renderIdentity(); await loadWorkspace(); return; }
+  AUTH.device = readStore(localStorage, LS_DEVICE);
+  AUTH.session = readStore(sessionStorage, SS_SESSION);
+  if (!AUTH.device) { showEnroll(); return; }
+  if (AUTH.session) {
+    try {
+      AUTH.deviceInfo = (await api('/api/v1/auth/device')).data;
+      await afterLogin();
+      return;
+    } catch { /* fall through to PIN */ }
+  }
+  await showPinLogin();
+}
+
+async function loadWorkspace() {
   const root = $('view-root');
   root.replaceChildren(el('p', 'muted-p', 'Laadin tooteid ja kassasid serverist…'));
   try {
@@ -1238,25 +1461,29 @@ async function boot() {
     S.products = products; S.registers = registers;
   } catch (e) {
     root.replaceChildren(stateBox('error', `Serveriga ei saanud ühendust: ${e.message}`));
-    const retry = el('button', 'primary-btn', 'Proovi uuesti'); retry.type = 'button'; retry.addEventListener('click', boot);
+    const retry = el('button', 'primary-btn', 'Proovi uuesti'); retry.type = 'button'; retry.addEventListener('click', loadWorkspace);
     root.append(retry);
     return;
   }
   if (!S.registers.length) { root.replaceChildren(stateBox('error', 'Sellel ettevõttel pole ühtegi kassat.')); return; }
   let saved = null;
   try { saved = Number(localStorage.getItem(LS_REGISTER)); } catch { /* ignore */ }
-  S.registerId = S.registers.some((r) => r.id === saved) ? saved : S.registers[0].id;
+  const bound = AUTH.me?.register_id;
+  S.registerId = bound && S.registers.some((r) => r.id === bound) ? bound
+    : S.registers.some((r) => r.id === saved) ? saved : S.registers[0].id;
   renderRegisterSelect();
+  renderIdentity();
   S.storageOk = storageWorks();
   S.locksOk = Boolean(globalThis.navigator?.locks && typeof navigator.locks.request === 'function');
   await refreshDrawer();
-  activateMode('express');
+  activateMode(S.mode || 'express');
   checkPendingJournal(); // crash/reload recovery before any new sale
 }
 
 document.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => activateMode(b.dataset.mode)));
 $('register-select').addEventListener('change', (e) => selectRegister(Number(e.target.value)));
 $('pay-button').addEventListener('click', openPayment);
+$('lock-button').addEventListener('click', lockTill);
 $('send-button').addEventListener('click', sendToKitchen);
 $('close-modal').addEventListener('click', closeModal);
 $('modal').addEventListener('click', (e) => { if (e.target === $('modal')) closeModal(); });

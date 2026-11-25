@@ -27,7 +27,30 @@ class Settings:
     # identity in production).
     demo_identity: bool = False
     seed_demo_data: bool = False
+    # Server auth (RFC-0002). 32 bytes, urlsafe base64; encrypts TOTP seeds.
+    # Never commit it; set via the environment / secret store.
+    secret_key: str | None = None
+    # "dev" (default) or "pilot". The pilot profile refuses to start with
+    # anything that is only acceptable on a developer machine (G-SEC-2).
+    profile: str = "dev"
+    till_idle_minutes: int = 15
+    session_absolute_hours: int = 12
+    admin_idle_minutes: int = 15
+    admin_absolute_hours: int = 8
     clock: Callable[[], datetime] = field(default=utc_now)
+
+    def pilot_problems(self) -> list[str]:
+        """Reasons this configuration must not run as a pilot (empty = ok)."""
+        problems = []
+        if self.demo_identity:
+            problems.append("demo identity (unauthenticated headers) is enabled")
+        if not self.database_url.startswith("postgresql"):
+            problems.append("database is not PostgreSQL")
+        if not self.admin_database_url or self.admin_database_url == self.database_url:
+            problems.append("app and owner database connections are the same (RLS would not apply)")
+        if not self.secret_key:
+            problems.append("AXAR_POS_SECRET_KEY is not set")
+        return problems
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -39,4 +62,7 @@ class Settings:
             cash_rounding_step_cents=int(os.environ.get("AXAR_POS_CASH_ROUNDING", "5")),
             demo_identity=os.environ.get("AXAR_POS_DEMO_IDENTITY") == "1",
             seed_demo_data=os.environ.get("AXAR_POS_SEED_DEMO") == "1",
+            secret_key=os.environ.get("AXAR_POS_SECRET_KEY") or None,
+            profile=os.environ.get("AXAR_POS_PROFILE", "dev"),
+            till_idle_minutes=int(os.environ.get("AXAR_POS_TILL_IDLE_MINUTES", "15")),
         )

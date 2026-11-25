@@ -90,6 +90,9 @@ def test_ui_has_no_client_side_money_authority():
         "'/api/v1/sales/quote'", "'/api/v1/drawer/open'", "`/api/v1/drawer/${d.id}/close`",
         "`/api/v1/tables/${id}/order`", "`/api/v1/orders/${order.id}/lines`",
         "`/api/v1/orders/${o.id}/kitchen`", "`/api/v1/kitchen/tickets/${tk.id}/ready`",
+        # identity (RFC-0002): enrol, PIN login, logout, two step-up approvals
+        "'/api/v1/auth/devices/enroll'", "'/api/v1/auth/pin-login'", "'/api/v1/auth/logout'",
+        "'/api/v1/auth/approvals'", "'/api/v1/auth/approvals'",
     ]), paths
     assert src.count("method: 'POST'") + src.count("method: 'PUT'") == len(writes)
     for money in ("/api/v1/sales/cash'", "/pay-cash`", "/refunds`"):

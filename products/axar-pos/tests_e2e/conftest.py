@@ -28,12 +28,16 @@ def _free_port() -> int:
 
 
 class Server:
-    def __init__(self, tmp: Path):
+    def __init__(self, tmp: Path, extra_env: dict | None = None, before_start=None):
         self.port = _free_port()
         self.base = f"http://127.0.0.1:{self.port}"
         env = {**os.environ,
                "AXAR_POS_DATABASE_URL": f"sqlite:///{tmp / 'e2e.db'}",
-               "AXAR_POS_DEMO_IDENTITY": "1", "AXAR_POS_SEED_DEMO": "1"}
+               "AXAR_POS_DEMO_IDENTITY": "1", "AXAR_POS_SEED_DEMO": "1", **(extra_env or {})}
+        env = {k: v for k, v in env.items() if v is not None}
+        self.env = env
+        if before_start:
+            before_start(env)
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "axar_pos.main:app",
              "--host", "127.0.0.1", "--port", str(self.port), "--log-level", "warning"],

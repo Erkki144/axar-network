@@ -21,19 +21,19 @@
         <button type="button" class="nav-item" data-mode="kitchen"><span aria-hidden="true">♨</span><small>Köök</small></button>
         <button type="button" class="nav-item" data-mode="manager"><span aria-hidden="true">▥</span><small>Juht</small></button>
       </nav>
-      <div class="side-lower"><div class="avatar" aria-hidden="true">KL</div><span id="cashier-name">Kassapidaja</span></div>
+      <div class="side-lower"><div class="avatar" id="cashier-initials" aria-hidden="true">KL</div><span id="cashier-name">Kassapidaja</span><button type="button" id="lock-button" class="lock-button" hidden>Lukusta</button></div>
     </aside>
     <main class="main" id="main-area">
       <header class="topbar">
         <div class="location-heading"><div class="location-dot" aria-hidden="true"></div><div><strong id="location-name">AXAR ONE</strong><small id="register-name">Laadin kassasid…</small></div></div>
-        <div class="top-right"><span class="demo-pill">● DEMO</span><span class="status-pill" id="net-status" role="status">◌ Ühendan…</span><span class="date" id="local-clock"></span></div>
+        <div class="top-right"><span class="demo-pill" id="mode-pill">● DEMO</span><span class="status-pill" id="net-status" role="status">◌ Ühendan…</span><span class="date" id="local-clock"></span></div>
       </header>
       <section class="headline">
         <div><p class="eyebrow" id="section-eyebrow">MÜÜGI TÖÖLAUD</p><h1 id="section-title">Kiire teenindus.<br><em>Vähem samme.</em></h1><p class="subtitle" id="section-subtitle">Tooted, tellimused ja maksmine ühes vaates.</p></div>
         <div class="note-card"><span class="spark" aria-hidden="true">✳</span><span>Teadmiseks<small id="hint-message">Hinnad, käibemaks ja tagastusraha tulevad serverist.</small></span></div>
       </section>
       <div class="workspace-body" id="view-root"></div>
-      <footer class="safe-note"><span aria-hidden="true">⊘</span> Kiirmüük, kassa ja tagastused on ühendatud AXAR POS API-ga (demokeskkond, simuleeritud sularaha, kaardimakseid pole). Lauad ja köök on DEMO ning salvestuvad ainult selles seadmes.</footer>
+      <footer class="safe-note"><span aria-hidden="true">⊘</span> Kõik andmed tulevad AXAR POS serverist. Simuleeritud sularaha – kaardimakseid ega pärismakseid pole.</footer>
     </main>
     <aside class="checkout" id="checkout-panel" aria-label="Ostukorv">
       <div class="register-bar">
@@ -55,6 +55,7 @@
       </div>
     </aside>
   </div>
+  <div id="auth-screen" class="auth-screen" hidden><div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-title"><div id="auth-content"></div></div></div>
   <div id="modal" class="overlay" hidden role="presentation"><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title"><button id="close-modal" type="button" class="close-modal" aria-label="Sulge">×</button><div id="modal-content"></div></div></div>
   <div class="sr-only" id="announcer" aria-live="polite" aria-atomic="true"></div>
   <script type="module" src="app.mjs"></script>

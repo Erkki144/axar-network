@@ -31,3 +31,15 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 .order-message.error{background:#fdecec;color:#8c2323;border:1px solid #f0b9b9}
 .order-message.ok{background:#e8f6ee;color:#1d6a43}
 .ticket.done{opacity:.6}
+.auth-screen{position:fixed;inset:0;z-index:60;display:grid;place-items:center;padding:16px;background:#112b35}
+.auth-card{width:min(420px,100%);background:#fff;border-radius:20px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.auth-card h2{margin:0 0 4px;font-size:22px}
+.auth-card .muted{margin:0 0 14px}
+.staff-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin:12px 0}
+.staff-btn{padding:14px 10px;border-radius:12px;border:1px solid #d8e1e4;background:#f6f9fa;font-weight:600;cursor:pointer}
+.staff-btn.selected{border-color:#205f56;background:#e8f6ee}
+.auth-card input{width:100%;font-size:20px;padding:12px;border-radius:12px;border:1px solid #c9d3d6;letter-spacing:.2em}
+.lock-button{margin-top:8px;font-size:12px;padding:6px 10px;border-radius:10px;border:1px solid rgba(255,255,255,.4);background:transparent;color:inherit;cursor:pointer}
+.approval-box{border:1px dashed #f1cf8a;background:#fffaf0;border-radius:12px;padding:12px;margin:10px 0}
+.approval-box select,.approval-box input{width:100%;margin-top:6px;padding:8px;border-radius:8px;border:1px solid #c9d3d6}
+.auth-screen[hidden]{display:none}

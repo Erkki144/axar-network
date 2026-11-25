@@ -187,6 +187,9 @@ class Sale(Base):
     register_id: Mapped[int] = mapped_column(ForeignKey("registers.id"), index=True)
     drawer_session_id: Mapped[int] = mapped_column(ForeignKey("drawer_sessions.id"), index=True)
     cashier_id: Mapped[str] = mapped_column(String(64))
+    # Who/what acted (server auth, RFC-0002); NULL for demo-identity records.
+    device_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(128))
     request_hash: Mapped[str] = mapped_column(String(64))
     correlation_id: Mapped[str] = mapped_column(String(36))
@@ -283,6 +286,8 @@ class Refund(Base):
     cashier_id: Mapped[str] = mapped_column(String(64))
     approved_by: Mapped[str] = mapped_column(String(64))
     approver_role: Mapped[str] = mapped_column(String(32))
+    device_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     reason: Mapped[str] = mapped_column(String(500))
     idempotency_key: Mapped[str] = mapped_column(String(128))
     request_hash: Mapped[str] = mapped_column(String(64))
@@ -438,7 +443,143 @@ class KitchenTicketLine(Base):
     quantity: Mapped[int] = mapped_column(Integer)
 
 
-APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent, KitchenTicketLine)
+# ------------------------------------------------------------ identity (RFC-0002)
+# Secrets are never stored in clear: PINs/passwords as argon2id hashes, device
+# and session tokens as SHA-256 of 256-bit random values, TOTP secrets
+# encrypted (AES-GCM) with the server key.
+
+
+class Staff(Base):
+    __tablename__ = "staff"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    display_name: Mapped[str] = mapped_column(String(100))
+    active: Mapped[bool] = mapped_column(default=True)
+    pin_hash: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    failed_pin_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    pin_locked_until: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Back-office (strong) login: only managers/owners get these.
+    login: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    totp_secret_enc: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    totp_last_step: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    login_locked_until: Mapped[datetime | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime]
+
+    roles: Mapped[list["StaffRole"]] = relationship(lazy="selectin", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "display_name", name="uq_staff_name"),
+        UniqueConstraint("tenant_id", "login", name="uq_staff_login"),
+    )
+
+
+class StaffRole(Base):
+    """Role of a staff member, either tenant-wide (location NULL) or for one location."""
+
+    __tablename__ = "staff_roles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    staff_id: Mapped[str] = mapped_column(ForeignKey("staff.id"), index=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))
+    role: Mapped[str] = mapped_column(String(16))  # cashier|waiter|kitchen|manager|owner
+    location_id: Mapped[int | None] = mapped_column(ForeignKey("locations.id"), nullable=True)
+
+    __table_args__ = (UniqueConstraint("staff_id", "role", "location_id", name="uq_staff_role"),)
+
+
+class Device(Base):
+    """An enrolled till/tablet. Bound to one tenant + location (+ register)."""
+
+    __tablename__ = "devices"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"))
+    register_id: Mapped[int | None] = mapped_column(ForeignKey("registers.id"), nullable=True)
+    name: Mapped[str] = mapped_column(String(100))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    enrolled_by: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime]
+    last_seen_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    failed_pin_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    pin_locked_until: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class EnrollmentCode(Base):
+    __tablename__ = "enrollment_codes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"))
+    register_id: Mapped[int | None] = mapped_column(ForeignKey("registers.id"), nullable=True)
+    device_name: Mapped[str] = mapped_column(String(100))
+    created_by: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
+    used_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    device_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class AuthSession(Base):
+    """Server-side session: looked up on EVERY request, revocable at once."""
+
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    staff_id: Mapped[str] = mapped_column(ForeignKey("staff.id"), index=True)
+    device_id: Mapped[str | None] = mapped_column(ForeignKey("devices.id"), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(8))  # till (PIN on device) | admin (password + TOTP)
+    mfa: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime]
+    last_seen_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
+    revoked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class Approval(Base):
+    """Single-use manager step-up approval bound to ONE request (hash)."""
+
+    __tablename__ = "approvals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    action: Mapped[str] = mapped_column(String(32))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    approver_id: Mapped[str] = mapped_column(ForeignKey("staff.id"))
+    approver_role: Mapped[str] = mapped_column(String(16))
+    requested_by: Mapped[str] = mapped_column(ForeignKey("staff.id"))
+    session_id: Mapped[str] = mapped_column(String(36))
+    device_id: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
+    used_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class AuthEvent(Base):
+    """Append-only audit of authentication and authorization decisions."""
+
+    __tablename__ = "auth_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
+    at: Mapped[datetime]
+    event: Mapped[str] = mapped_column(String(48))
+    outcome: Mapped[str] = mapped_column(String(16))  # ok|fail|locked|denied
+    staff_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    device_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    detail: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+
+APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent, KitchenTicketLine, AuthEvent)
 
 
 class AppendOnlyViolation(RuntimeError):
