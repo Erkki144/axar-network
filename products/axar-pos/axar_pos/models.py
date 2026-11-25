@@ -949,6 +949,34 @@ class DeviceInbox(Base):
                       UniqueConstraint("tenant_id", "entry_id", name="uq_device_inbox_entry"))
 
 
+class PosSettings(Base):
+    """CENTRAL: per-tenant POS settings a manager edits in the settings screen.
+    offline_limit_hours: how long a till may sell without contact with the
+    central server (owner decision 2026-11-25: at most 72 h)."""
+
+    __tablename__ = "pos_settings"
+
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    offline_limit_hours: Mapped[int] = mapped_column(Integer, default=72)
+    updated_at: Mapped[datetime]
+    updated_by: Mapped[str] = mapped_column(String(64))
+
+
+class EdgeSyncState(Base):
+    """EDGE: the till's own record of its last successful contact with the
+    central server and the limit the server gave it. ``max_seen_at`` is the
+    latest local time the till has used; a clock set back behind it blocks
+    selling (the limit cannot be dodged by changing the clock)."""
+
+    __tablename__ = "edge_sync_state"
+
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_contact_at: Mapped[datetime]
+    max_seen_at: Mapped[datetime]
+    offline_limit_hours: Mapped[int] = mapped_column(Integer)
+
+
 APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent, KitchenTicketLine, AuthEvent, StockMovement,
                DeviceJournalEntry)
 

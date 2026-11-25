@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from axar_pos import journal
+from axar_pos import journal, offline
 from axar_pos.api import create_app
 from axar_pos.config import Settings
 from axar_pos.models import (AuthEvent, DeviceCursor, DeviceInbox, DeviceJournalEntry, Location, Product,
@@ -42,6 +42,8 @@ def edge(tmp_path, clock):
         s.add(loc)
         s.flush()
         s.add(Register(tenant_id="t-a", location_id=loc.id, code="R1", name="Kassa 1"))
+    with app.state.session_factory() as s:                      # enrolment: the till was online once
+        offline.record_contact(s, tenant_id="t-a", device_id=DEVICE, now=clock(), limit_hours=72)
     with TestClient(app) as c:
         api = Api(c, "t-a")
         api.app = app
