@@ -516,6 +516,11 @@ def test_pin_is_never_returned_or_logged(shop, world):
     assert all("pin" not in x and "pin_hash" not in x for x in staff)
     with world.app.state.session_factory() as s:
         details = " ".join(e.detail or "" for e in s.scalars(select(AuthEvent)))
+    # Random UUIDs (device/session ids) can contain any 4 digits by chance;
+    # remove them so a hit really means a logged PIN (was a rare false failure).
+    import re
+
+    details = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "<uuid>", details)
     assert "4829" not in details and "7351" not in details
 
 
