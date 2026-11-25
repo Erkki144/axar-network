@@ -104,3 +104,9 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 .method-tabs button{flex:1;min-height:48px;border:1px solid #d6e4de;background:#fff;border-radius:12px;font-weight:800;color:#36675d}
 .method-tabs button.active{background:#193e49;border-color:#193e49;color:#fff}
 .dialog select,.dialog input:not(.tender-input){width:100%;min-height:48px;border:1px solid #c5d8d1;border-radius:12px;padding:0 12px;margin:8px 0 12px;font-size:15px;background:#fff}
+
+/* offline limit banner (O1c) */
+.offline-banner{margin:14px 34px 0;padding:12px 16px;border-radius:12px;font-size:13px;font-weight:700;line-height:1.5}
+.offline-banner.warn{background:#fff4dc;color:#7a4b06;border:1px solid #f0d49a}
+.offline-banner.blocked{background:#fde8e8;color:#8f1d1d;border:1px solid #f1b8b8}
+@media(max-width:640px){.offline-banner{margin:10px 17px 0}}

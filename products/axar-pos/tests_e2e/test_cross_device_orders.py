@@ -127,7 +127,10 @@ def test_kitchen_ticket_from_waiter_device_appears_in_kitchen_device(device, ser
 
 
 def test_lost_kitchen_answer_retry_does_not_duplicate_ticket(device, server):
-    waiter = device()
+    # Live stream off for this device: otherwise the "kitchen ticket created"
+    # event can refresh the bill before the retry (button -> "all sent"), and
+    # the retry path under test would not run. Polling is frozen below too.
+    waiter = device(block_stream=True)
     open_table(waiter, "Terrass 02")
     add(waiter, "Kohv")
     expect(waiter.locator("#basket-count")).to_have_text("1")
@@ -175,3 +178,18 @@ def test_realtime_stream_updates_other_device_without_polling(device, server):
     freeze_polling(other)
     add(waiter, "Tee", 1)
     expect(other.locator("#basket-count")).to_have_text("2", timeout=5_000)
+
+
+def test_live_marker_survives_ordinary_api_calls(device):
+    """Regression: every successful API call refreshed the status pill and
+    dropped "· reaalajas" although the stream was still connected (seen as an
+    intermittent failure of the realtime test above)."""
+    kitchen = device()
+    kitchen.click('[data-mode="kitchen"]')
+    pill = kitchen.locator("#net-status")
+    expect(pill).to_contain_text("reaalajas")
+    expect(pill).to_have_attribute("data-live", "1")
+    with kitchen.expect_response(lambda r: "/api/v1/" in r.url and "/events/" not in r.url and r.ok):
+        kitchen.click('[data-mode="tables"]')                  # loads tables through the normal API
+    kitchen.wait_for_timeout(200)
+    expect(pill).to_contain_text("reaalajas")

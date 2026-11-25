@@ -4,6 +4,8 @@ visible on the stock card. Real server with the in-process event worker."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from playwright.sync_api import expect
 
@@ -91,3 +93,58 @@ def test_invoice_to_stock_to_recipe_to_sale(page):
     sale = page.locator("tr[data-kind='sale_consumption']")
     expect(sale).to_contain_text("Müük")
     expect(sale).to_contain_text("2,00 €")                            # COGS of 0,4 kg
+
+
+def _post_invoice(p, doc_no, qty, net, new_item=False):
+    p.click('[data-mode="inventory"]')
+    p.locator('[data-tab="invoices"]').click()
+    p.click("#new-invoice")
+    if new_item:
+        p.select_option("#inv-supplier", "new")
+        p.fill("#inv-new-supplier", "Talu OÜ")
+    else:
+        p.select_option("#inv-supplier", label="Talu OÜ")
+    p.fill("#inv-no", doc_no)
+    line = p.locator(".inv-line").first
+    if new_item:
+        line.locator(".inv-item").select_option("new")
+        line.locator(".inv-new-item").fill("Kartul")
+    else:
+        line.locator(".inv-item").select_option(label="Kartul (kg)")
+    line.locator(".inv-qty").fill(qty)
+    line.locator(".inv-net").fill(net)
+    p.click("#inv-save")
+    p.locator(f"tr[data-doc='{doc_no}'] .inv-post").click()
+    expect(p.locator(f"tr[data-doc='{doc_no}']")).to_contain_text("Kinnitatud")
+
+
+def test_stock_card_redrawn_by_click_and_live_event_at_once_shows_one_table(page, browser):
+    """Regression (seen once in CI): the stock card cleared the view, awaited the
+    server, then appended. A click and a live 'stock changed' event arriving
+    together drew the card twice (two tables, every movement shown twice)."""
+    _post_invoice(page, "A-1", "10", "50,00", new_item=True)
+    page.locator('[data-tab="stock"]').click()
+    expect(page.locator("tr[data-item^='KARTUL']")).to_contain_text("10 kg")
+
+    held = []
+    page.route("**/api/v1/inventory/items/*/card", lambda route: held.append(route))
+    page.locator("tr[data-item^='KARTUL'] button").click()           # render 1: waits for the server
+    deadline = time.monotonic() + 5
+    while not held and time.monotonic() < deadline:
+        page.wait_for_timeout(50)
+    assert len(held) == 1
+
+    other_ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    other = other_ctx.new_page()
+    other.goto(f"{page.srv.base}/one/")
+    other.wait_for_selector("#product-grid .product")
+    _post_invoice(other, "A-2", "1", "5,00")                           # another device: stock changes
+    while len(held) < 2 and time.monotonic() < deadline + 10:
+        page.wait_for_timeout(50)                                       # render 2 from the live event
+    assert len(held) == 2, "the live event did not redraw the open card"
+    for route in held:                                                  # answers arrive together
+        route.continue_()
+    page.unroute("**/api/v1/inventory/items/*/card")
+    expect(page.locator("tr[data-kind='receipt']")).to_have_count(2)    # A-1 and A-2, once each
+    expect(page.locator("table.inv-card")).to_have_count(1)
+    other_ctx.close()
