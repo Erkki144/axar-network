@@ -284,3 +284,36 @@ def test_parallel_receipts_and_production_lose_no_update(inv):
     assert (pot["qty_micro"], pot["value_cents"]) == (25 * KG, 12500)   # 20 + 10 - 5 kg at €5
     assert (p["qty_micro"], p["value_cents"]) == (5 * KG, 2500)
     recon(inv)
+
+
+def test_invoice_without_delivery_note_is_the_receipt(a, inv):
+    """Invoice-based flow (owner, 25 Nov): the purchase invoice itself receives
+    the goods; a later invoice cannot re-match a delivery note."""
+    m = inv["m"]
+    body = {"supplier_id": inv["sup"], "doc_type": "invoice", "doc_no": "INV-100", "doc_date": "2026-03-10",
+            "warehouse_id": inv["wh"], "lines": [{"item_id": inv["potato"], "qty_micro": 10 * KG, "net_cents": 5000,
+                                                  "vat_rate_bp": 2400}]}
+    doc = m.post("/api/v1/inventory/documents", body).json()
+    assert doc["status"] == "draft"
+    assert stock_of_or_none(inv, inv["potato"]) is None                  # a draft moves nothing
+    listed = m.get("/api/v1/inventory/documents?status=draft").json()
+    assert [d["doc_no"] for d in listed] == ["INV-100"] and listed[0]["gross_cents"] == 6200
+    assert m.post(f"/api/v1/inventory/documents/{doc['id']}/post").status_code == 200
+    st = stock_of(inv, inv["potato"])
+    assert (st["qty_micro"], st["value_cents"]) == (10 * KG, 5000)
+    r = m.post(f"/api/v1/inventory/documents/{doc['id']}/returns",
+               {"item_id": inv["potato"], "qty_micro": KG, "return_no": "R1"})
+    assert r.status_code == 201
+    recon(inv)
+
+
+def test_recipe_preview_shows_live_cost_food_cost_and_margin(inv):
+    deliver(inv)
+    r = inv["m"].post("/api/v1/inventory/recipes/preview", {"product_id": inv["supp"], "lines": [
+        {"item_id": inv["potato"], "qty_micro": 200_000}]}).json()
+    assert r["cost_per_unit_cents"] == 100                               # 0.2 kg x €5
+    assert (r["price_net_cents"], r["margin_cents"], r["food_cost_bp"]) == (1000, 900, 1000)   # 10 %
+
+
+def stock_of_or_none(inv, item):
+    return next((x for x in inv["m"].get("/api/v1/inventory/stock").json() if x["item_id"] == item), None)

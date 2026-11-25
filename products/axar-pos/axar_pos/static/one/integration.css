@@ -65,3 +65,29 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
   .mini-pay{min-height:48px;min-width:110px;border:0;border-radius:12px;background:#95e7cc;color:#0f3a35;font-weight:800;font-size:15px}
   .app-shell{padding-bottom:150px}
 }
+/* ---- inventory screens (#14) ---- */
+.nav-item[hidden]{display:none}
+.inv-tabs{display:flex;gap:9px;margin:4px 0 18px;flex-wrap:wrap}
+.inv-head{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.inv-add{width:auto;min-height:48px;padding:0 20px}
+.inv-form{display:flex;flex-direction:column;gap:12px;max-width:980px}
+.inv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+.inv-field{display:flex;flex-direction:column;gap:5px;font-size:12px;color:#5f7772;font-weight:700}
+.inv-field[hidden]{display:none}
+.inv-form input,.inv-form select,.inv-editor input,.inv-editor select{min-height:44px;border:1px solid #c9d3d6;border-radius:10px;padding:0 10px;font-size:14px;background:#fff}
+.inv-line{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px;border:1px solid #e3ebe7;border-radius:12px;background:#fff}
+.inv-line .inv-item{flex:2 1 180px}.inv-line .inv-qty,.inv-line .inv-net{flex:1 1 110px;min-width:0}
+.inv-line [hidden]{display:none}
+.inv-nonrec{display:flex;gap:6px;align-items:center;font-size:12px;color:#5f7772}
+.inv-lines{display:flex;flex-direction:column;gap:8px}
+.inv-form .primary-btn,.inv-form .secondary-btn,.inv-editor .primary-btn,.inv-editor .secondary-btn{width:auto;align-self:flex-start;padding:0 20px}
+.sales-table tr.negative td{color:#a53030}
+.inv-total{font-weight:800;margin-top:12px}
+.inv-recipes{display:grid;grid-template-columns:minmax(180px,260px) 1fr;gap:16px}
+.inv-offer-list{display:flex;flex-direction:column;gap:8px}
+.inv-offer{text-align:left;border:1px solid #e3ebe7;background:#fff;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:3px;min-height:56px}
+.inv-offer small{color:#8a9b99}.inv-offer.selected{border-color:#4d9a7d;box-shadow:inset 0 0 0 1px #4d9a7d;background:#f4faf6}
+.inv-editor{display:flex;flex-direction:column;gap:12px}
+.inv-cost{border:1px solid #e3ebe7;border-radius:12px;padding:12px;background:#fbfdfc}
+.inv-summary .summary-line{font-size:14px}
+@media(max-width:640px){.inv-recipes{grid-template-columns:1fr}.nav-item{width:20%}}

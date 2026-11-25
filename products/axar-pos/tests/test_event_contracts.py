@@ -126,3 +126,25 @@ def test_schema_rejects_unknown_fields_so_changes_need_a_new_version():
                          "vat_rate_bp": 2400, "vat_cents": 48}]}
     assert list(v.iter_errors(sample)) == []
     assert list(v.iter_errors({**sample, "currency": "EUR"}))
+
+
+def test_stock_changed_events_match_schema(a, app):
+    from axar_pos import inventory
+    from axar_pos.db import bind_tenant
+
+    with app.state.request_factory() as s:
+        bind_tenant(s, "t-a")
+        loc = next(r for r in a.get("/api/v1/registers").json())["location"]["id"]
+        wh = inventory.create_warehouse(s, "t-a", location_id=loc, code="W", name="W", is_default=True)
+        it = inventory.create_item(s, "t-a", sku="I", name="I", kind="ingredient", uom="kg")
+        sp = inventory.create_supplier(s, "t-a", code="S", name="S")
+        from datetime import date, datetime, timezone
+        now = datetime(2026, 3, 10, 10, tzinfo=timezone.utc)
+        d = inventory.create_document(s, "t-a", supplier_id=sp.id, doc_type="invoice", doc_no="1", doc_date=date(2026, 3, 10),
+                                      warehouse_id=wh.id, lines=[inventory.DocLine(it.id, 1_000_000, 500, 2400)],
+                                      freight_cents=0, actor="k", now=now)
+        inventory.post_document(s, "t-a", d.id, actor="k", now=now)
+    v = validator("stock.changed.v1.schema.json")
+    with app.state.session_factory() as s:
+        evs = list(s.scalars(select(OutboxEvent).where(OutboxEvent.type == "stock.changed")))
+    assert len(evs) == 1 and list(v.iter_errors(json.loads(evs[0].payload))) == []

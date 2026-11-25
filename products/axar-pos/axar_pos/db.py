@@ -8,7 +8,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from .models import Base, DiningTable, Location, Product, Register, TaxRate, Tenant
+from .models import Base, DiningTable, Location, Product, Register, TaxRate, Tenant, Warehouse
 
 # Estonian VAT. Standard rate rose 22 % -> 24 % on 2025-07-01.
 # Must be re-verified with an accountant before any real use.
@@ -135,6 +135,8 @@ def seed_demo(factory: sessionmaker[Session], tenant_id: str = "demo") -> None:
             ])
             s.add_all(DiningTable(tenant_id=tenant_id, location_id=loc.id, code=code, name=name)
                       for code, name in DEMO_TABLES)
+            s.add(Warehouse(tenant_id=tenant_id, location_id=loc.id, code="LADU1", name="Kohviku ladu",
+                            is_default=True))
             for sku, name, price, cat, menu in DEMO_PRODUCTS:
                 s.add(Product(tenant_id=tenant_id, sku=sku, name=name,
                               price_cents=price, tax_category=cat, category=menu))

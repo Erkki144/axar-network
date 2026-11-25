@@ -33,6 +33,9 @@ class Settings:
     # "dev" (default) or "pilot". The pilot profile refuses to start with
     # anything that is only acceptable on a developer machine (G-SEC-2).
     profile: str = "dev"
+    # Run the event consumers inside the API process (single-process setups
+    # and demos). Several processes are safe: consumers are lease-based.
+    inprocess_worker: bool = False
     till_idle_minutes: int = 15
     session_absolute_hours: int = 12
     admin_idle_minutes: int = 15
@@ -67,5 +70,6 @@ class Settings:
             seed_demo_data=os.environ.get("AXAR_POS_SEED_DEMO") == "1",
             secret_key=os.environ.get("AXAR_POS_SECRET_KEY") or None,
             profile=os.environ.get("AXAR_POS_PROFILE", "dev"),
+            inprocess_worker=os.environ.get("AXAR_POS_INPROCESS_WORKER") == "1",
             till_idle_minutes=int(os.environ.get("AXAR_POS_TILL_IDLE_MINUTES", "15")),
         )

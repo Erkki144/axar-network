@@ -59,3 +59,23 @@ Status: **local / CI only.** Branch `claude/axar-inventory-s10-0r9ip8`, stacked 
 - **Accounting:** GRNI accrual and GL postings (with BOOKS / AXAR CONNECT); refund disposition; period close.
 - **Recipes:** nested recipes and yield/trim loss; modifiers.
 - **Pending the accountant:** VAT and goods-received-not-invoiced (GRNI) treatment. The costing policy is decided (ADR-0011).
+
+## Screens (follow-up PR, owner request 25 Nov: invoice-based flow)
+
+The **"Ladu"** view in AXAR ONE is shown only with the `inventory` permission (manager/owner).
+
+| Tab | What it does |
+| --- | --- |
+| **Arved** (invoice inbox) | Purchase invoice draft. A new supplier and new items can be created inline. Lines are entered as quantity (`10`, `0,5`), net € and VAT rate, with an optional "VAT not recoverable" flag; freight is split across the lines. "Kinnita ja võta lattu" posts the invoice **once**. A duplicate number is shown as an error. A draft does not change stock. |
+| **Laoseis** (stock) | Quantity, value, average cost and negative-stock warning per item; total stock value. The stock card lists every movement (receipt, sale, production, return, invoice price difference) with its COGS. The view **updates live** (`stock.changed` event) when a sale is consumed. |
+| **Retseptid** (recipes) | Pick a menu offer and enter ingredients per portion. A **live server preview** shows cost per portion, the net selling price, food-cost % and margin. Saving creates a new version; old sales do not change. Offers that sell a stocked item are protected. |
+
+**Flow:**
+- **Invoice-based:** an invoice without a delivery note is the receipt document.
+- **Delivery note (optional):** if a delivery note exists, the invoice posts only the price difference, and a delivery note can be matched by only one invoice.
+
+**Single-process setups:** `AXAR_POS_INPROCESS_WORKER=1` runs the consumers inside the API process (lease-based, so it is safe alongside a separate worker).
+
+**Tests:**
+- Browser: `tests_e2e/test_inventory_ui.py` runs the whole path through the screens. A new supplier and item go onto an invoice → draft → post → duplicate refused → stock 10 kg / €50 / €5/kg → recipe 0.2 kg with live cost €1.00, net price €4.76, margin €3.76, food cost 21 % → 2 portions sold at the till → stock card shows 9.6 kg and a "Müük" COGS of €2.00 without any manual step.
+- Backend: `test_invoice_without_delivery_note_is_the_receipt`, `test_recipe_preview_shows_live_cost_food_cost_and_margin`, and the `stock.changed` schema test.

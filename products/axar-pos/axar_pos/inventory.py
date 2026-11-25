@@ -197,6 +197,19 @@ def _negative_cost(bal: StockBalance, qty: int) -> int:
     return cost
 
 
+def _stock_changed(s: Session, tenant_id: str, warehouse_id: int, item_ids, ref_type: str, ref_id: str,
+                   now: datetime) -> None:
+    """Realtime invalidation (same transaction as the movements): screens
+    showing these items re-read them through the API."""
+    from . import events
+
+    wh = s.get(Warehouse, warehouse_id)
+    events.emit(s, tenant_id=tenant_id, type="stock.changed", payload={
+        "warehouse_id": warehouse_id, "item_ids": sorted(set(item_ids)), "ref_type": ref_type, "ref_id": ref_id},
+        aggregate_type="stock_change", aggregate_id=f"{ref_type}:{ref_id}"[:36], aggregate_version=1, now=now,
+        location_id=wh.location_id if wh else None)
+
+
 # ------------------------------------------------------- supplier documents
 
 
@@ -228,6 +241,9 @@ def create_document(s: Session, tenant_id: str, *, supplier_id: int, doc_type: s
                                                        SupplierDocument.tenant_id == tenant_id))
         if base is None or base.doc_type != "delivery_note" or base.supplier_id != supplier_id:
             raise InvalidInventory("an invoice can only match a delivery note of the same supplier")
+        if s.scalar(select(SupplierDocument.id).where(SupplierDocument.tenant_id == tenant_id,
+                                                      SupplierDocument.matches_document_id == matches_document_id)):
+            raise DuplicateDocument("this delivery note already has an invoice")
     doc = SupplierDocument(id=str(uuid.uuid4()), tenant_id=tenant_id, supplier_id=supplier_id, doc_type=doc_type,
                            doc_no=doc_no.strip(), doc_date=doc_date, warehouse_id=warehouse_id, status="draft",
                            freight_cents=freight_cents, created_by=actor, created_at=now,
@@ -278,13 +294,17 @@ def post_document(s: Session, tenant_id: str, document_id: str, *, actor: str, n
         raise AlreadyPosted("this document is already posted")
     bdate = doc.doc_date
     costs = _line_costs(doc)
-    if doc.doc_type == "delivery_note":
+    # Invoice-based flow (owner decision): an invoice WITHOUT a delivery note is
+    # the receipt itself. A delivery note is optional; when an invoice matches
+    # a posted delivery note, only the price difference is posted.
+    if doc.doc_type == "delivery_note" or doc.matches_document_id is None:
         bals = _lock_balances(s, tenant_id, [(ln.item_id, doc.warehouse_id) for ln in doc.lines])
         for ln, cost in zip(doc.lines, costs):
             _move(s, bals[(ln.item_id, doc.warehouse_id)], kind="receipt", qty=ln.qty_micro, value=cost,
                   ref_type="supplier_document", ref_id=doc.id, ref_line=ln.line_no, bdate=bdate, now=now)
     else:
         _post_invoice(s, tenant_id, doc, costs, bdate, now)
+    _stock_changed(s, tenant_id, doc.warehouse_id, [ln.item_id for ln in doc.lines], "supplier_document", doc.id, now)
     s.commit()
     return s.scalar(select(SupplierDocument).where(SupplierDocument.id == document_id)
                     .execution_options(populate_existing=True))
@@ -295,8 +315,6 @@ def _post_invoice(s: Session, tenant_id: str, inv: SupplierDocument, costs: list
     """An invoice for an already received delivery note: quantities are NOT
     posted again. The cost difference per item is split by the share of the
     received quantity still on hand (stock) vs already consumed (COGS)."""
-    if inv.matches_document_id is None:
-        raise InvalidInventory("an invoice without a delivery note is not supported yet")
     note = s.scalar(select(SupplierDocument).where(SupplierDocument.id == inv.matches_document_id))
     if note.status != "posted":
         raise InvalidInventory("post the delivery note first")
@@ -333,8 +351,8 @@ def return_to_supplier(s: Session, tenant_id: str, document_id: str, *, item_id:
     """Partial return of received goods at current average cost."""
     doc = s.scalar(select(SupplierDocument).where(SupplierDocument.id == document_id,
                                                   SupplierDocument.tenant_id == tenant_id))
-    if doc is None or doc.status != "posted" or doc.doc_type != "delivery_note":
-        raise InvalidInventory("only a posted delivery note can be returned against")
+    if doc is None or doc.status != "posted" or (doc.doc_type == "invoice" and doc.matches_document_id):
+        raise InvalidInventory("returns are made against the posted receipt document")
     received = sum(ln.qty_micro for ln in doc.lines if ln.item_id == item_id)
     returned = s.scalar(select(func.coalesce(func.sum(-StockMovement.qty_micro), 0)).where(
         StockMovement.tenant_id == tenant_id, StockMovement.kind == "supplier_return",
@@ -348,6 +366,7 @@ def return_to_supplier(s: Session, tenant_id: str, document_id: str, *, item_id:
         StockMovement.ref_id == document_id)) or 0
     _consume(s, bal, qty_micro, kind="supplier_return", ref_type="supplier_document", ref_id=document_id,
              ref_line=1000 + n, bdate=now.date(), now=now, to_cogs=False)
+    _stock_changed(s, tenant_id, doc.warehouse_id, [item_id], "supplier_return", document_id, now)
     try:
         s.commit()
     except IntegrityError:
@@ -454,6 +473,7 @@ def produce(s: Session, tenant_id: str, *, output_item_id: int, warehouse_id: in
                         output_item_id=output_item_id, output_qty_micro=out_qty, cost_cents=cost,
                         idempotency_key=idempotency_key, created_by=actor, created_at=now)
     s.add(b)
+    _stock_changed(s, tenant_id, warehouse_id, [k[0] for k in keys], "production", batch_id, now)
     try:
         s.commit()
     except IntegrityError:
@@ -498,6 +518,7 @@ def consume_for_sale(s: Session, tenant_id: str, *, sale_id: str, register_id: i
     for ref_line, item_id, q in plan:
         total += _consume(s, bals[(item_id, wh.id)], q, kind="sale_consumption", ref_type="sale", ref_id=sale_id,
                           ref_line=ref_line, bdate=business_date, now=now, to_cogs=True)
+    _stock_changed(s, tenant_id, wh.id, [i for _, i, _ in plan], "sale", sale_id, now)
     return total
 
 
@@ -547,3 +568,57 @@ def reconcile(s: Session, tenant_id: str) -> dict:
                      .where(StockBalance.tenant_id == tenant_id)) or 0
     return {"ok": not mismatches, "mismatches": mismatches, "negative_stock": negative,
             "stock_value_cents": value, "cogs_cents": cogs(s, tenant_id)}
+
+
+# ------------------------------------------------------------- read models for the UI
+
+
+def document_total(doc: SupplierDocument) -> dict:
+    net = sum(ln.net_cents for ln in doc.lines)
+    vat = sum(muldiv(ln.net_cents, ln.vat_rate_bp, 10000) for ln in doc.lines)
+    return {"net_cents": net, "vat_cents": vat, "gross_cents": net + vat, "freight_cents": doc.freight_cents}
+
+
+def list_documents(s: Session, tenant_id: str, status: str | None = None) -> list[SupplierDocument]:
+    q = select(SupplierDocument).where(SupplierDocument.tenant_id == tenant_id)
+    if status:
+        q = q.where(SupplierDocument.status == status)
+    return list(s.scalars(q.order_by(SupplierDocument.status, SupplierDocument.created_at.desc()).limit(200)))
+
+
+def offer_net_price(s: Session, tenant_id: str, product: Product, on: date) -> int:
+    from .money import vat_from_gross
+    from .services import tax_rate_for
+
+    return product.price_cents - vat_from_gross(product.price_cents, tax_rate_for(s, product.tax_category, on))
+
+
+def preview_recipe(s: Session, tenant_id: str, *, product_id: int | None, lines: list[tuple[int, int]],
+                   yield_micro: int, on: date) -> dict:
+    """Live cost while editing: cost per portion at current average costs,
+    food cost % of the NET selling price, and contribution margin."""
+    if yield_micro <= 0:
+        raise InvalidInventory("yield must be positive")
+    wh_costs = {}
+    for b in s.scalars(select(StockBalance).where(StockBalance.tenant_id == tenant_id)):
+        if b.last_unit_cost_micro:
+            wh_costs.setdefault(b.item_id, b.last_unit_cost_micro)  # first warehouse with a cost
+    out_lines, total = [], 0
+    for item_id, qty in lines:
+        it = _item(s, tenant_id, item_id)
+        unit = wh_costs.get(item_id, 0)
+        cost = muldiv(unit, qty, QTY_SCALE * QTY_SCALE)
+        total += cost
+        out_lines.append({"item_id": item_id, "name": it.name, "uom": it.uom, "qty_micro": qty,
+                          "unit_cost_micro": unit, "cost_cents": cost, "no_cost_yet": unit == 0})
+    per_unit = muldiv(total, QTY_SCALE, yield_micro)
+    res = {"lines": out_lines, "batch_cost_cents": total, "cost_per_unit_cents": per_unit}
+    if product_id is not None:
+        p = s.scalar(select(Product).where(Product.id == product_id, Product.tenant_id == tenant_id))
+        if p is None:
+            raise NotFound("product not found")
+        net = offer_net_price(s, tenant_id, p, on)
+        res.update({"price_gross_cents": p.price_cents, "price_net_cents": net,
+                    "food_cost_bp": muldiv(per_unit, 10000, net) if net else None,
+                    "margin_cents": net - per_unit})
+    return res
