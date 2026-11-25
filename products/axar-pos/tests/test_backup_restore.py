@@ -157,3 +157,25 @@ def test_credentials_never_go_on_the_command_line():
         "owner", "s3cret", "db.example", "5433", "pos")
     with pytest.raises(backup.BackupError):
         backup._libpq_env("sqlite:///x.db")
+
+
+def test_client_tools_must_match_the_server_major_version(a, settings, tmp_path, monkeypatch):
+    """A pg_dump newer than the server writes SQL the server rejects (seen in CI:
+    pg_dump 17+ emits SET transaction_timeout that PostgreSQL 16 refuses);
+    refuse a mismatched tool instead of producing an unrestorable backup."""
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    tool = fake / "pg_dump"
+    tool.write_text('#!/bin/sh\necho "pg_dump (PostgreSQL) 17.2"\n')
+    tool.chmod(0o755)
+    assert backup._tool_major(str(tool)) == 17                 # parses real --version output
+    # The local tools match the local server ...
+    assert backup._tool_major(backup.pg_tool("pg_dump", settings.admin_database_url)) == \
+        backup._server_major(settings.admin_database_url)
+    # ... and a server of another major version gets a clear refusal, no dump file.
+    monkeypatch.setattr(backup, "_server_major", lambda url: 99)
+    monkeypatch.setenv("AXAR_POS_PG_BIN", str(fake))
+    out = tmp_path / "x.dump"
+    with pytest.raises(backup.BackupError, match="no pg_dump for PostgreSQL 99"):
+        backup.dump(settings.admin_database_url, out)
+    assert not out.exists()

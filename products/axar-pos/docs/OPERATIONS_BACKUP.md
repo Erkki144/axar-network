@@ -10,6 +10,7 @@ Status: **tooling + automated drill test exist. There is no production schedule 
 | --- | --- |
 | `dump --out X.dump` | **The dump:** `pg_dump` custom format, including RLS policies and grants. **Sidecar files:** `X.dump.sha256`, and `X.dump.manifest.json` (alembic revision + row count + content md5 of every table). **Consistency check:** the backup is refused if the content changed during the dump. |
 | `restore --dump X.dump` | Refuses a dump whose checksum does not match. Refuses a target that is not empty. Refuses a server without the `axar_app` role (roles are per server; create it first). Restores in **one transaction**: all or nothing. |
+| (all) | **Client tools must match the server's major version.** A newer `pg_dump` writes SQL an older server rejects. This happened in CI: `pg_dump` 17+ wrote `SET transaction_timeout`, which PostgreSQL 16 refused. The tool searches `$AXAR_POS_PG_BIN`, then `/usr/lib/postgresql/<server major>/bin`, then `PATH`. If none matches, it refuses with a clear error. |
 | `verify --dump X.dump` | Compares every table's row count and content hash, plus the alembic revision. Exit code 0 only if they are identical. |
 
 ## Tested (CI job `test-postgres`, `tests/test_backup_restore.py`)

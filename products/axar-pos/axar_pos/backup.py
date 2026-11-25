@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess  # nosec B404
 import sys
 from datetime import datetime, timezone
@@ -65,6 +66,47 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _server_major(admin_url: str) -> int:
+    eng = create_engine(admin_url)
+    try:
+        with eng.connect() as c:
+            return int(c.scalar(text("SHOW server_version_num"))) // 10000
+    finally:
+        eng.dispose()
+
+
+def _tool_major(path: str) -> int | None:
+    try:
+        out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"\(PostgreSQL\) (\d+)", out)
+    return int(m.group(1)) if m else None
+
+
+def pg_tool(name: str, admin_url: str) -> str:
+    """The pg_dump/pg_restore whose MAJOR version equals the server's.
+
+    A newer client writes commands an older server does not know (e.g.
+    pg_dump 17 emits ``SET transaction_timeout`` that PostgreSQL 16 rejects),
+    so a mismatched tool is refused instead of producing an unrestorable
+    backup. Search order: $AXAR_POS_PG_BIN, /usr/lib/postgresql/<major>/bin, PATH.
+    """
+    major = _server_major(admin_url)
+    candidates = []
+    if os.environ.get("AXAR_POS_PG_BIN"):
+        candidates.append(os.path.join(os.environ["AXAR_POS_PG_BIN"], name))
+    candidates += [f"/usr/lib/postgresql/{major}/bin/{name}", shutil.which(name) or name]
+    seen = []
+    for c in candidates:
+        v = _tool_major(c)
+        seen.append(f"{c} -> {v}")
+        if v == major:
+            return c
+    raise BackupError(f"no {name} for PostgreSQL {major} found ({'; '.join(seen)}); install the "
+                      f"version-{major} client tools or set AXAR_POS_PG_BIN")
+
+
 def fingerprint(admin_url: str) -> dict:
     """Row count + content hash of every table in ``public`` (owner connection:
     the table owner is not subject to RLS, so all tenants are covered)."""
@@ -91,7 +133,7 @@ def fingerprint(admin_url: str) -> dict:
 def dump(admin_url: str, out: Path) -> dict:
     out.parent.mkdir(parents=True, exist_ok=True)
     fp = fingerprint(admin_url)
-    proc = subprocess.run(["pg_dump", "--format=custom", "--compress=6", "--file", str(out)],
+    proc = subprocess.run([pg_tool("pg_dump", admin_url), "--format=custom", "--compress=6", "--file", str(out)],
                           env=_libpq_env(admin_url), capture_output=True, text=True)
     if proc.returncode != 0:
         raise BackupError(f"pg_dump failed: {proc.stderr.strip()[:500]}")
@@ -126,7 +168,7 @@ def restore(admin_url: str, dump_path: Path) -> None:
                                   "(roles are per server, not part of a database dump)")
     finally:
         eng.dispose()
-    proc = subprocess.run(["pg_restore", "--exit-on-error", "--single-transaction", "--no-owner",
+    proc = subprocess.run([pg_tool("pg_restore", admin_url), "--exit-on-error", "--single-transaction", "--no-owner",
                            "--dbname", make_url(admin_url).database, str(dump_path)],
                           env=_libpq_env(admin_url), capture_output=True, text=True)
     if proc.returncode != 0:
