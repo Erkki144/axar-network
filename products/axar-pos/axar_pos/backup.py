@@ -26,7 +26,7 @@ import hashlib
 import json
 import os
 import re
-import subprocess  # nosec B404 - fixed pg_dump/pg_restore argv, no shell
+import subprocess  # nosec B404
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +36,9 @@ from sqlalchemy.engine import make_url
 
 APP_ROLE = "axar_app"
 _IDENT = re.compile(r"[a-z_][a-z0-9_]{0,62}")
+# Row count + md5 of all rows (as text, in a stable order) of one table.
+_FINGERPRINT_SQL = ("SELECT count(*), md5(coalesce(string_agg(x::text, E'\\n' ORDER BY x::text), '')) "
+                    'FROM public."{table}" x')
 
 
 class BackupError(RuntimeError):
@@ -76,9 +79,8 @@ def fingerprint(admin_url: str) -> dict:
                 # refuse anything that is not a plain identifier before quoting.
                 if not _IDENT.fullmatch(t):
                     raise BackupError(f"unexpected table name {t!r}")
-                n, digest = c.execute(text(  # nosec B608 - identifier validated above
-                    f'SELECT count(*), md5(coalesce(string_agg(x::text, E\'\\n\' ORDER BY x::text), \'\')) '
-                    f'FROM public."{t}" x')).one()
+                query = _FINGERPRINT_SQL.format(table=t)  # nosec B608
+                n, digest = c.execute(text(query)).one()
                 out[t] = {"rows": int(n), "md5": digest}
             rev = c.scalar(text("SELECT version_num FROM alembic_version")) if "alembic_version" in tables else None
             return {"alembic_revision": rev, "tables": out}
