@@ -81,6 +81,18 @@ def test_ui_has_no_client_side_money_authority():
     # journaled Idempotency-Key: sale, refund and recovery all use it.
     assert "'Idempotency-Key': rec.key" in src
     assert src.count("await runMoneyOperation(") == 3
-    assert src.count("method: 'POST'") == 4  # money op + quote + drawer open/close only
+    # Every other write is a NON-money endpoint; money paths are only ever sent
+    # as rec.path from the journal (sale, table bill payment, refund).
+    writes = re.findall(r"api\((`[^`]*`|'[^']*'|[\w.]+), \{ method: '(POST|PUT)'", src)
+    paths = sorted(p for p, _ in writes)
+    assert paths == sorted([
+        "rec.path",
+        "'/api/v1/sales/quote'", "'/api/v1/drawer/open'", "`/api/v1/drawer/${d.id}/close`",
+        "`/api/v1/tables/${id}/order`", "`/api/v1/orders/${order.id}/lines`",
+        "`/api/v1/orders/${o.id}/kitchen`", "`/api/v1/kitchen/tickets/${tk.id}/ready`",
+    ]), paths
+    assert src.count("method: 'POST'") + src.count("method: 'PUT'") == len(writes)
+    for money in ("/api/v1/sales/cash'", "/pay-cash`", "/refunds`"):
+        assert all(money not in p for p in paths), money
     # No silent success: the only "Makse kinnitatud" is rendered from the server response.
     assert len(re.findall(r"Makse kinnitatud", src)) >= 1

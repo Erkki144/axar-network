@@ -11,7 +11,6 @@ from playwright.sync_api import Page, expect
 from test_cashier_ui import add, open_drawer, sales, wait_quote
 
 PENDING = "axar.one.pending.v1"
-DEMO = "axar.one.demo.v1"
 
 
 def journal(page: Page):
@@ -39,27 +38,33 @@ def break_storage_key(page: Page, method: str, key: str):
 # ------------------------------------------- 1. cleanup before journal delete
 
 
-def test_cleanup_failure_keeps_journal_then_recovery_finishes_once(phone, server):
+def test_table_payment_lost_response_recovers_once_after_reload(phone, server):
+    """Server bills: payment committed, answer lost, tab reloaded -> the
+    journal replays the same key, the bill is closed exactly once."""
     open_drawer(phone)
     table_bill(phone, "Laud 02", "Päevasupp")
-    break_storage_key(phone, "setItem", DEMO)          # bill cleanup will fail
+    calls = []
+
+    def lose_answer(route):
+        calls.append(route.request.headers.get("idempotency-key"))
+        route.fetch(); route.abort("connectionreset")          # committed, answer lost
+
+    phone.route("**/api/v1/orders/*/pay-cash", lose_answer)
     start_pay(phone, "10,00")
     phone.click("#confirm-payment")
-    expect(phone.locator("#change-due")).to_be_visible()   # server confirmed
-    expect(phone.locator(".pay-state.unconfirmed")).to_contain_text("lauaarvet ei õnnestunud")
-    assert journal(phone) is not None                  # NOT deleted: cleanup failed
-    assert len(sales(server)) == 1
-
-    phone.reload()                                     # storage works again
+    expect(phone.locator(".pay-state.unconfirmed")).to_be_visible()
+    assert journal(phone) is not None and len(sales(server)) == 1
+    phone.unroute("**/api/v1/orders/*/pay-cash")
+    phone.reload()
     phone.wait_for_selector("#recovery")
-    phone.click("#recover-retry")                      # replay same key
-    expect(phone.locator("#change-due")).to_be_visible()
-    assert journal(phone) is None
-    assert len(sales(server)) == 1                     # still exactly one
+    expect(phone.locator("#recovery")).to_contain_text("Lauaarve tasumine")
+    expect(phone.locator("#recovery-server-status")).to_contain_text("on see tehing salvestatud")
+    phone.click("#recover-retry")                              # replay same key
+    expect(phone.locator("#change-due")).to_have_text("Tagasi 4,10 €")
+    assert journal(phone) is None and len(sales(server)) == 1
     phone.click("#next-customer")
     phone.click('[data-mode="tables"]')
-    phone.locator("#table-grid .table-card", has_text="Laud 02").click()
-    expect(phone.locator("#basket-count")).to_have_text("0")   # bill cleared
+    expect(phone.locator("#table-grid .table-card", has_text="Laud 02")).to_contain_text("Vaba")
 
 
 def test_crash_after_cleanup_before_journal_delete_is_safe(phone, server):
@@ -119,7 +124,7 @@ def test_simultaneous_payment_of_same_table_from_two_tabs(phone, server):
     tab2 = phone.context.new_page()
     tab2.goto(f"{server.base}/one/")
     tab2.wait_for_selector("#product-grid .product")
-    table_bill(tab2, "Laud 04", "Päevasupp", 0)            # same bill, loaded from storage
+    table_bill(tab2, "Laud 04", "Päevasupp", 0)            # same bill, loaded from the server
     expect(tab2.locator("#basket-count")).to_have_text("2")
     for p in (phone, tab2):
         start_pay(p, "20,00")

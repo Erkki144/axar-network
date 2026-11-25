@@ -31,7 +31,7 @@ PR #9 itself is untouched. Additions are in `static/one/integration.css`.
 | Refund (partial/full) | `GET /api/v1/sales/{id}`, `POST /api/v1/sales/{id}/refunds` + key | demo `X-Role: manager` header |
 | Refund receipt | `GET /api/v1/refunds/{id}/receipt.txt` | |
 | Close drawer | `POST /api/v1/drawer/{id}/close` | two-step confirm, shows expected / counted / variance |
-| Tables, kitchen tickets | — (none yet) | **DEMO, this browser only** (`localStorage`), labelled in UI |
+| Tables, kitchen tickets | see [SLICE_4_ORDERS.md](SLICE_4_ORDERS.md) | were device-local DEMO here; **server-side since slice 4** |
 
 Backend changes on this branch: `POST /api/v1/sales/quote` (pricing extracted
 into `_price_lines`, shared by sale and quote), `Product.category`, extended

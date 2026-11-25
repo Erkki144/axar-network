@@ -27,3 +27,7 @@
 /* Server receipts are fixed-width text: keep their column alignment. */
 .dialog pre.receipt{white-space:pre;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.45}
 button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid #f0a92e;outline-offset:2px}
+.order-message{border-radius:12px;padding:10px 14px;margin:0 0 12px;font-size:13px;line-height:1.5;background:#eef6f3;color:#205f56}
+.order-message.error{background:#fdecec;color:#8c2323;border:1px solid #f0b9b9}
+.order-message.ok{background:#e8f6ee;color:#1d6a43}
+.ticket.done{opacity:.6}

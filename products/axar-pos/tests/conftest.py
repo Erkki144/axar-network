@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from axar_pos.api import create_app
 from axar_pos.config import Settings
-from axar_pos.models import Location, Product, Register, Tenant
+from axar_pos.models import DiningTable, Location, Product, Register, Tenant
 
 
 class Clock:
@@ -56,6 +56,9 @@ def app(settings):
             Register(tenant_id="t-a", location_id=la.id, code="R1", name="Kassa 1"),
             Register(tenant_id="t-a", location_id=la.id, code="R2", name="Kassa 2"),
             Register(tenant_id="t-b", location_id=lb.id, code="R1", name="B kassa"),
+            DiningTable(tenant_id="t-a", location_id=la.id, code="A1", name="Laud A1"),
+            DiningTable(tenant_id="t-a", location_id=la.id, code="A2", name="Laud A2"),
+            DiningTable(tenant_id="t-b", location_id=lb.id, code="B1", name="Laud B1"),
         ])
     return app
 

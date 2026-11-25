@@ -26,7 +26,7 @@ class NoCacheStatic(StaticFiles):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-from . import __version__, services
+from . import __version__, orders, services
 from .config import Settings
 from .db import init_db, make_engine, seed_demo
 from .models import DrawerSession, Refund, Sale, Tenant
@@ -47,6 +47,29 @@ class SaleLineIn(Strict):
 
 
 Id = Annotated[int, Field(strict=True, ge=1)]
+
+
+Version = Annotated[int, Field(strict=True, ge=1)]
+
+
+class OrderLineIn(Strict):
+    product_id: Annotated[int, Field(strict=True, ge=1)]
+    quantity: Annotated[int, Field(strict=True, ge=1, le=999)]
+
+
+class OrderLinesIn(Strict):
+    version: Version
+    lines: Annotated[list[OrderLineIn], Field(max_length=200)]
+
+
+class OrderVersionIn(Strict):
+    version: Version
+
+
+class PayOrderIn(Strict):
+    version: Version
+    register_id: Annotated[int, Field(strict=True, ge=1)]
+    tendered_cents: Annotated[int, Field(strict=True, ge=0, le=100_000_000)]
 
 
 class QuoteIn(Strict):
@@ -385,5 +408,82 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def daily(who: Who, s: Db, business_date: date | None = None):
         bdate = business_date or services.business_date_for(settings.clock(), settings)
         return services.daily_summary(s, who.tenant_id, bdate)
+
+    # ------------------------------------------------- tables / orders / kitchen
+
+    def order_out(o) -> dict:
+        # Product names/prices are resolved client-side from the catalog;
+        # amounts come from the server quote and the sale.
+        return {
+            "id": o.id, "table_id": o.table_id, "table_name": o.table.name, "status": o.status,
+            "version": o.version, "opened_by": o.opened_by, "sale_id": o.sale_id,
+            "created_at": o.created_at.isoformat(), "updated_at": o.updated_at.isoformat(),
+            "lines": [{"product_id": ln.product_id, "quantity": ln.quantity, "sent_quantity": ln.sent_quantity}
+                      for ln in o.lines],
+        }
+
+    def ticket_out(t) -> dict:
+        return {"id": t.id, "ticket_no": t.ticket_no, "order_id": t.order_id, "table_name": t.table_name,
+                "status": t.status, "created_at": t.created_at.isoformat(),
+                "ready_at": t.ready_at.isoformat() if t.ready_at else None,
+                "lines": [{"product_id": ln.product_id, "name": ln.name, "quantity": ln.quantity} for ln in t.lines]}
+
+    @app.get("/api/v1/tables")
+    def tables(who: Who, s: Db):
+        out = []
+        for t in orders.list_tables(s, who.tenant_id):
+            o = orders.open_order_for_table(s, who.tenant_id, t.id)
+            out.append({"id": t.id, "code": t.code, "name": t.name, "location_id": t.location_id,
+                        "open_order": None if o is None else {
+                            "id": o.id, "version": o.version,
+                            "item_count": sum(ln.quantity for ln in o.lines)}})
+        return out
+
+    @app.post("/api/v1/tables/{table_id}/order")
+    def table_order(table_id: int, who: Who, s: Db):
+        """Get-or-create the table's open order (idempotent by design)."""
+        return order_out(orders.open_order(s, who.tenant_id, table_id, who.cashier_id, settings.clock()))
+
+    @app.get("/api/v1/orders/{order_id}")
+    def order_get(order_id: str, who: Who, s: Db):
+        return order_out(orders.get_order(s, who.tenant_id, order_id))
+
+    @app.put("/api/v1/orders/{order_id}/lines")
+    def order_lines(order_id: str, body: OrderLinesIn, who: Who, s: Db):
+        o = orders.set_lines(s, who.tenant_id, order_id, body.version,
+                             [(x.product_id, x.quantity) for x in body.lines], settings.clock())
+        return order_out(o)
+
+    @app.post("/api/v1/orders/{order_id}/kitchen")
+    def order_kitchen(order_id: str, body: OrderVersionIn, who: Who, s: Db,
+                      idempotency_key: Annotated[str, Header(min_length=8, max_length=128)]):
+        ticket, replayed = orders.send_to_kitchen(s, who.tenant_id, order_id, body.version,
+                                                  idempotency_key, settings.clock())
+        return JSONResponse(status_code=200 if replayed else 201, content={
+            "ticket": ticket_out(ticket), "order": order_out(orders.get_order(s, who.tenant_id, order_id))},
+            headers={"Idempotent-Replayed": "true" if replayed else "false"})
+
+    @app.post("/api/v1/orders/{order_id}/pay-cash")
+    def order_pay(order_id: str, body: PayOrderIn, who: Who, s: Db,
+                  idempotency_key: Annotated[str, Header(min_length=8, max_length=128)]):
+        sale, replayed = orders.pay_order_cash(
+            s, tenant_id=who.tenant_id, order_id=order_id, expected_version=body.version,
+            register_id=body.register_id, cashier_id=who.cashier_id, tendered_cents=body.tendered_cents,
+            idempotency_key=idempotency_key, settings=settings, now=settings.clock())
+        return JSONResponse(status_code=200 if replayed else 201, content=_sale_out(sale),
+                            headers={"Idempotent-Replayed": "true" if replayed else "false"})
+
+    @app.get("/api/v1/kitchen/tickets")
+    def kitchen_tickets(who: Who, s: Db):
+        return [ticket_out(t) for t in orders.list_tickets(s, who.tenant_id)]
+
+    @app.post("/api/v1/kitchen/tickets/{ticket_id}/ready")
+    def kitchen_ready(ticket_id: str, who: Who, s: Db):
+        return ticket_out(orders.mark_ready(s, who.tenant_id, ticket_id, settings.clock()))
+
+    @app.get("/api/v1/operations/{idempotency_key}")
+    def operation(idempotency_key: str, who: Who, s: Db):
+        """Was a sale/refund with this key recorded? (tenant-scoped)"""
+        return orders.operation_status(s, who.tenant_id, idempotency_key)
 
     return app

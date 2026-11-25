@@ -346,17 +346,17 @@ class LineRequest:
     quantity: int
 
 
-def _request_hash(register_id: int, lines: list[LineRequest], tendered_cents: int) -> str:
-    return _sha256(
-        _canonical(
-            {
-                "register_id": register_id,
-                "payment_method": "cash",
-                "tendered_cents": tendered_cents,
-                "lines": [[ln.product_id, ln.quantity] for ln in lines],
-            }
-        )
-    )
+def _request_hash(register_id: int, lines: list[LineRequest], tendered_cents: int,
+                  extra: dict | None = None) -> str:
+    body = {
+        "register_id": register_id,
+        "payment_method": "cash",
+        "tendered_cents": tendered_cents,
+        "lines": [[ln.product_id, ln.quantity] for ln in lines],
+    }
+    if extra:  # only added when present, so existing hashes are unchanged
+        body["extra"] = extra
+    return _sha256(_canonical(body))
 
 
 def _price_lines(s: Session, tenant_id: str, lines: list[LineRequest], bdate: date,
@@ -455,13 +455,20 @@ def create_cash_sale(
     tendered_cents: int,
     settings: Settings,
     now: datetime,
+    before_commit=None,
+    hash_extra: dict | None = None,
 ) -> tuple[Sale, bool]:
     """Create a cash sale on one register. Returns ``(sale, replayed)``.
+
+    ``before_commit(s, sale)`` runs inside the same transaction just before
+    commit (e.g. to close an order atomically with its sale); a DomainError
+    it raises rolls back everything. ``hash_extra`` is bound into the
+    idempotency request hash (e.g. the order id being paid).
 
     A retry with the same key and identical body returns the original sale and
     creates nothing. The same key with a different body is a 409.
     """
-    req_hash = _request_hash(register_id, lines, tendered_cents)
+    req_hash = _request_hash(register_id, lines, tendered_cents, hash_extra)
 
     existing = _find_by_key(s, tenant_id, idempotency_key)
     if existing is not None:
@@ -538,6 +545,12 @@ def create_cash_sale(
         )
         s.add(SaleRefundState(sale_id=sale_id, tenant_id=tenant_id,
                               refunded_gross_cents=0, refunded_cash_cents=0))
+        if before_commit is not None:
+            try:
+                before_commit(s, sale)
+            except DomainError:
+                s.rollback()
+                raise
         s.commit()
     except IntegrityError:
         # Concurrent request with the same key (or receipt number) won.

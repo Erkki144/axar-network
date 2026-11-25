@@ -6,8 +6,10 @@
 // - A sale or refund is shown as done ONLY after the server confirmed it.
 // - Every payment attempt has one Idempotency-Key. A retry after a network
 //   failure re-sends the SAME key and body, so it can never double-charge.
-// - Tables and kitchen tickets are DEMO and live only in this browser until a
-//   server-side order API exists.
+// - Table bills and kitchen tickets live on the SERVER (slice 4): every device
+//   of the tenant sees the same bill. Each edit is a compare-and-swap on the
+//   order version, so a stale device gets 409 and reloads instead of
+//   overwriting; paying a bill closes it in the same server transaction.
 import { centsToInput, formatEuro, parseEuroInput } from './format.mjs';
 
 // DEMO identity. These headers are NOT authentication (see RFC-0002 / #2).
@@ -15,12 +17,11 @@ const IDENTITY = { 'X-Tenant-ID': 'demo', 'X-Cashier-ID': 'kassa1' };
 const DEMO_MANAGER = { 'X-Role': 'manager' };
 const TIMEOUT_MS = 8000;
 const LS_REGISTER = 'axar.one.register';
-const LS_DEMO = 'axar.one.demo.v1';
 // Crash-safe journal of the ONE in-flight money operation (sale or refund).
 // Written BEFORE the POST, cleared only after a definitive server answer.
 const LS_PENDING = 'axar.one.pending.v1';
-const PENDING_PATHS = [/^\/api\/v1\/sales\/cash$/, /^\/api\/v1\/sales\/[0-9a-f-]{36}\/refunds$/];
-const TABLES = ['Laud 01', 'Laud 02', 'Laud 03', 'Laud 04', 'Terrass 01', 'Terrass 02', 'Terrass 03', 'Terrass 04'];
+const PENDING_PATHS = [/^\/api\/v1\/sales\/cash$/, /^\/api\/v1\/sales\/[0-9a-f-]{36}\/refunds$/,
+  /^\/api\/v1\/orders\/[0-9a-f-]{36}\/pay-cash$/];
 const ICONS = { Kohv: ['☕', 'sand'], Toit: ['🥐', 'rose'], Joogid: ['💧', 'sky'], Muud: ['📦', 'lilac'] };
 
 // ------------------------------------------------------------------ HTTP layer
@@ -66,8 +67,10 @@ async function api(path, { method = 'GET', body, headers = {} } = {}) {
  * else (network, 5xx, 401/403/429, 409 key-reused/conflict, unknown) is
  * uncertain: the journal stays and only a same-key retry is allowed.
  */
+// order_changed: the server looks the key up before the order CAS, so a
+// same-key retry of a RECORDED payment replays the sale instead.
 const DEFINITIVE_CODES = new Set(['no_open_drawer', 'insufficient_tender', 'insufficient_drawer_cash',
-  'over_refund', 'invalid_refund', 'not_found']);
+  'over_refund', 'invalid_refund', 'not_found', 'order_changed']);
 const isDefinitive = (e) => e instanceof ApiError && (e.status === 422 || (DEFINITIVE_CODES.has(e.code) && [404, 409, 422].includes(e.status)));
 const isUncertain = (e) => !isDefinitive(e);
 
@@ -75,7 +78,10 @@ const isUncertain = (e) => !isDefinitive(e);
 
 const S = {
   products: [], registers: [], registerId: null, drawer: null,
-  mode: 'express', category: 'Kõik', selectedTable: 0,
+  mode: 'express', category: 'Kõik',
+  tables: [], tablesError: '', tableId: null, order: null, // server-side table bills
+  orderBusy: false, orderQueue: Promise.resolve(), orderGen: 0, orderMsg: { text: '', cls: '' },
+  tickets: [], ticketsError: '', kitchenPending: null, pollTimer: null, pollBusy: false,
   walkin: {},                 // registerId -> {productId: qty}, memory only
   quote: null, quoteSig: '', quoteError: '', quoteSeq: 0, quoteTimer: null,
   payment: null,              // pending/last payment attempt
@@ -85,24 +91,6 @@ const S = {
   locksOk: true,              // false => no cross-tab lock => money operations blocked
   online: true,
 };
-let demo = loadDemo();
-
-function loadDemo() {
-  try {
-    const d = JSON.parse(localStorage.getItem(LS_DEMO) || 'null');
-    if (d && typeof d === 'object') return { tables: d.tables || {}, sent: d.sent || {}, tickets: d.tickets || [], next: d.next || 1 };
-  } catch { /* storage unavailable: demo state stays in memory */ }
-  return { tables: {}, sent: {}, tickets: [], next: 1 };
-}
-/** Returns false if the demo table state could not be persisted. */
-function saveDemo() {
-  try {
-    const raw = JSON.stringify(demo);
-    localStorage.setItem(LS_DEMO, raw);
-    return localStorage.getItem(LS_DEMO) === raw;
-  } catch { return false; }
-}
-
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const announce = (s) => { $('announcer').textContent = s; };
@@ -110,21 +98,24 @@ const product = (id) => S.products.find((p) => p.id === id);
 const register = () => S.registers.find((r) => r.id === S.registerId);
 const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : `k-${Date.now()}-${Math.random().toString(16).slice(2)}`);
 
-function cartKey() { return S.mode === 'tables' ? `table:${S.registerId}:${S.selectedTable}` : `walkin:${S.registerId}`; }
+function cartKey() { return S.mode === 'tables' ? `order:${S.order?.id || 'none'}` : `walkin:${S.registerId}`; }
+/** Tables: a read-only view of the SERVER order; edits go through setOrderLines(). */
 function currentCart() {
   if (S.mode === 'tables') {
-    const reg = (demo.tables[S.registerId] ||= {});
-    return (reg[S.selectedTable] ||= {});
+    const out = {};
+    for (const ln of S.order?.lines || []) out[ln.product_id] = ln.quantity;
+    return out;
   }
   return (S.walkin[S.registerId] ||= {});
 }
+const sentQuantity = (pid) => (S.mode === 'tables' ? (S.order?.lines.find((l) => l.product_id === pid)?.sent_quantity || 0) : 0);
 function cartLines(cart = currentCart()) {
   return Object.entries(cart)
     .map(([pid, qty]) => ({ product: product(Number(pid)), quantity: qty }))
     .filter((x) => x.product && x.quantity > 0);
 }
 const requestLines = (lines) => lines.map((x) => ({ product_id: x.product.id, quantity: x.quantity }));
-const cartSig = (lines) => JSON.stringify([S.registerId, requestLines(lines)]);
+const cartSig = (lines) => JSON.stringify([S.registerId, S.mode === 'tables' ? [S.order?.id, S.order?.version] : null, requestLines(lines)]);
 const paymentLocked = () => Boolean(
   (S.payment && ['sending', 'unconfirmed'].includes(S.payment.state))
   || (S.refund && ['sending', 'unconfirmed'].includes(S.refund.state))
@@ -152,15 +143,22 @@ function validRecord(rec) {
   if (typeof rec.createdAt !== 'string' || Number.isNaN(Date.parse(rec.createdAt))) return false;
   const b = rec.body;
   if (!b || !isInt(b.register_id, 1, Number.MAX_SAFE_INTEGER) || rec.registerId !== b.register_id) return false;
-  if (!Array.isArray(b.lines) || !b.lines.length || b.lines.length > 200) return false;
+  const okLines = () => Array.isArray(b.lines) && b.lines.length > 0 && b.lines.length <= 200;
   if (rec.op === 'sale') {
-    return rec.path === '/api/v1/sales/cash' && onlyKeys(b, ['register_id', 'lines', 'tendered_cents'])
-      && isInt(b.tendered_cents, 0, 100_000_000)
-      && b.lines.every((l) => onlyKeys(l, ['product_id', 'quantity']) && isInt(l.product_id, 1, Number.MAX_SAFE_INTEGER) && isInt(l.quantity, 1, 999))
-      && typeof rec.cartKey === 'string' && /^(walkin:\d+|table:\d+:\d+)$/.test(rec.cartKey)
-      && onlyKeys(rec.headers || {}, []);
+    if (!isInt(b.tendered_cents, 0, 100_000_000) || !onlyKeys(rec.headers || {}, [])) return false;
+    if (rec.path === '/api/v1/sales/cash') {
+      // 'table:r:i' = device-local demo bill of PR #12; accepted so an old
+      // pending record can still be resolved after an upgrade.
+      return onlyKeys(b, ['register_id', 'lines', 'tendered_cents']) && okLines()
+        && b.lines.every((l) => onlyKeys(l, ['product_id', 'quantity']) && isInt(l.product_id, 1, Number.MAX_SAFE_INTEGER) && isInt(l.quantity, 1, 999))
+        && typeof rec.cartKey === 'string' && /^(walkin:\d+|table:\d+:\d+)$/.test(rec.cartKey);
+    }
+    const m = /^\/api\/v1\/orders\/([0-9a-f-]{36})\/pay-cash$/.exec(rec.path);
+    return Boolean(m) && UUID_RE.test(m[1]) && onlyKeys(b, ['version', 'register_id', 'tendered_cents'])
+      && isInt(b.version, 1, 1_000_000_000) && rec.cartKey === `order:${m[1]}`;
   }
   if (rec.op === 'refund') {
+    if (!okLines()) return false;
     return typeof rec.saleId === 'string' && UUID_RE.test(rec.saleId)
       && rec.path === `/api/v1/sales/${rec.saleId}/refunds` && onlyKeys(b, ['register_id', 'lines', 'reason'])
       && typeof b.reason === 'string' && b.reason.length >= 3 && b.reason.length <= 500
@@ -211,24 +209,29 @@ function addProduct(id) {
   if (paymentLocked()) { announce('Pooleli makse: lõpeta see enne ostukorvi muutmist.'); return; }
   const p = product(id);
   if (!p) return;
+  if (S.mode === 'tables') {
+    mutateOrder((c) => { const n = (c[id] || 0) + 1; if (n > 999) return false; c[id] = n; return true; }, `${p.name} lisatud`);
+    return;
+  }
   const c = currentCart();
   const n = (c[id] || 0) + 1;
   if (n > 999) return;
   c[id] = n;
-  if (S.mode === 'tables') saveDemo();
   cartChanged();
   announce(`${p.name} lisatud`);
 }
 
 function changeQuantity(id, delta) {
   if (paymentLocked()) { announce('Pooleli makse: lõpeta see enne ostukorvi muutmist.'); return; }
-  const c = currentCart();
-  const sentQty = S.mode === 'tables' ? (demo.sent[cartKey()]?.[id] || 0) : 0;
-  const n = (c[id] || 0) + delta;
-  if (n < sentQty) { announce('Kööki saadetud kogust ei saa siin vähendada.'); return; }
-  if (n <= 0) delete c[id]; else if (n <= 999) c[id] = n;
-  if (S.mode === 'tables') saveDemo();
-  cartChanged();
+  const apply = (c) => {
+    const n = (c[id] || 0) + delta;
+    if (n < sentQuantity(id)) { setOrderMessage('Kööki saadetud kogust ei saa vähendada.', 'error'); return false; }
+    if (n > 999) return false;
+    if (n <= 0) delete c[id]; else c[id] = n;
+    return true;
+  };
+  if (S.mode === 'tables') { mutateOrder(apply); return; }
+  if (apply(currentCart())) cartChanged();
 }
 
 function cartChanged() { renderBasket(); scheduleQuote(); }
@@ -264,13 +267,16 @@ function renderBasket() {
   if (panel.hidden) return;
   const tableMode = S.mode === 'tables';
   const lines = cartLines();
-  $('basket-title').textContent = tableMode ? `${TABLES[S.selectedTable]} · DEMO laud` : 'Kassamüük';
+  $('basket-title').textContent = !tableMode ? 'Kassamüük'
+    : S.order ? `${S.order.table_name} · arve` : S.tableId ? 'Avan arvet…' : 'Vali laud';
   $('basket-count').textContent = String(lines.reduce((n, x) => n + x.quantity, 0));
   const box = $('basket-items');
   box.replaceChildren();
   if (!lines.length) {
     const empty = el('div', 'empty-basket');
-    empty.append(el('span', null, '◇'), el('strong', null, 'Alusta tellimust'), el('small', null, 'Puuduta toodet, et see ostukorvi lisada.'));
+    const noTable = tableMode && !S.order;
+    empty.append(el('span', null, '◇'), el('strong', null, noTable ? 'Vali laud' : 'Alusta tellimust'),
+      el('small', null, noTable ? 'Puuduta lauda, et selle arve avada.' : 'Puuduta toodet, et see ostukorvi lisada.'));
     empty.firstChild.setAttribute('aria-hidden', 'true');
     box.append(empty);
   }
@@ -281,11 +287,14 @@ function renderBasket() {
     const body = el('div', 'cart-body');
     const ctr = el('div', 'cart-controls');
     const minus = el('button', 'qty-btn', '−'); minus.type = 'button'; minus.setAttribute('aria-label', `Vähenda: ${p.name}`);
+    minus.disabled = tableMode && quantity <= sentQuantity(p.id);
     minus.addEventListener('click', () => changeQuantity(p.id, -1));
     const plus = el('button', 'qty-btn', '+'); plus.type = 'button'; plus.setAttribute('aria-label', `Lisa: ${p.name}`);
     plus.addEventListener('click', () => changeQuantity(p.id, 1));
     ctr.append(minus, el('span', 'qty-count', String(quantity)), plus);
-    body.append(el('div', 'cart-name', p.name), el('div', 'cart-detail', `${formatEuro(p.price_cents)} / tk`), ctr);
+    const sent = sentQuantity(p.id);
+    body.append(el('div', 'cart-name', p.name),
+      el('div', 'cart-detail', `${formatEuro(p.price_cents)} / tk${tableMode && sent ? ` · köögis ${sent}` : ''}`), ctr);
     // Line gross from the server quote when available (price × qty is display only).
     const ql = S.quote && S.quoteSig === cartSig(lines) ? S.quote.lines.find((l) => l.product_id === p.id && l.quantity === quantity) : null;
     row.append(el('span', 'cart-icon', icon), body, el('strong', 'cart-price', ql ? formatEuro(ql.gross_cents) : '…'));
@@ -293,10 +302,11 @@ function renderBasket() {
   }
   $('send-button').hidden = !tableMode;
   if (tableMode) {
-    const sent = demo.sent[cartKey()] || {};
-    const unsent = lines.some((x) => x.quantity > (sent[x.product.id] || 0));
-    $('send-button').disabled = !unsent;
-    $('send-button').textContent = unsent ? 'Saada kööki (DEMO) ↗' : 'Kõik tooted kööki saadetud ✓';
+    const unsent = lines.some((x) => x.quantity > sentQuantity(x.product.id));
+    const retry = S.kitchenPending && S.kitchenPending.orderId === S.order?.id;
+    $('send-button').disabled = !S.order || S.orderBusy || !unsent;
+    $('send-button').textContent = !lines.length ? 'Saada kööki ↗'
+      : unsent ? (retry ? 'Proovi uuesti: saada kööki ↗' : 'Saada kööki ↗') : 'Kõik tooted kööki saadetud ✓';
   }
   renderTotals();
 }
@@ -322,7 +332,8 @@ function renderTotals() {
   else state.textContent = '';
   const pay = $('pay-button');
   const resuming = S.payment?.state === 'unconfirmed' && S.payment.sig === cartSig(lines);
-  pay.disabled = !S.storageOk || !S.locksOk || Boolean(S.recovery) ||(!(S.drawer && ready && lines.length) && !resuming);
+  const orderReady = S.mode !== 'tables' || (S.order && !S.orderBusy);
+  pay.disabled = !S.storageOk || !S.locksOk || Boolean(S.recovery) || (!(S.drawer && ready && lines.length && orderReady) && !resuming);
   pay.firstChild.textContent = resuming ? 'Lõpeta pooleli makse ' : 'Võta sularaha ';
 }
 
@@ -365,14 +376,15 @@ function activateMode(next) {
   });
   const copy = {
     express: ['MÜÜGI TÖÖLAUD', ['Kiire teenindus.', 'Vähem samme.'], 'Tooted ja hinnad tulevad AXAR POS serverist.', 'Hinnad, käibemaks ja tagastusraha tulevad serverist.'],
-    tables: ['RESTORANI TÖÖLAUD · DEMO', ['Laudade teenindus.', 'Üks selge voog.'], 'Lauaarve ja köögipilet on DEMO ja salvestuvad ainult selles seadmes.', 'Lauaarve tasumine käib päris kassa API kaudu.'],
-    kitchen: ['KÖÖGI TÖÖLAUD · DEMO', ['Kõik tellimused.', 'Õiges järjekorras.'], 'Köögipiletid on DEMO – serveris neid veel ei salvestata.', 'Päris köögiliides vajab serveripoolset tellimuste API-t.'],
+    tables: ['RESTORANI TÖÖLAUD', ['Laudade teenindus.', 'Üks selge voog.'], 'Lauaarved on serveris – kõik seadmed näevad sama arvet.', 'Arve tasumine teeb müügi ja sulgeb arve ühe serveritehinguna.'],
+    kitchen: ['KÖÖGI TÖÖLAUD', ['Kõik tellimused.', 'Õiges järjekorras.'], 'Köögipiletid tulevad serverist ja uuenevad iseenesest.', 'Uued piletid on vanimast uuemani.'],
     manager: ['JUHI TÖÖLAUD', ['Päeva ülevaade.', 'Päris andmetest.'], 'Aruanne, müügid ja tagastused tulevad serverist.', 'Tagastus kasutab DEMO juhi rolli, mitte päris autentimist.'],
   }[next];
   $('section-eyebrow').textContent = copy[0];
   const h = $('section-title'); h.replaceChildren(document.createTextNode(copy[1][0]), el('br'), el('em', null, copy[1][1]));
   $('section-subtitle').textContent = copy[2];
   $('hint-message').textContent = copy[3];
+  startPolling();
   if (next === 'kitchen') renderKitchen();
   else if (next === 'manager') renderManager();
   else if (next === 'tables') renderTables();
@@ -430,45 +442,214 @@ function filterProducts() {
 
 function renderExpress() { const root = $('view-root'); root.replaceChildren(); renderProductGrid(root); }
 
+const IDENTITY_NOTE = 'Ettevõte ja kassapidaja on DEMO päised, mitte sisselogimine (RFC-0002).';
+
 function renderTables() {
   const root = $('view-root'); root.replaceChildren();
   const section = el('section');
-  section.append(el('div', 'demo-banner', 'DEMO: lauaarved ja köögipiletid salvestuvad ainult selles seadmes (mitte serveris). Arve tasumine käib päris kassa API kaudu.'));
+  section.append(el('div', 'demo-banner', `Lauaarved ja köögipiletid on serveris: sama arvet näeb iga selle ettevõtte seade. ${IDENTITY_NOTE}`));
+  const msg = el('div', 'order-message'); msg.id = 'order-message'; msg.setAttribute('role', 'status');
   const grid = el('div', 'table-grid'); grid.id = 'table-grid';
-  const reg = demo.tables[S.registerId] || {};
-  TABLES.forEach((name, i) => {
-    const occupied = Object.keys(reg[i] || {}).length > 0;
-    const b = el('button', `table-card${i === S.selectedTable ? ' selected' : ''}${occupied ? ' occupied' : ''}`); b.type = 'button';
-    b.append(el('strong', null, name), el('small', null, occupied ? 'Arve avatud' : 'Vaba'));
-    b.addEventListener('click', () => {
-      if (paymentLocked()) { announce('Pooleli makse: lõpeta see enne laua vahetamist.'); return; }
-      S.selectedTable = i; renderTables(); renderBasket(); scheduleQuote(); announce(`Valitud ${name}`);
-    });
-    grid.append(b);
-  });
-  section.append(grid);
+  section.append(msg, grid);
   root.append(section);
+  renderTableGrid();
   renderProductGrid(root);
+  refreshTables();
+}
+
+function renderTableGrid() {
+  const grid = $('table-grid');
+  if (!grid) return;
+  grid.replaceChildren();
+  if (S.tablesError) grid.append(stateBox('error', `Laudu ei saanud serverist laadida: ${S.tablesError}`));
+  for (const tb of S.tables) {
+    const count = tb.open_order?.item_count || 0;
+    const b = el('button', `table-card${tb.id === S.tableId ? ' selected' : ''}${count ? ' occupied' : ''}`); b.type = 'button';
+    b.dataset.table = tb.code;
+    b.append(el('strong', null, tb.name), el('small', null, count ? `Arve avatud · ${count} tk` : 'Vaba'));
+    b.addEventListener('click', () => selectTable(tb.id));
+    grid.append(b);
+  }
+  const msg = $('order-message');
+  if (msg) { msg.textContent = S.orderMsg.text; msg.className = `order-message ${S.orderMsg.cls}`; msg.hidden = !S.orderMsg.text; }
+}
+
+function setOrderMessage(text, cls = '') {
+  S.orderMsg = { text, cls };
+  if (text) announce(text);
+  renderTableGrid();
+}
+
+/** Keep the table card's item count in step with our own edits until the next poll. */
+function syncTableSummary() {
+  if (!S.order) return;
+  const tb = S.tables.find((x) => x.id === S.order.table_id);
+  if (tb) tb.open_order = { id: S.order.id, version: S.order.version, item_count: S.order.lines.reduce((n, l) => n + l.quantity, 0) };
+}
+
+function refreshTableView() {
+  syncTableSummary();
+  if (S.mode === 'tables') renderTableGrid();
+  renderBasket(); scheduleQuote();
+}
+
+async function loadTables() {
+  try { S.tables = (await api('/api/v1/tables')).data; S.tablesError = ''; } catch (e) { S.tablesError = e.message; }
+}
+
+/** Re-read the open order from the server; never replaces it with an OLDER version. */
+async function reloadOrder() {
+  const cur = S.order;
+  if (!cur) return;
+  try {
+    const { data } = await api(`/api/v1/orders/${cur.id}`);
+    if (S.order?.id !== data.id) return;
+    if (data.status !== 'open') {
+      S.order = null; S.tableId = null; S.orderGen++;
+      setOrderMessage(`${data.table_name}: arve on tasutud (teises seadmes või aknas).`);
+      return;
+    }
+    if (data.version >= S.order.version) S.order = data;
+  } catch (e) {
+    if (!(e instanceof NetworkError) && S.order?.id === cur.id) { S.order = null; S.tableId = null; S.orderGen++; }
+  }
+}
+
+/** Poll: table list + our bill. Skipped while a money operation is pending. */
+async function refreshTables() {
+  await loadTables();
+  let changed = false;
+  if (S.order && !S.orderBusy && !paymentLocked()) {
+    const summary = S.tables.find((x) => x.id === S.order.table_id)?.open_order;
+    if (!summary || summary.id !== S.order.id || summary.version !== S.order.version) {
+      const before = S.order?.version;
+      await reloadOrder();
+      changed = S.order?.version !== before || !S.order;
+    }
+  }
+  if (S.mode !== 'tables') return;
+  syncTableSummary();
+  renderTableGrid();
+  if (changed) { renderBasket(); scheduleQuote(); }
+}
+
+/** Opening the bill goes through the same queue as edits, so taps made right
+ * after choosing a table are applied to that table's bill, not dropped. */
+function selectTable(id) {
+  if (paymentLocked()) { announce('Pooleli makse: lõpeta see enne laua vahetamist.'); return; }
+  const gen = ++S.orderGen; // drop edits queued for the previous bill
+  S.tableId = id; S.order = null; S.kitchenPending = null; S.orderMsg = { text: '', cls: '' };
+  refreshTableView();
+  S.orderQueue = S.orderQueue.then(async () => {
+    if (gen !== S.orderGen) return;
+    try {
+      const { data } = await api(`/api/v1/tables/${id}/order`, { method: 'POST' }); // get-or-create
+      if (gen !== S.orderGen) return;
+      S.order = data;
+      announce(`Valitud ${data.table_name}`);
+    } catch (e) {
+      if (gen !== S.orderGen) return;
+      S.tableId = null;
+      setOrderMessage(`Arvet ei saanud avada: ${e.message}`, 'error');
+    }
+    refreshTableView();
+  }).catch(() => {});
+}
+
+/**
+ * Edits of the server bill are serialized: each queued edit is applied to the
+ * LATEST order and sent with its version. A 409 means another device changed
+ * the bill first: we reload, show it, and drop the edits still queued (they
+ * were meant for the bill as it looked before).
+ */
+function mutateOrder(apply, okMsg = '') {
+  const gen = S.orderGen;
+  S.orderQueue = S.orderQueue.then(async () => {
+    if (gen !== S.orderGen || !S.order || paymentLocked()) return;
+    const cart = currentCart();
+    if (!apply(cart)) { refreshTableView(); return; }
+    const lines = Object.entries(cart).filter(([, q]) => q > 0).map(([pid, q]) => ({ product_id: Number(pid), quantity: q }));
+    const order = S.order;
+    S.orderBusy = true; renderBasket();
+    try {
+      const { data } = await api(`/api/v1/orders/${order.id}/lines`, { method: 'PUT', body: { version: order.version, lines } });
+      if (S.order?.id === data.id) S.order = data;
+      S.orderMsg = { text: '', cls: '' };
+      if (okMsg) announce(okMsg);
+    } catch (e) {
+      S.orderGen++;
+      S.orderBusy = false;
+      if (e instanceof ApiError && e.code === 'order_changed') {
+        await reloadOrder();
+        setOrderMessage('Arvet muudeti teises seadmes – näitan värsket arvet. Korda viimast muudatust.', 'error');
+      } else if (e instanceof ApiError && e.code === 'order_not_open') {
+        await reloadOrder();
+      } else {
+        setOrderMessage(`Arvet ei salvestatud: ${e.message}`, 'error');
+      }
+    } finally { S.orderBusy = false; }
+    refreshTableView();
+  }).catch(() => { S.orderBusy = false; });
+  return S.orderQueue;
 }
 
 function renderKitchen() {
   const root = $('view-root'); root.replaceChildren();
-  root.append(el('div', 'demo-banner', 'DEMO köögivaade: piletid on ainult selles seadmes. Päris köök vajab serveripoolset tellimuste API-t.'));
-  const grid = el('div', 'kds-grid');
-  const tickets = demo.tickets.filter((t) => t.registerId === S.registerId);
-  if (!tickets.length) grid.append(el('p', 'muted-p', 'Köögipileteid pole.'));
-  for (const t of tickets) {
-    const card = el('article', 'ticket');
-    const head = el('div', 'ticket-head'); head.append(el('strong', null, `${t.table} · #${t.id}`), el('small', null, t.status === 'valmis' ? 'VALMIS' : 'VALMIB'));
+  root.append(el('div', 'demo-banner', `Köögipiletid tulevad serverist ja uuenevad iga ${POLL_MS / 1000} sekundi järel. ${IDENTITY_NOTE}`));
+  const grid = el('div', 'kds-grid'); grid.id = 'kds-grid';
+  root.append(grid);
+  renderTicketGrid();
+  loadTickets();
+}
+
+async function loadTickets() {
+  try { S.tickets = (await api('/api/v1/kitchen/tickets')).data; S.ticketsError = ''; } catch (e) { S.ticketsError = e.message; }
+  if (S.mode === 'kitchen') renderTicketGrid();
+}
+
+function renderTicketGrid() {
+  const grid = $('kds-grid');
+  if (!grid) return;
+  grid.replaceChildren();
+  if (S.ticketsError) grid.append(stateBox('error', `Pileteid ei saanud serverist laadida: ${S.ticketsError}`));
+  // Open tickets oldest first (cook in order), then the most recent ready ones.
+  const open = S.tickets.filter((x) => x.status !== 'ready').sort((a, b) => a.ticket_no - b.ticket_no);
+  const ready = S.tickets.filter((x) => x.status === 'ready').slice(0, 12);
+  if (!open.length && !ready.length && !S.ticketsError) grid.append(el('p', 'muted-p', 'Köögipileteid pole.'));
+  for (const tk of [...open, ...ready]) {
+    const done = tk.status === 'ready';
+    const card = el('article', `ticket${done ? ' done' : ''}`); card.dataset.ticket = String(tk.ticket_no);
+    const head = el('div', 'ticket-head'); head.append(el('strong', null, `${tk.table_name} · #${tk.ticket_no}`), el('small', null, done ? 'VALMIS' : 'VALMIB'));
     const list = el('ul', 'ticket-list');
-    for (const it of t.items) list.append(el('li', null, `${it.quantity} × ${it.name}`));
-    const b = el('button', `ticket-ready${t.status === 'valmis' ? ' done' : ''}`, t.status === 'valmis' ? 'Valmis ✓' : 'Märgi valmis');
-    b.disabled = t.status === 'valmis';
-    b.addEventListener('click', () => { t.status = 'valmis'; saveDemo(); renderKitchen(); announce('Pilet valmis'); });
+    for (const it of tk.lines) list.append(el('li', null, `${it.quantity} × ${it.name}`));
+    const b = el('button', `ticket-ready${done ? ' done' : ''}`, done ? 'Valmis ✓' : 'Märgi valmis'); b.type = 'button';
+    b.disabled = done;
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        const { data } = await api(`/api/v1/kitchen/tickets/${tk.id}/ready`, { method: 'POST' }); // idempotent
+        S.tickets = S.tickets.map((x) => (x.id === data.id ? data : x));
+        announce(`Pilet #${tk.ticket_no} valmis`);
+      } catch (e) { S.ticketsError = e.message; }
+      renderTicketGrid();
+    });
     card.append(head, list, b);
     grid.append(card);
   }
-  root.append(grid);
+}
+
+const POLL_MS = 4000;
+function startPolling() {
+  clearInterval(S.pollTimer);
+  S.pollTimer = ['tables', 'kitchen'].includes(S.mode) ? setInterval(poll, POLL_MS) : null;
+}
+async function poll() {
+  if (document.hidden || S.pollBusy) return;
+  S.pollBusy = true;
+  try {
+    if (S.mode === 'tables') await refreshTables();
+    else if (S.mode === 'kitchen') await loadTickets();
+  } finally { S.pollBusy = false; }
 }
 
 async function renderManager() {
@@ -628,7 +809,10 @@ function openPayment() {
   const sig = cartSig(lines);
   if (!(S.payment && S.payment.sig === sig && S.payment.state === 'unconfirmed')) {
     if (!S.quote || S.quoteSig !== sig) return;
-    S.payment = { sig, cartKey: cartKey(), lines: requestLines(lines), due: S.quote.cash_due_cents, key: null, bodySig: null, tendered: S.quote.cash_due_cents, state: 'input', error: '', sale: null };
+    const order = S.mode === 'tables' ? S.order : null;
+    if (S.mode === 'tables' && (!order || S.orderBusy)) return;
+    S.payment = { sig, cartKey: cartKey(), lines: requestLines(lines), orderId: order?.id || null, version: order?.version || null,
+      due: S.quote.cash_due_cents, key: null, bodySig: null, tendered: S.quote.cash_due_cents, state: 'input', error: '', sale: null };
   }
   openModal(renderPayment);
 }
@@ -683,8 +867,13 @@ function renderPayment(c) {
 async function submitPayment() {
   const p = S.payment;
   if (!p || p.state === 'sending' || p.state === 'done') return; // double-tap guard
-  const body = { register_id: S.registerId, lines: p.lines, tendered_cents: p.tendered };
-  const bodySig = JSON.stringify(body);
+  // A table bill is paid by order id + the version the cashier saw: the server
+  // takes the lines from the order and closes it in the same transaction.
+  const body = p.orderId
+    ? { version: p.version, register_id: S.registerId, tendered_cents: p.tendered }
+    : { register_id: S.registerId, lines: p.lines, tendered_cents: p.tendered };
+  const path = p.orderId ? `/api/v1/orders/${p.orderId}/pay-cash` : '/api/v1/sales/cash';
+  const bodySig = JSON.stringify([path, body]);
   if (p.state === 'unconfirmed') {
     // Retry: must be byte-for-byte the same request with the same key.
     if (bodySig !== p.bodySig) { p.error = 'muutunud makset ei saa korrata'; renderPayment($('modal-content')); return; }
@@ -694,7 +883,7 @@ async function submitPayment() {
   const retry = p.state === 'unconfirmed';
   p.state = 'sending'; p.error = ''; // set before awaiting the lock: double-tap guard
   renderPayment($('modal-content'));
-  const rec = { op: 'sale', key: p.key, path: '/api/v1/sales/cash', body, headers: {}, cartKey: p.cartKey, createdAt: new Date().toISOString() };
+  const rec = { op: 'sale', key: p.key, path, body, headers: {}, cartKey: p.cartKey, createdAt: new Date().toISOString() };
   const out = await runMoneyOperation(rec, () => clearPaidCart(p.cartKey));
   if (out.blocked) {
     p.error = out.blocked;
@@ -709,12 +898,16 @@ async function submitPayment() {
   } else {
     p.state = 'error'; p.error = out.err.message; p.key = null; p.bodySig = null;
     if (out.err.code === 'no_open_drawer') refreshDrawer();
+    if (out.err.code === 'order_changed') {
+      p.error = 'arvet muudeti teises seadmes või see on juba tasutud – kontrolli arvet ja alusta maksmist uuesti';
+      reloadOrder().then(refreshTableView);
+    }
   }
   if (!$('modal').hidden) renderPayment($('modal-content'));
   renderTotals();
 }
 
-const CLEANUP_WARNING = 'Makse on serveris salvestatud, aga lauaarvet ei õnnestunud seadmest kustutada (salvestus ei tööta). Kassa on lukus; pärast salvestuse taastumist laadi leht uuesti – sama makset ei registreerita kaks korda.';
+const CLEANUP_WARNING = 'Makse on serveris salvestatud, aga seadme olekut ei õnnestunud puhastada (salvestus ei tööta). Kassa on lukus; pärast salvestuse taastumist laadi leht uuesti – sama makset ei registreerita kaks korda.';
 
 /**
  * One money operation (sale/refund/recovery) under an origin-wide Web Lock:
@@ -761,20 +954,20 @@ function guardJournal(key, rec) {
 }
 
 function clearPaidCart(key) {
-  let ok = true;
-  if (key.startsWith('table:')) {
-    const [, reg, table] = key.split(':');
-    if (demo.tables[reg]) delete demo.tables[reg][table];
-    delete demo.sent[key];
-    ok = saveDemo(); // must be durable before the journal may be deleted
-  } else {
-    const reg = key.split(':')[1];
-    S.walkin[reg] = {};
-  }
+  if (key.startsWith('order:')) {
+    // The server closed the bill in the payment transaction: nothing durable
+    // is kept on this device, we only drop our view of it.
+    const id = key.slice('order:'.length);
+    if (S.order?.id === id) { S.order = null; S.tableId = null; S.orderGen++; }
+    S.tables.forEach((tb) => { if (tb.open_order?.id === id) tb.open_order = null; });
+    loadTables().then(() => { if (S.mode === 'tables') renderTableGrid(); });
+  } else if (key.startsWith('walkin:')) {
+    S.walkin[key.split(':')[1]] = {};
+  } // legacy 'table:' keys (device-local demo bills of PR #12): nothing left to clean
   S.quote = null; S.quoteSig = '';
-  if (S.mode === 'tables') renderTables();
+  if (S.mode === 'tables') renderTableGrid();
   renderBasket();
-  return ok;
+  return true;
 }
 
 async function showReceipt(sale, warning = '') {
@@ -800,19 +993,38 @@ async function showReceipt(sale, warning = '') {
 
 // --------------------------------------------------------------------- tables
 
+/** Idempotent per key: a retry after a lost answer re-sends the SAME key, so
+ * the kitchen never gets the same ticket twice. */
 function sendToKitchen() {
-  if (S.mode !== 'tables') return;
-  const lines = cartLines();
-  const key = cartKey();
-  const sent = (demo.sent[key] ||= {});
-  const additions = lines.filter((x) => x.quantity > (sent[x.product.id] || 0))
-    .map((x) => ({ name: x.product.name, quantity: x.quantity - (sent[x.product.id] || 0) }));
-  if (!additions.length) return;
-  for (const x of lines) sent[x.product.id] = x.quantity;
-  demo.tickets.unshift({ id: demo.next++, registerId: S.registerId, table: TABLES[S.selectedTable], items: additions, status: 'valmib' });
-  saveDemo();
-  renderTables(); renderBasket();
-  announce('DEMO köögipilet loodud; arve jäi avatuks');
+  if (S.mode !== 'tables' || !S.order) return;
+  const gen = S.orderGen;
+  S.orderQueue = S.orderQueue.then(async () => {
+    const o = S.order;
+    if (gen !== S.orderGen || !o || paymentLocked()) return;
+    if (!S.kitchenPending || S.kitchenPending.orderId !== o.id || S.kitchenPending.version !== o.version) {
+      S.kitchenPending = { orderId: o.id, version: o.version, key: newKey() };
+    }
+    const kp = S.kitchenPending;
+    S.orderBusy = true; renderBasket();
+    try {
+      const { data } = await api(`/api/v1/orders/${o.id}/kitchen`, { method: 'POST', body: { version: kp.version }, headers: { 'Idempotency-Key': kp.key } });
+      S.kitchenPending = null;
+      if (S.order?.id === data.order.id) S.order = data.order;
+      S.orderBusy = false;
+      setOrderMessage(`Köögipilet #${data.ticket.ticket_no} saadetud; arve jäi avatuks.`, 'ok');
+    } catch (e) {
+      S.orderBusy = false;
+      if (e instanceof ApiError && ['order_changed', 'nothing_to_send', 'order_not_open'].includes(e.code)) {
+        S.kitchenPending = null; S.orderGen++;
+        await reloadOrder();
+        if (e.code !== 'order_not_open') setOrderMessage(e.code === 'nothing_to_send' ? 'Kõik tooted on juba kööki saadetud.' : 'Arvet muudeti teises seadmes – kontrolli arvet ja saada uuesti.', 'error');
+      } else {
+        // Unknown outcome: keep the key, the retry cannot create a second ticket.
+        setOrderMessage(`Köögipileti saatmine ebaõnnestus (${e.message}). Proovi uuesti – topeltpiletit ei teki.`, 'error');
+      }
+    } finally { S.orderBusy = false; }
+    refreshTableView();
+  }).catch(() => { S.orderBusy = false; });
 }
 
 // -------------------------------------------------------------------- refunds
@@ -909,6 +1121,18 @@ function showRecovery(found) {
   $('close-modal').hidden = true;
   openModal((c) => renderRecovery(c));
   renderTotals();
+  if (found.state === 'ok') {
+    api(`/api/v1/operations/${encodeURIComponent(found.rec.key)}`).then(({ data }) => {
+      found.serverStatus = data.status;
+      const st = $('recovery-server-status');
+      if (S.recovery === found && st) st.textContent = data.status === 'recorded'
+        ? 'Serveri andmetel on see tehing salvestatud – „Proovi uuesti“ näitab selle tšekki.'
+        : 'Serveri andmetel pole seda tehingut (veel) salvestatud.';
+    }).catch(() => {
+      const st = $('recovery-server-status');
+      if (S.recovery === found && st) st.textContent = 'Serverist ei saanud olekut kontrollida.';
+    });
+  }
 }
 
 function renderRecovery(c, note = '', cls = 'unconfirmed') {
@@ -939,10 +1163,15 @@ function renderRecovery(c, note = '', cls = 'unconfirmed') {
   } else {
     const { rec } = found;
     const what = rec.op === 'sale'
-      ? `Kassa vastuvõetud summa ${formatEuro(rec.body.tendered_cents)}, ${rec.body.lines.length} rida.`
+      ? `${rec.body.lines ? `Kassamüük, ${rec.body.lines.length} rida` : 'Lauaarve tasumine'}. Kliendilt vastu võetud ${formatEuro(rec.body.tendered_cents)}.`
       : `Tagastus tšekist, ${rec.body.lines.length} rida. Põhjus: ${rec.body.reason}`;
     box.append(el('p', 'muted', `${what} Alustatud ${new Date(rec.createdAt).toLocaleString('et-EE', { timeZone: 'Europe/Tallinn' })}.`));
     box.append(stateBox(cls, note || 'Server võis selle tehingu juba salvestada. Ära võta raha uuesti vastu ega maksa välja. Vajuta „Proovi uuesti“ – sama tehingut ei registreerita kaks korda.'));
+    // Informational only: the way out is still the same-key retry below.
+    const st = el('p', 'muted', found.serverStatus === 'recorded' ? 'Serveri andmetel on see tehing salvestatud – „Proovi uuesti“ näitab selle tšekki.'
+      : found.serverStatus === 'not_recorded' ? 'Serveri andmetel pole seda tehingut (veel) salvestatud.' : 'Kontrollin serverist tehingu olekut…');
+    st.id = 'recovery-server-status';
+    box.append(st);
     const retry = el('button', 'primary-btn', 'Proovi uuesti (sama tehing)'); retry.type = 'button'; retry.id = 'recover-retry';
     retry.addEventListener('click', () => recoverPending(retry));
     box.append(retry);
@@ -954,7 +1183,7 @@ async function recoverPending(btn) {
   const { rec } = S.recovery;
   btn.disabled = true; btn.textContent = 'Saadan…';
   // Same lock + same order as a normal operation: cleanup BEFORE journal delete.
-  const cleanup = rec.op === 'sale' && rec.cartKey ? () => { demo = loadDemo(); return clearPaidCart(rec.cartKey); } : null;
+  const cleanup = rec.op === 'sale' && rec.cartKey ? () => clearPaidCart(rec.cartKey) : null;
   const out = await runMoneyOperation(rec, cleanup);
   if (out.blocked) { renderRecovery($('modal-content'), `Ei saanud jätkata: ${out.blocked}.`); return; }
   if (out.data) {
@@ -1040,20 +1269,13 @@ document.addEventListener('keydown', (e) => {
 });
 // Another tab started or finished a money operation.
 window.addEventListener('storage', (e) => {
-  if (e.key === LS_DEMO) { // another tab changed table bills: never act on stale ones
-    demo = loadDemo();
-    if (S.mode === 'tables') renderTables();
-    renderBasket(); scheduleQuote();
-    return;
-  }
   if (e.key !== LS_PENDING) return;
   if (e.newValue == null) {
-    // Another tab settled the operation (confirmed + cleaned up, or proven not
-    // recorded). Reload its durable results instead of trusting our memory.
-    demo = loadDemo();
+    // Another tab settled the operation (confirmed, or proven not recorded).
+    // Reload the server's view instead of trusting our memory.
     if (S.recovery) endRecovery();
-    if (S.mode === 'tables') renderTables();
-    renderBasket(); scheduleQuote(); refreshDrawer();
+    reloadOrder().then(() => { if (S.mode === 'tables') refreshTables(); refreshTableView(); });
+    refreshDrawer();
     return;
   }
   checkPendingJournal();
