@@ -70,9 +70,12 @@ jobs:
       - run: python -m pytest -p no:cacheprovider -rs
       - name: PostgreSQL-only tests must not be skipped (RLS/grants + backup/restore drill)
         run: |
-          python -m pytest tests/test_postgres.py tests/test_backup_restore.py -p no:cacheprovider -rs -v | tee pg.txt
+          # -rA lists every result ("PASSED tests/...", "SKIPPED [1] ...") even with addopts=-q
+          python -m pytest tests/test_postgres.py tests/test_backup_restore.py -p no:cacheprovider -rA | tee pg.txt
           ! grep -qi skipped pg.txt
-          grep -c "test_backup_restore.py::.* PASSED" pg.txt
+          n=$(grep -cE "^PASSED tests/test_backup_restore.py::" pg.txt || true)
+          echo "backup/restore tests passed: $n"
+          test "$n" -ge 5
 
   browser-e2e:
     # AXAR ONE cashier UI against a real local uvicorn (127.0.0.1 only).
