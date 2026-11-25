@@ -68,8 +68,11 @@ jobs:
           fi
           /usr/lib/postgresql/16/bin/pg_dump --version
       - run: python -m pytest -p no:cacheprovider -rs
-      - name: PostgreSQL-only tests must not be skipped
-        run: python -m pytest tests/test_postgres.py -p no:cacheprovider -rs | tee pg.txt && ! grep -q skipped pg.txt
+      - name: PostgreSQL-only tests must not be skipped (RLS/grants + backup/restore drill)
+        run: |
+          python -m pytest tests/test_postgres.py tests/test_backup_restore.py -p no:cacheprovider -rs -v | tee pg.txt
+          ! grep -qi skipped pg.txt
+          grep -c "test_backup_restore.py::.* PASSED" pg.txt
 
   browser-e2e:
     # AXAR ONE cashier UI against a real local uvicorn (127.0.0.1 only).
