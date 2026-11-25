@@ -35,7 +35,7 @@ jobs:
   test-postgres:
     # Whole suite on PostgreSQL 16 as the non-owner, RLS-bound role axar_app,
     # plus PostgreSQL-only tests (RLS, grants, drift, real lock interleavings).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: needs postgresql-client-16 (not packaged on 26.04)
     timeout-minutes: 15
     services:
       postgres:
