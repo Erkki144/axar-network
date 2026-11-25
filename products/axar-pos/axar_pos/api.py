@@ -373,26 +373,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     box = auth.SecretBox(settings.secret_key) if settings.secret_key else None
     login_limiter = auth.RateLimiter(limit=20, window_s=300)
 
-    app = FastAPI(title="AXAR POS (simulated cash)", version=__version__)
-
+    lifespan = None
     if settings.inprocess_worker:
+        import contextlib
         import threading
 
         from . import worker as _worker
 
-        stop = threading.Event()
+        @contextlib.asynccontextmanager
+        async def lifespan(app_: FastAPI):
+            # Lifespan (Starlette >= 1.0 removed add_event_handler/on_event).
+            stop = threading.Event()
 
-        def loop():
-            wid = f"inproc:{uuid.uuid4().hex[:8]}"
-            while not stop.wait(1.0):
-                try:
-                    _worker.run_once(app.state.request_factory, settings, wid)
-                except Exception:  # never kill the API; failures are recorded per consumer
-                    log.exception("in-process worker round failed")
+            def loop():
+                wid = f"inproc:{uuid.uuid4().hex[:8]}"
+                while not stop.wait(1.0):
+                    try:
+                        _worker.run_once(app_.state.request_factory, settings, wid)
+                    except Exception:  # never kill the API; failures are recorded per consumer
+                        log.exception("in-process worker round failed")
 
-        app.add_event_handler("startup", lambda: threading.Thread(target=loop, daemon=True,
-                                                                  name="axar-worker").start())
-        app.add_event_handler("shutdown", stop.set)
+            t = threading.Thread(target=loop, daemon=True, name="axar-worker")
+            t.start()
+            try:
+                yield
+            finally:
+                stop.set()
+                t.join(timeout=5)
+
+    app = FastAPI(title="AXAR POS (simulated cash)", version=__version__, lifespan=lifespan)
     app.state.settings = settings
     # session_factory: owner/maintenance sessions (seeding, tests, admin CLI);
     # NOT subject to RLS. request_factory: what API requests use.

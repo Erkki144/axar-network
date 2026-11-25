@@ -385,3 +385,46 @@ def test_corrupt_financial_event_blocks_books_export_instead_of_skipping(a, app,
         assert s.scalar(select(func.count()).select_from(ExportQueue)) == 0   # nothing out of order
         c = s.get(EventConsumer, ("books.export", "t-a"))
         assert c.blocked_at is not None and c.failing_seq == 2 and "CorruptEvent" in c.last_error
+
+
+def test_inprocess_worker_runs_with_the_app_lifespan(settings):
+    """AXAR_POS_INPROCESS_WORKER=1: the worker thread starts and stops with the
+    app (Starlette lifespan) and delivers events without a separate process."""
+    import dataclasses
+    import time
+    import uuid as _uuid
+
+    from fastapi.testclient import TestClient
+
+    from axar_pos.api import create_app
+    from axar_pos.models import ExportQueue, Location, Product, Register, Tenant
+
+    app = create_app(dataclasses.replace(settings, inprocess_worker=True))
+    with app.state.session_factory.begin() as s:
+        s.add(Tenant(id="t-w", name="Worker"))
+        s.flush()
+        s.add(Product(tenant_id="t-w", sku="KOHV", name="Kohv", price_cents=250))
+        loc = Location(tenant_id="t-w", code="L1", name="L")
+        s.add(loc)
+        s.flush()
+        s.add(Register(tenant_id="t-w", location_id=loc.id, code="R1", name="Kassa"))
+    h = {"X-Tenant-ID": "t-w", "X-Cashier-ID": "k1"}
+    with TestClient(app) as c:
+        reg = c.get("/api/v1/registers", headers=h).json()[0]["id"]
+        pid = c.get("/api/v1/products", headers=h).json()[0]["id"]
+        assert c.post("/api/v1/drawer/open", headers=h,
+                      json={"register_id": reg, "opening_float_cents": 0}).status_code == 201
+        r = c.post("/api/v1/sales/cash", headers={**h, "Idempotency-Key": str(_uuid.uuid4())},
+                   json={"register_id": reg, "lines": [{"product_id": pid, "quantity": 1}], "tendered_cents": 250})
+        assert r.status_code == 201
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            with app.state.session_factory() as s:
+                if s.scalar(select(func.count()).select_from(ExportQueue).where(ExportQueue.tenant_id == "t-w")):
+                    break
+            time.sleep(0.2)
+        else:
+            raise AssertionError("in-process worker did not deliver the sale event")
+    threads = [t.name for t in __import__("threading").enumerate()]
+    assert "axar-worker" not in threads                                  # stopped on shutdown
+    app.state.engine.dispose(); app.state.admin_engine.dispose()
