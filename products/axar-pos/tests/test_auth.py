@@ -536,3 +536,62 @@ def test_rls_hides_other_tenants_staff_on_postgres(shop, world):
         c.execute(text("SELECT set_config('app.tenant_id', 't-b', true)"))
         assert {r for (r,) in c.execute(text("SELECT tenant_id FROM staff"))} == {"t-b"}
         assert c.scalar(text("SELECT count(*) FROM staff_roles WHERE tenant_id = 't-a'")) == 0
+
+
+# ------------------------------------------------- concurrency (AION review #21)
+
+
+def test_concurrent_wrong_pins_are_all_counted(shop, world):
+    """No lost updates: N parallel wrong PINs must count N failures on the
+    device and on the staff member (real race on PostgreSQL)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from axar_pos.models import Device
+
+    n = 12
+    world.clock.at = world.clock.at  # frozen clock: all attempts in the same window
+    body = {"staff_id": shop["cashier"], "pin": "0000"}
+
+    def attempt(_):
+        return world.c.post("/api/v1/auth/pin-login", json=body, headers={"X-Device-Token": shop["dev"]}).status_code
+
+    with ThreadPoolExecutor(n) as pool:
+        codes = list(pool.map(attempt, range(n)))
+    assert set(codes) <= {401, 429}
+    with world.app.state.session_factory() as s:
+        st = s.get(Staff, shop["cashier"])
+        dev = s.scalar(select(Device).where(Device.token_hash == auth.token_hash(shop["dev"])))
+    failed = codes.count(401)
+    assert st.failed_pin_attempts == failed and dev.failed_pin_attempts == failed, (codes, st.failed_pin_attempts,
+                                                                                     dev.failed_pin_attempts)
+    assert st.pin_locked_until is not None and dev.pin_locked_until is not None
+    # Parallel guesses cannot all slip past the lockout check: exactly
+    # LOCK_AFTER are evaluated, the rest are refused as locked.
+    assert failed == auth.LOCK_AFTER and codes.count(429) == n - auth.LOCK_AFTER, codes
+
+
+def test_concurrent_wrong_passwords_lock_after_the_limit(world):
+    from concurrent.futures import ThreadPoolExecutor
+
+    n = 10
+    body = {"tenant_id": "t-a", "login": "owner", "password": "wrong-password-xx", "totp": "123456"}
+    with ThreadPoolExecutor(n) as pool:
+        codes = list(pool.map(lambda _: world.c.post("/api/v1/auth/login", json=body).status_code, range(n)))
+    assert codes.count(401) == auth.LOCK_AFTER and codes.count(429) == n - auth.LOCK_AFTER, codes
+    with world.app.state.session_factory() as s:
+        st = s.scalar(select(Staff).where(Staff.tenant_id == "t-a", Staff.login == "owner"))
+    assert st.failed_login_attempts == auth.LOCK_AFTER
+
+
+@pytest.mark.parametrize("kw,reason", [
+    ({"demo_identity": True}, "demo identity"),
+    ({"database_url": "sqlite:///x.db"}, "not PostgreSQL"),
+    ({"admin_database_url": None}, "same"),
+    ({"secret_key": None}, "AXAR_POS_SECRET_KEY"),
+])
+def test_pilot_profile_refuses_unsafe_configuration(kw, reason):
+    good = dict(database_url="postgresql+psycopg://axar_app@db/axar", admin_database_url="postgresql+psycopg://owner@db/axar",
+                secret_key=TEST_KEY, profile="pilot")
+    assert Settings(**good).pilot_problems() == []
+    with pytest.raises(RuntimeError, match=reason):
+        create_app(Settings(**{**good, **kw}))
