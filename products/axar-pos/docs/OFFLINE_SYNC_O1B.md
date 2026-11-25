@@ -95,7 +95,7 @@ missed. Already-applied migrations 0001–0005 are not changed.
 
 ## Verification (this PR)
 
-- `tests/test_offline_sync.py`: 13 tests, SQLite and PostgreSQL.
+- `tests/test_offline_sync.py`: 14 tests, SQLite and PostgreSQL, including a seeded soak test: 72 h of offline selling (>100 sales) with random network faults (down, 503, response lost after commit) and clock jumps; afterwards every sale is on the central server exactly once with equal totals and the outbox is fully acked.
 - Full suites: SQLite 277 passed / 14 PostgreSQL-only skipped; PostgreSQL 291 passed;
   migrations up/down/up + `alembic check` clean; browser e2e 44 passed; bandit clean.
 - Mutation check (each change must make a test fail): duplicate check ignoring the

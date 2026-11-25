@@ -334,3 +334,41 @@ def test_two_agents_pushing_the_same_device_in_parallel_apply_each_sale_once(edg
     assert len(sales) == 12 and len({x.idempotency_key for x in sales}) == 12
     with app.state.session_factory() as s:
         assert s.scalar(select(func.count()).select_from(DeviceInbox)) == 12
+
+
+def test_72h_offline_with_a_flaky_network_converges_exactly_once(edge, central, app, clock):
+    """Soak (owner decision: up to 72 h offline). A seeded random mix of sales,
+    clock jumps and network faults (down, 503, response lost after commit);
+    the agent keeps trying. At the end the central server holds every till
+    sale exactly once, with the same totals, and the outbox is fully acked."""
+    import random
+    rnd = random.Random(20261125)
+    edge.open_drawer(0)
+    net = Net(central.c)
+    ag = agent(edge, net, clock, batch_size=7, rng=random.Random(1))
+    start, sold, edge_total = clock(), 0, 0
+    while clock() - start < timedelta(hours=72):
+        for _ in range(rnd.randint(0, 3)):
+            lines = [("KOHV", rnd.randint(1, 3))] + ([("SAI", 1)] if rnd.random() < 0.4 else [])
+            r = edge.sell(lines, 5000)
+            assert r.status_code == 201, r.text
+            sold += 1
+            edge_total += r.json()["total_cents"]
+        net.mode = rnd.choices(["up", "down", "server_error", "lose_response"], [5, 3, 1, 1])[0]
+        ag.run_until_idle(max_rounds=3)
+        clock.at += timedelta(minutes=rnd.randint(5, 90))
+    net.mode = "up"                                                  # the connection comes back for good
+    for _ in range(50):
+        if ag.run_until_idle()[-1].state == "idle":
+            break
+        clock.at += timedelta(minutes=6)                             # past the longest backoff (5 min)
+    assert sold > 100
+    status = ag.status()
+    assert status["pending"] == 0 and status["rejected"] == 0 and status["quarantined"] == 0
+    assert status["acked"] == sold
+    sales = central_sales(app)
+    assert len(sales) == sold and len({x.idempotency_key for x in sales}) == sold
+    assert sum(x.total_cents for x in sales) == edge_total
+    with app.state.session_factory() as s:
+        assert s.get(DeviceCursor, ("t-a", DEVICE)).last_seq == sold
+        assert s.scalar(select(func.count()).select_from(DeviceInbox)) == sold
