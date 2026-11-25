@@ -34,7 +34,7 @@
         <div class="note-card"><span class="spark" aria-hidden="true">✳</span><span>Teadmiseks<small id="hint-message">Hinnad, käibemaks ja tagastusraha tulevad serverist.</small></span></div>
       </section>
       <div class="workspace-body" id="view-root"></div>
-      <footer class="safe-note"><span aria-hidden="true">⊘</span> Kõik andmed tulevad AXAR POS serverist. Simuleeritud sularaha – kaardimakseid ega pärismakseid pole.</footer>
+      <footer class="safe-note"><span aria-hidden="true">⊘</span> Kõik andmed tulevad AXAR POS serverist. Simuleeritud maksed – päris kaardi- ega pangamakseid ei töödelda.</footer>
     </main>
     <aside class="checkout" id="checkout-panel" aria-label="Ostukorv">
       <div class="register-bar">
@@ -51,8 +51,9 @@
         <div class="total-line"><span>Maksta</span><strong id="total">0,00 €</strong></div>
         <p class="quote-state" id="quote-state" role="status"></p>
         <button id="pay-button" class="primary-btn" disabled>Võta sularaha <span aria-hidden="true">→</span></button>
+        <button id="split-button" class="secondary-btn" type="button" hidden>Jaga arve / kaart / ülekanne</button>
         <button id="send-button" class="secondary-btn" hidden>Saada kööki <span aria-hidden="true">↗</span></button>
-        <p class="payment-warning">Simuleeritud sularaha – pärismakseid ei töödelda.</p>
+        <p class="payment-warning">Simuleeritud maksed (sularaha, DEMO-kaardi terminal, pank) – pärismakseid ei töödelda.</p>
       </div>
     </aside>
   </div>

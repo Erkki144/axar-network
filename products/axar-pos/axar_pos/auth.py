@@ -70,6 +70,7 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     "kitchen.update": ("kitchen", "manager", "owner"),
     "admin": MANAGER_ROLES,
     "inventory": MANAGER_ROLES,  # receipts, recipes, production, stock & margin reports
+    "receivables": MANAGER_ROLES,  # customer invoices, bank statement import/matching (C3)
 }
 
 PIN_MIN, PIN_MAX = 4, 8

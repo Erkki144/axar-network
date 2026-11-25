@@ -91,3 +91,16 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 .inv-cost{border:1px solid #e3ebe7;border-radius:12px;padding:12px;background:#fbfdfc}
 .inv-summary .summary-line{font-size:14px}
 @media(max-width:640px){.inv-recipes{grid-template-columns:1fr}.nav-item{width:20%}}
+/* table bill payments (C3) */
+.bill-sums{background:#f5f8f6;border-radius:14px;padding:14px 16px;margin:12px 0}
+.bill-sums .summary-line.grand{font-size:15px;color:#143e3c;font-weight:800;margin:6px 0 0;border-top:1px dashed #d4e1db;padding-top:10px}
+.bill-sums .summary-line.grand strong{font-size:22px;color:#143e3c}
+.bill-sums .summary-line.bad strong{color:#8c5a06}
+.bill-payments{list-style:none;margin:6px 0 12px;padding:0;font-size:13px}
+.bill-payments li{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid #eef2f0}
+.bill-payments li.pay-declined span:first-child{text-decoration:line-through;color:#9aa8a5}
+.bill-payments li .secondary-btn{width:auto;margin:0;min-height:44px}
+.method-tabs{display:flex;gap:8px;margin:14px 0 6px}
+.method-tabs button{flex:1;min-height:48px;border:1px solid #d6e4de;background:#fff;border-radius:12px;font-weight:800;color:#36675d}
+.method-tabs button.active{background:#193e49;border-color:#193e49;color:#fff}
+.dialog select,.dialog input:not(.tender-input){width:100%;min-height:48px;border:1px solid #c5d8d1;border-radius:12px;padding:0 12px;margin:8px 0 12px;font-size:15px;background:#fff}

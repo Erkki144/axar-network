@@ -78,9 +78,9 @@ def test_ui_has_no_client_side_money_authority():
     for forbidden in ("vatIncluded", "cashRounded", "cartSummary", "rateBp", "vat_from_gross"):
         assert forbidden not in src, forbidden
     # Every money POST goes through one function that always sends the
-    # journaled Idempotency-Key: sale, refund and recovery all use it.
+    # journaled Idempotency-Key: sale, bill tender (C3), refund and recovery.
     assert "'Idempotency-Key': rec.key" in src
-    assert src.count("await runMoneyOperation(") == 3
+    assert src.count("await runMoneyOperation(") == 4
     # Every other write is a NON-money endpoint; money paths are only ever sent
     # as rec.path from the journal (sale, table bill payment, refund).
     writes = re.findall(r"api\((`[^`]*`|'[^']*'|[\w.]+), \{ method: '(POST|PUT)'", src)
@@ -97,9 +97,11 @@ def test_ui_has_no_client_side_money_authority():
         "'/api/v1/inventory/suppliers'", "'/api/v1/inventory/items'", "'/api/v1/inventory/documents'",
         "`/api/v1/inventory/documents/${d.id}/post`", "'/api/v1/inventory/recipes/preview'",
         "'/api/v1/inventory/recipes'",
+        # C3: ask the (mock) provider about a lost card answer; creates no money
+        "`/api/v1/payments/${paymentId}/reconcile`",
     ]), paths
     assert src.count("method: 'POST'") + src.count("method: 'PUT'") == len(writes)
-    for money in ("/api/v1/sales/cash'", "/pay-cash`", "/refunds`"):
+    for money in ("/api/v1/sales/cash'", "/pay-cash`", "/refunds`", "/payments`"):
         assert all(money not in p for p in paths), money
     # No silent success: the only "Makse kinnitatud" is rendered from the server response.
     assert len(re.findall(r"Makse kinnitatud", src)) >= 1

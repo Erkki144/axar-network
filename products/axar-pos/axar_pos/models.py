@@ -476,7 +476,8 @@ class Order(Base):
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
     location_id: Mapped[int] = mapped_column(ForeignKey("locations.id"))
     table_id: Mapped[int] = mapped_column(ForeignKey("dining_tables.id"), index=True)
-    status: Mapped[str] = mapped_column(String(16), default="open")  # open|paid
+    # open | partially_paid | paid | invoiced (closed; remainder is a receivable) | voided
+    status: Mapped[str] = mapped_column(String(16), default="open")
     version: Mapped[int] = mapped_column(Integer, default=1)
     opened_by: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime]
@@ -489,9 +490,10 @@ class Order(Base):
     table: Mapped[DiningTable] = relationship(lazy="selectin")
 
     __table_args__ = (
-        # One open bill per table, enforced by the database.
+        # One open (or partially paid) bill per table, enforced by the database.
         Index("uq_one_open_order_per_table", "table_id", unique=True,
-              sqlite_where=text("status = 'open'"), postgresql_where=text("status = 'open'")),
+              sqlite_where=text("status IN ('open', 'partially_paid')"),
+              postgresql_where=text("status IN ('open', 'partially_paid')")),
     )
 
 
@@ -541,6 +543,98 @@ class KitchenTicketLine(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     name: Mapped[str] = mapped_column(String(200))
     quantity: Mapped[int] = mapped_column(Integer)
+
+
+# ------------------------------------------------------------ payments (C3, #15)
+# A sale (receipt) is NOT a payment. A bill (order) collects payments of any
+# tender; when payments + issued invoices cover it, ONE immutable sale is
+# issued. A bank transfer is a receivable until a bank line is matched.
+
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.id"), index=True)
+    sale_id: Mapped[str | None] = mapped_column(ForeignKey("sales.id"), nullable=True, index=True)
+    invoice_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    method: Mapped[str] = mapped_column(String(8))           # cash | card | transfer
+    # captured | pending (transfer awaiting bank, card awaiting terminal) |
+    # unknown (terminal answer lost) | declined
+    status: Mapped[str] = mapped_column(String(10))
+    amount_cents: Mapped[int] = mapped_column(BigInteger)    # applied to the bill
+    rounding_cents: Mapped[int] = mapped_column(BigInteger, default=0)  # cash only, final part
+    tendered_cents: Mapped[int] = mapped_column(BigInteger, default=0)
+    change_cents: Mapped[int] = mapped_column(BigInteger, default=0)
+    register_id: Mapped[int] = mapped_column(ForeignKey("registers.id"))
+    drawer_session_id: Mapped[int | None] = mapped_column(ForeignKey("drawer_sessions.id"), nullable=True)
+    provider_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
+
+    __table_args__ = (UniqueConstraint("tenant_id", "idempotency_key", name="uq_payment_idempotency"),)
+
+
+class CustomerInvoice(Base):
+    """Receivable for the part of a bill paid by bank transfer."""
+
+    __tablename__ = "customer_invoices"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    invoice_no: Mapped[int] = mapped_column(Integer)
+    reference_no: Mapped[str] = mapped_column(String(20))    # Estonian viitenumber (7-3-1)
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.id"))
+    sale_id: Mapped[str | None] = mapped_column(ForeignKey("sales.id"), nullable=True)
+    customer_name: Mapped[str] = mapped_column(String(200))
+    customer_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    amount_cents: Mapped[int] = mapped_column(BigInteger)
+    paid_cents: Mapped[int] = mapped_column(BigInteger, default=0)
+    status: Mapped[str] = mapped_column(String(16))          # issued | partially_paid | paid
+    due_date: Mapped[date] = mapped_column(Date)
+    created_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime]
+
+    __table_args__ = (UniqueConstraint("tenant_id", "invoice_no", name="uq_customer_invoice_no"),
+                      UniqueConstraint("tenant_id", "reference_no", name="uq_customer_invoice_ref"))
+
+
+class BankTransaction(Base):
+    """Imported bank statement line (append-only); matched by reference."""
+
+    __tablename__ = "bank_transactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    bank_tx_id: Mapped[str] = mapped_column(String(64))
+    booked_date: Mapped[date] = mapped_column(Date)
+    amount_cents: Mapped[int] = mapped_column(BigInteger)
+    reference: Mapped[str] = mapped_column(String(35))
+    payer: Mapped[str] = mapped_column(String(200))
+    invoice_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    allocated_cents: Mapped[int] = mapped_column(BigInteger, default=0)
+    status: Mapped[str] = mapped_column(String(12))          # matched | partial | overpaid | unmatched
+    created_at: Mapped[datetime]
+
+    __table_args__ = (UniqueConstraint("tenant_id", "bank_tx_id", name="uq_bank_tx"),)
+
+
+class MockTerminalTxn(Base):
+    """SIMULATED card terminal/provider record (no real card processing).
+    Keyed by our payment id: a repeated or reconciled request reads the same
+    provider-side outcome, like a real provider's idempotent API."""
+
+    __tablename__ = "mock_terminal_txns"
+
+    payment_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    amount_cents: Mapped[int] = mapped_column(BigInteger)
+    result: Mapped[str] = mapped_column(String(10))          # approved | declined
+    created_at: Mapped[datetime]
 
 
 # ------------------------------------------------------------ inventory (#14)
@@ -850,7 +944,8 @@ class AuthEvent(Base):
     detail: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
 
-APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent, KitchenTicketLine, AuthEvent, StockMovement)
+APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent, KitchenTicketLine, AuthEvent, StockMovement,
+               BankTransaction)
 
 
 class AppendOnlyViolation(RuntimeError):

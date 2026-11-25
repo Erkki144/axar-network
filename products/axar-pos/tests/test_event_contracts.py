@@ -53,6 +53,20 @@ def events(a, app):
     assert a.post(f"/api/v1/orders/{o['id']}/pay-cash", {"version": k["order"]["version"],
                   "register_id": a.register_id(), "tendered_cents": 1000},
                   headers={"Idempotency-Key": "contract-pay-0001"}).status_code == 201
+    # C3: a split bill (card + final cash) and a transfer receivable matched by the bank
+    o = a.post(f"/api/v1/tables/{table_id(a, 'A2')}/order").json()
+    o = a.c.put(f"/api/v1/orders/{o['id']}/lines", headers=a.h, json={"version": o["version"], "lines": [
+        {"product_id": a.product_id("KOHV"), "quantity": 1}, {"product_id": a.product_id("SAI"), "quantity": 1}]}).json()
+    for i, (method, amount, extra) in enumerate((("card", 100, {}), ("transfer", 100, {"customer_name": "OÜ X"}),
+                                                 ("cash", 249, {"tendered_cents": 300}))):
+        r = a.post(f"/api/v1/orders/{o['id']}/payments", {"method": method, "register_id": a.register_id(),
+                   "expected_total_cents": 449, "amount_cents": amount, **extra},
+                   headers={"Idempotency-Key": f"contract-bill-{i}"})
+        assert r.status_code == 201, r.text
+    m = a.as_role("manager")
+    inv = m.get("/api/v1/receivables/invoices").json()[0]
+    assert m.post("/api/v1/receivables/bank-import", {"lines": [{"bank_tx_id": "C-1", "booked_date": "2026-03-10",
+                  "amount_cents": 100, "reference": inv["reference_no"], "payer": "OÜ X"}]}).status_code == 200
     assert a.post(f"/api/v1/drawer/{d['id']}/close", {"counted_cents": 0}).status_code == 200
     with app.state.session_factory() as s:
         return list(s.scalars(select(OutboxEvent).order_by(OutboxEvent.recorded_seq)))
@@ -80,12 +94,15 @@ def test_envelope_v2_fields_and_gap_free_sequence(events):
     for e in events:
         assert e.aggregate_type and e.aggregate_id and e.aggregate_version >= 1
         assert json.loads(e.actor)["kind"] in {"staff", "system"}
-    by_order = [e.aggregate_version for e in events if e.aggregate_type == "order"]
-    assert by_order == sorted(by_order) and len(set(by_order)) == len(by_order)   # per-aggregate order
-    closed = next(e for e in events if e.type == "order.closed")
-    sale = next(e for e in events if e.type == "pos.sale.completed"
-                and json.loads(e.payload)["sale_id"] == json.loads(closed.payload)["sale_id"])
-    assert sale.recorded_seq < closed.recorded_seq            # same transaction, sale first
+    orders_ = {e.aggregate_id for e in events if e.aggregate_type == "order"}
+    assert len(orders_) == 2
+    for oid in orders_:                                                           # per-aggregate order
+        by_order = [e.aggregate_version for e in events if e.aggregate_id == oid]
+        assert by_order == sorted(by_order) and len(set(by_order)) == len(by_order)
+    for closed in (e for e in events if e.type == "order.closed"):
+        sale = next(e for e in events if e.type == "pos.sale.completed"
+                    and json.loads(e.payload)["sale_id"] == json.loads(closed.payload)["sale_id"])
+        assert sale.recorded_seq < closed.recorded_seq        # same transaction, sale first
 
 
 def test_payload_is_canonical_and_hash_matches(events):
@@ -96,13 +113,21 @@ def test_payload_is_canonical_and_hash_matches(events):
 
 
 def test_sale_financial_identities_consumers_rely_on(events):
+    assert {e.version for e in events if e.type == "pos.sale.completed"} == {1, 2}
     for e in (x for x in events if x.type == "pos.sale.completed"):
         p = json.loads(e.payload)
         assert p["total_cents"] == sum(ln["gross_cents"] for ln in p["lines"])
         assert p["vat_cents"] == sum(ln["vat_cents"] for ln in p["lines"])
         assert p["net_cents"] == p["total_cents"] - p["vat_cents"]
-        assert p["cash_due_cents"] == p["total_cents"] + p["cash_rounding_cents"]
         assert p["cash_due_cents"] % 5 == 0
+        if e.version == 1:
+            assert p["cash_due_cents"] == p["total_cents"] + p["cash_rounding_cents"]
+        else:  # split tenders: amounts cover the total; rounding/cash only on cash legs
+            assert sum(x["amount_cents"] for x in p["tenders"]) == p["total_cents"]
+            cash = [x for x in p["tenders"] if x["method"] == "cash"]
+            assert sum(x["rounding_cents"] for x in p["tenders"]) == p["cash_rounding_cents"]
+            assert p["cash_due_cents"] == sum(x["amount_cents"] + x["rounding_cents"] for x in cash)
+            assert all(x["rounding_cents"] == 0 for x in p["tenders"] if x["method"] != "cash")
         for ln in p["lines"]:
             assert ln["gross_cents"] == ln["unit_price_cents"] * ln["quantity"]
             assert ln["vat_cents"] == half_up_vat(ln["gross_cents"], ln["vat_rate_bp"])  # CONNECT re-check

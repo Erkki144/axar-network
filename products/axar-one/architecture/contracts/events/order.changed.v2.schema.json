@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/order.changed/2",
+  "title": "order.changed v2 payload",
+  "description": "Bill payment status moved (payments.py, C3): open <-> partially_paid before the sale; invoiced -> paid when the bank matched the transfer (sale_id present then).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "order_id",
+    "table_id",
+    "status",
+    "version"
+  ],
+  "properties": {
+    "order_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "table_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "enum": [
+        "open",
+        "partially_paid",
+        "paid"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sale_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}
