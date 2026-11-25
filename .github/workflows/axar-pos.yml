@@ -1,11 +1,11 @@
 name: axar-pos
 
+# Runs on EVERY pull request so its jobs can be required status checks in
+# branch protection: when a PR does not touch the POS, the `changes` job says
+# so and the test jobs are skipped - a skipped job counts as passed for a
+# required check, so website-only PRs are not blocked.
 on:
   pull_request:
-    paths:
-      - "products/axar-pos/**"
-      - "products/axar-one/**"
-      - ".github/workflows/axar-pos.yml"
   push:
     branches: [main]
     paths:
@@ -16,7 +16,33 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      pos: ${{ steps.detect.outputs.pos }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: detect
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # Fail-safe: if the diff cannot be computed, run everything.
+          if ! changed=$(git diff --name-only "$BASE" HEAD 2>/dev/null); then
+            echo "pos=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if echo "$changed" | grep -qE '^(products/axar-pos/|products/axar-one/|\.github/workflows/axar-pos\.yml$)'; then
+            echo "pos=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pos=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "changed files:"; echo "$changed" | head -50
+
   test:
+    needs: changes
+    if: needs.changes.outputs.pos == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -35,6 +61,8 @@ jobs:
   test-postgres:
     # Whole suite on PostgreSQL 16 as the non-owner, RLS-bound role axar_app,
     # plus PostgreSQL-only tests (RLS, grants, drift, real lock interleavings).
+    needs: changes
+    if: needs.changes.outputs.pos == 'true'
     runs-on: ubuntu-24.04   # pinned: needs postgresql-client-16 (not packaged on 26.04)
     timeout-minutes: 15
     services:
@@ -76,6 +104,8 @@ jobs:
 
   browser-e2e:
     # AXAR ONE cashier UI against a real local uvicorn (127.0.0.1 only).
+    needs: changes
+    if: needs.changes.outputs.pos == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -95,6 +125,8 @@ jobs:
   dependency-audit:
     # #34 SEC-3: known vulnerabilities in pinned Python dependencies (PyPI/OSV advisories).
     # Fails the build on any finding; upgrade the pin (and re-run all suites) to fix.
+    needs: changes
+    if: needs.changes.outputs.pos == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
