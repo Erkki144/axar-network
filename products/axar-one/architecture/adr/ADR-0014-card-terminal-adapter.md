@@ -17,7 +17,7 @@ Status: **Accepted for implementation (interface + sandbox).** No real provider 
 | `status_query` capability is **required**; adapters without it are refused | without it rule 2 cannot hold | `test_flow_refuses_adapters_without_status_query` |
 | Unsupported operations raise `CapabilityNotSupported`, never emulated | honest behaviour per provider | `test_unsupported_operations_raise_instead_of_being_emulated` |
 | Refunds are idempotent and never exceed the approved amount | | `test_refund_is_idempotent_and_never_exceeds_the_approved_amount` |
-| No card data: results carry at most brand + last 4; anything that looks like a card number is refused | PCI scope stays with the provider | `test_results_never_carry_card_numbers`, `test_flow_refuses_card_number_like_data` |
+| No card data: results carry at most brand + last 4. Card-number-like data in a provider text field (13–19 digits that pass the Luhn check) is **masked before storage** and the outcome is flagged; the payment state is kept, because refusing the answer would lose a payment the terminal already took. Our own attempt ids and non-Luhn numeric provider ids are not flagged | PCI scope stays with the provider; no false refusals | `test_results_never_carry_card_numbers`, `test_flow_redacts_card_number_like_data_but_keeps_the_money_state`, `test_long_numeric_ids_are_not_mistaken_for_card_numbers`, `test_pan_detector_uses_luhn` |
 
 **Mutation check (2026-11-25).** Each of these mutants is caught by at least one test:
 - removing idempotency;

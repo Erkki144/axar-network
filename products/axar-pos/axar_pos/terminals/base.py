@@ -149,9 +149,51 @@ class TerminalAdapter(Protocol):
     def settlements(self, day: str) -> list[SettlementLine]: ...
 
 
-PAN_LIKE = re.compile(r"\d{13,19}")
+# 13-19 digits, optionally grouped by single spaces or hyphens ("4111 1111 ...").
+PAN_CANDIDATE = re.compile(r"(?<![\d])(?:\d[ -]?){12,18}\d(?![\d])")
+# Free-text fields that come from the PROVIDER. attempt_id is ours (validated in
+# PaymentRequest) and card_last4 is validated to exactly 4 digits.
+PROVIDER_TEXT_FIELDS = ("provider_ref", "auth_code", "card_brand", "raw_status")
+
+
+def luhn_ok(digits: str) -> bool:
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch)
+        if i % 2:
+            d = d * 2 - 9 if d > 4 else d * 2
+        total += d
+    return total % 10 == 0
+
+
+def _pans(text: str) -> list[str]:
+    out = []
+    for m in PAN_CANDIDATE.finditer(text):
+        digits = re.sub(r"[ -]", "", m.group())
+        if 13 <= len(digits) <= 19 and luhn_ok(digits):
+            out.append(m.group())
+    return out
 
 
 def contains_pan_like(result: TerminalResult) -> bool:
-    """Guard used by tests and the flow: no 13-19 digit run anywhere."""
-    return any(isinstance(v, str) and PAN_LIKE.search(v) for v in vars(result).values())
+    """True if a provider-supplied text field holds something that looks like a
+    card number: 13-19 digits that also pass the Luhn check (as every real PAN
+    does). Long numeric transaction ids and our own attempt ids are not flagged
+    just for being long."""
+    return any(isinstance(getattr(result, f), str) and _pans(getattr(result, f)) for f in PROVIDER_TEXT_FIELDS)
+
+
+def redact_pans(result: TerminalResult) -> tuple[TerminalResult, bool]:
+    """Mask card-number-like data in provider text fields; the payment state
+    (status, amount, ids) is kept, so money already taken is still recorded."""
+    from dataclasses import replace
+    changes = {}
+    for f in PROVIDER_TEXT_FIELDS:
+        v = getattr(result, f)
+        if isinstance(v, str):
+            masked = v
+            for pan in _pans(v):
+                masked = masked.replace(pan, "[card number redacted]")
+            if masked != v:
+                changes[f] = masked
+    return (replace(result, **changes), True) if changes else (result, False)

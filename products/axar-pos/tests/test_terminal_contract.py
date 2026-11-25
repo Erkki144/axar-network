@@ -175,15 +175,41 @@ def test_flow_refuses_adapters_without_status_query():
         flow.charge(a, req())
 
 
-def test_flow_refuses_card_number_like_data():
+def test_flow_redacts_card_number_like_data_but_keeps_the_money_state():
+    """A leaky adapter must not make the POS lose a payment the terminal took:
+    the card number is masked, the state stays 'captured', the outcome is flagged."""
     from dataclasses import replace
 
     class Leaky(SandboxTerminal):
         def start_payment(self, r):
-            return replace(super().start_payment(r), raw_status="card 4111111111111111")
+            return replace(super().start_payment(r), raw_status="card 4111 1111 1111 1111 ok")
 
-    with pytest.raises(RuntimeError, match="card-number-like"):
-        flow.charge(Leaky(), req())
+    out = flow.charge(Leaky(), req())
+    assert out.pos_status == "captured"
+    assert "4111" not in out.result.raw_status and "redacted" in out.result.raw_status
+    assert "redacted" in out.detail and not contains_pan_like(out.result)
+
+
+def test_long_numeric_ids_are_not_mistaken_for_card_numbers():
+    """Regression: uuid4().hex attempt ids sometimes contain 13+ digits in a row
+    (~3 % of ids) and providers often use long numeric transaction ids; the old
+    guard refused those payments. Only Luhn-valid runs in provider text count."""
+    from dataclasses import replace
+
+    class NumericRef(SandboxTerminal):
+        def start_payment(self, r):
+            return replace(super().start_payment(r), provider_ref="TX-1234567890123456780")
+
+    r = PaymentRequest("12345678901234567890abcdef123456", "T1", 1250)
+    out = flow.charge(NumericRef(), r)
+    assert out.pos_status == "captured" and out.detail == ""
+    assert out.result.provider_ref == "TX-1234567890123456780"     # 19 digits, not Luhn-valid: kept
+
+
+def test_pan_detector_uses_luhn():
+    from axar_pos.terminals.base import luhn_ok
+    assert luhn_ok("4111111111111111") and luhn_ok("5555555555554444")
+    assert not luhn_ok("4111111111111112") and not luhn_ok("1234567890123456780")
 
 
 def test_registry():

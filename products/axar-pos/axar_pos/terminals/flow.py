@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from .base import (
     FINAL, NO_MONEY, CapabilityNotSupported, PaymentRequest, Status, TerminalAdapter, TerminalResult,
-    TerminalTimeout, TerminalUnavailable, contains_pan_like,
+    TerminalTimeout, TerminalUnavailable, redact_pans,
 )
 
 
@@ -27,9 +27,10 @@ class Outcome:
     detail: str = ""
 
 
+REDACTED_NOTE = "card-number-like data from the provider was redacted (alert: check the adapter)"
+
+
 def _to_pos(res: TerminalResult) -> str:
-    if contains_pan_like(res):
-        raise RuntimeError("adapter returned card-number-like data; refusing to store it")
     if res.status == Status.APPROVED:
         return "captured"
     if res.status in NO_MONEY:
@@ -47,7 +48,14 @@ def charge(adapter: TerminalAdapter, req: PaymentRequest) -> Outcome:
         return Outcome(req.attempt_id, "not_sent", None, str(e))
     except TerminalTimeout as e:
         return Outcome(req.attempt_id, "unknown", None, str(e))
-    return Outcome(req.attempt_id, _to_pos(res), res)
+    return _outcome(req.attempt_id, res)
+
+
+def _outcome(attempt_id: str, res: TerminalResult) -> Outcome:
+    """Never refuse a provider answer (the money may already be taken): mask
+    card-number-like data, keep the payment state, flag it in ``detail``."""
+    res, redacted = redact_pans(res)
+    return Outcome(attempt_id, _to_pos(res), res, REDACTED_NOTE if redacted else "")
 
 
 def resolve(adapter: TerminalAdapter, attempt_id: str, *, max_polls: int = 10,
@@ -58,9 +66,10 @@ def resolve(adapter: TerminalAdapter, attempt_id: str, *, max_polls: int = 10,
     for i in range(max_polls):
         res = adapter.get_status(attempt_id)
         if res.status in FINAL:
-            return Outcome(attempt_id, _to_pos(res), res)
+            return _outcome(attempt_id, res)
         if interval_s and i + 1 < max_polls:
             time.sleep(interval_s)
+    res, _ = redact_pans(res) if res is not None else (None, False)
     return Outcome(attempt_id, "unknown", res, "provider still pending")
 
 
