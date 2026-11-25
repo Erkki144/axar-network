@@ -93,6 +93,10 @@ def test_ui_has_no_client_side_money_authority():
         # identity (RFC-0002): enrol, PIN login, logout, two step-up approvals
         "'/api/v1/auth/devices/enroll'", "'/api/v1/auth/pin-login'", "'/api/v1/auth/logout'",
         "'/api/v1/auth/approvals'", "'/api/v1/auth/approvals'",
+        # inventory screens (#14): master data, invoice draft/post, recipes
+        "'/api/v1/inventory/suppliers'", "'/api/v1/inventory/items'", "'/api/v1/inventory/documents'",
+        "`/api/v1/inventory/documents/${d.id}/post`", "'/api/v1/inventory/recipes/preview'",
+        "'/api/v1/inventory/recipes'",
     ]), paths
     assert src.count("method: 'POST'") + src.count("method: 'PUT'") == len(writes)
     for money in ("/api/v1/sales/cash'", "/pay-cash`", "/refunds`"):

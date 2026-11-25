@@ -11,6 +11,7 @@
 //   order version, so a stale device gets 409 and reloads instead of
 //   overwriting; paying a bill closes it in the same server transaction.
 import { centsToInput, formatEuro, parseEuroInput } from './format.mjs';
+import { createInventory } from './inventory.mjs';
 
 // Identity. In "server" mode (RFC-0002) every request carries the device
 // token (this enrolled till) and the staff session token from the PIN login.
@@ -284,7 +285,7 @@ function scheduleQuote() {
 
 function renderBasket() {
   const panel = $('checkout-panel');
-  panel.hidden = S.mode === 'kitchen' || S.mode === 'manager';
+  panel.hidden = S.mode === 'kitchen' || S.mode === 'manager' || S.mode === 'inventory';
   document.querySelector('.app-shell').classList.toggle('no-checkout', panel.hidden);
   if (panel.hidden) return;
   const tableMode = S.mode === 'tables';
@@ -401,7 +402,7 @@ function renderRegisterSelect() {
 }
 
 function activateMode(next) {
-  if (!['express', 'tables', 'kitchen', 'manager'].includes(next)) return;
+  if (!['express', 'tables', 'kitchen', 'manager', 'inventory'].includes(next)) return;
   S.mode = next; S.category = 'Kõik';
   document.querySelectorAll('.nav-item').forEach((b) => {
     const on = b.dataset.mode === next;
@@ -413,6 +414,7 @@ function activateMode(next) {
     tables: ['RESTORANI TÖÖLAUD', ['Laudade teenindus.', 'Üks selge voog.'], 'Lauaarved on serveris – kõik seadmed näevad sama arvet.', 'Arve tasumine teeb müügi ja sulgeb arve ühe serveritehinguna.'],
     kitchen: ['KÖÖGI TÖÖLAUD', ['Kõik tellimused.', 'Õiges järjekorras.'], 'Köögipiletid tulevad serverist ja uuenevad iseenesest.', 'Uued piletid on vanimast uuemani.'],
     manager: ['JUHI TÖÖLAUD', ['Päeva ülevaade.', 'Päris andmetest.'], 'Aruanne, müügid ja tagastused tulevad serverist.', 'Tagastus kasutab DEMO juhi rolli, mitte päris autentimist.'],
+    inventory: ['LADU', ['Arvest laoni.', 'Laost taldrikule.'], 'Ostuarved, laoseis ja retseptid.', 'Omahind on liikuv kaalutud keskmine.'],
   }[next];
   $('section-eyebrow').textContent = copy[0];
   const h = $('section-title'); h.replaceChildren(document.createTextNode(copy[1][0]), el('br'), el('em', null, copy[1][1]));
@@ -422,6 +424,7 @@ function activateMode(next) {
   if (next === 'kitchen') renderKitchen();
   else if (next === 'manager') renderManager();
   else if (next === 'tables') renderTables();
+  else if (next === 'inventory') inventoryUi.render($('view-root'));
   else renderExpress();
   renderBasket();
   scheduleQuote();
@@ -743,6 +746,7 @@ function liveFrame(frame) {
     if (type.startsWith('order.')) LIVE.pending.add('tables');
     else if (type.startsWith('kitchen.')) { LIVE.pending.add('kitchen'); LIVE.pending.add('tables'); }
     else if (type.startsWith('drawer.') || type.startsWith('pos.')) LIVE.pending.add('drawer');
+    else if (type.startsWith('stock.')) LIVE.pending.add('stock');
   }
   clearTimeout(LIVE.timer);
   LIVE.timer = setTimeout(applyLive, 80);   // coalesce bursts
@@ -754,6 +758,7 @@ async function applyLive() {
   if ((all || p.has('tables')) && S.mode === 'tables') await refreshTables();
   if ((all || p.has('kitchen')) && S.mode === 'kitchen') await loadTickets();
   if (all || p.has('drawer')) await refreshDrawer();
+  if ((all || p.has('stock')) && S.mode === 'inventory') await inventoryUi.refresh();
 }
 
 function startPolling() {
@@ -849,6 +854,8 @@ function closeModal() {
   renderBasket();
   const pay = $('pay-button'); if (!pay.hidden && !pay.disabled) pay.focus();
 }
+const inventoryUi = createInventory({ api: (...a) => api(...a), el, stateBox: (...a) => stateBox(...a),
+  announce: (x) => announce(x), ApiError });
 const stateBox = (cls, text) => { const d = el('div', `pay-state ${cls}`, text); d.setAttribute('role', cls === 'error' || cls === 'unconfirmed' ? 'alert' : 'status'); return d; };
 
 // --------------------------------------------------------------------- drawer
@@ -1527,6 +1534,7 @@ function renderIdentity() {
   $('cashier-initials').textContent = name.split(/\s+/).map((x) => x[0] || '').join('').slice(0, 2).toUpperCase();
   $('mode-pill').textContent = AUTH.mode === 'demo' ? '● DEMO' : `● ${(me?.roles || []).map((r) => ROLE_ET[r] || r).join(', ')}`;
   $('lock-top').hidden = AUTH.mode !== 'server';
+  document.querySelector('[data-mode="inventory"]').hidden = !can('inventory');
   $('lock-button').hidden = AUTH.mode !== 'server';
   $('register-select').disabled = AUTH.mode === 'server' && Boolean(me?.register_id);
 }

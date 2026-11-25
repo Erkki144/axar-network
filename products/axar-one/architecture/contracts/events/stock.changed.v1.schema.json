@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/stock.changed/1",
+  "title": "stock.changed v1 payload",
+  "description": "Invalidation emitted in the same transaction as stock movements (inventory.py). Screens re-read stock through the API; consumers must not treat it as a ledger.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "warehouse_id",
+    "item_ids",
+    "ref_type",
+    "ref_id"
+  ],
+  "properties": {
+    "warehouse_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "item_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "ref_type": {
+      "enum": [
+        "supplier_document",
+        "supplier_return",
+        "production",
+        "sale"
+      ]
+    },
+    "ref_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    }
+  }
+}

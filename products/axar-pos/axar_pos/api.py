@@ -250,6 +250,12 @@ class ProduceIn(Strict):
     batches: Annotated[int, Field(strict=True, ge=1, le=10_000)]
 
 
+class RecipePreviewIn(Strict):
+    product_id: Annotated[int | None, Field(strict=True, ge=1)] = None
+    lines: Annotated[list[RecipeLineIn], Field(min_length=0, max_length=100)]
+    yield_micro: MicroQty = 1_000_000
+
+
 def drawer_close_hash(drawer_id: int, counted_cents: int) -> str:
     return services._sha256(services._canonical({"drawer_id": drawer_id, "counted_cents": counted_cents}))
 
@@ -368,6 +374,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     login_limiter = auth.RateLimiter(limit=20, window_s=300)
 
     app = FastAPI(title="AXAR POS (simulated cash)", version=__version__)
+
+    if settings.inprocess_worker:
+        import threading
+
+        from . import worker as _worker
+
+        stop = threading.Event()
+
+        def loop():
+            wid = f"inproc:{uuid.uuid4().hex[:8]}"
+            while not stop.wait(1.0):
+                try:
+                    _worker.run_once(app.state.request_factory, settings, wid)
+                except Exception:  # never kill the API; failures are recorded per consumer
+                    log.exception("in-process worker round failed")
+
+        app.add_event_handler("startup", lambda: threading.Thread(target=loop, daemon=True,
+                                                                  name="axar-worker").start())
+        app.add_event_handler("shutdown", stop.set)
     app.state.settings = settings
     # session_factory: owner/maintenance sessions (seeding, tests, admin CLI);
     # NOT subject to RLS. request_factory: what API requests use.
@@ -1128,5 +1153,60 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         cost = inventory.cogs(s, who.tenant_id, bdate)
         return {"business_date": bdate.isoformat(), "net_revenue_cents": revenue, "cogs_cents": cost,
                 "gross_margin_cents": revenue - cost}
+
+    def recipe_out(r) -> dict | None:
+        if r is None:
+            return None
+        return {"id": r.id, "version": r.version, "valid_from": r.valid_from.isoformat(), "product_id": r.product_id,
+                "output_item_id": r.output_item_id, "yield_micro": r.yield_micro,
+                "lines": [{"item_id": ln.item_id, "qty_micro": ln.qty_micro} for ln in r.lines]}
+
+    @app.get("/api/v1/inventory/items")
+    def inv_items(who: Stockkeeper, s: Db):
+        return [{"id": i.id, "sku": i.sku, "name": i.name, "kind": i.kind, "uom": i.uom}
+                for i in s.scalars(select(inventory.Item).where(inventory.Item.tenant_id == who.tenant_id)
+                                   .order_by(inventory.Item.name))]
+
+    @app.get("/api/v1/inventory/suppliers")
+    def inv_suppliers(who: Stockkeeper, s: Db):
+        return [{"id": x.id, "code": x.code, "name": x.name}
+                for x in s.scalars(select(inventory.Supplier).where(inventory.Supplier.tenant_id == who.tenant_id)
+                                   .order_by(inventory.Supplier.name))]
+
+    @app.get("/api/v1/inventory/warehouses")
+    def inv_warehouses(who: Stockkeeper, s: Db):
+        return [{"id": w.id, "code": w.code, "name": w.name, "location_id": w.location_id, "is_default": w.is_default}
+                for w in s.scalars(select(inventory.Warehouse).where(inventory.Warehouse.tenant_id == who.tenant_id))]
+
+    @app.get("/api/v1/inventory/documents")
+    def inv_docs(who: Stockkeeper, s: Db, status: Literal["draft", "posted"] | None = None):
+        return [{**doc_out(d), **inventory.document_total(d)} for d in inventory.list_documents(s, who.tenant_id, status)]
+
+    @app.get("/api/v1/inventory/documents/{document_id}")
+    def inv_doc_get(document_id: str, who: Stockkeeper, s: Db):
+        d = s.scalar(select(inventory.SupplierDocument).where(inventory.SupplierDocument.id == document_id,
+                                                              inventory.SupplierDocument.tenant_id == who.tenant_id))
+        if d is None:
+            raise services.NotFound("document not found")
+        return {**doc_out(d), **inventory.document_total(d)}
+
+    @app.get("/api/v1/inventory/recipes")
+    def inv_recipe_get(who: Stockkeeper, s: Db, product_id: int | None = None, output_item_id: int | None = None):
+        on = services.business_date_for(settings.clock(), settings)
+        return recipe_out(inventory.recipe_for(s, who.tenant_id, product_id=product_id,
+                                               output_item_id=output_item_id, on=on))
+
+    @app.post("/api/v1/inventory/recipes/preview")
+    def inv_recipe_preview(body: RecipePreviewIn, who: Stockkeeper, s: Db):
+        return inventory.preview_recipe(s, who.tenant_id, product_id=body.product_id,
+                                        lines=[(x.item_id, x.qty_micro) for x in body.lines],
+                                        yield_micro=body.yield_micro,
+                                        on=services.business_date_for(settings.clock(), settings))
+
+    @app.get("/api/v1/inventory/offers")
+    def inv_offers(who: Stockkeeper, s: Db):
+        return [{"id": p.id, "sku": p.sku, "name": p.name, "price_cents": p.price_cents, "stock_mode": p.stock_mode,
+                 "stock_item_id": p.stock_item_id}
+                for p in services.list_products(s, who.tenant_id)]
 
     return app
