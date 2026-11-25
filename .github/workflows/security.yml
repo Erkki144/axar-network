@@ -1,0 +1,45 @@
+name: security
+
+# #34 SEC-3 gates for the whole repository (website + products).
+# Read-only: no secrets, no write permissions, no third-party actions beyond
+# GitHub's own checkout/setup actions. Tool binaries are pinned and verified.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    # Every commit reachable from the checkout (full history), findings redacted.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: "8.28.0"
+      GITLEAKS_SHA256: "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks (pinned + checksum)
+        run: |
+          curl -fsSL -o gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gl.tgz" | sha256sum -c -
+          tar xzf gl.tgz gitleaks && rm gl.tgz
+      - name: Scan git history
+        run: ./gitleaks git --redact --no-banner --exit-code 1 .
+
+  sast-python:
+    # Static analysis of the AXAR POS server; fails on medium or high findings.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install bandit==1.9.4
+      - run: bandit -r products/axar-pos/axar_pos -x products/axar-pos/axar_pos/migrations --severity-level medium
