@@ -382,7 +382,14 @@ def _issue_sale(s: Session, tenant_id: str, order: Order, st: BillState, registe
     tenders = sorted({p.method for p in st.payments if p.status in ("captured", "pending")})
     cash = [p for p in st.payments if p.method == "cash" and p.status == "captured"]
     receipt_no = services.next_number(s, tenant_id, "receipt", Sale, Sale.receipt_no)
+    from . import journal
+
+    # Same numbering + journal as every other sale (O1a): per-register series,
+    # hash-chained journal entry in this transaction.
+    register_receipt_no, receipt_label = journal.next_register_receipt(
+        s, tenant_id, services.get_register(s, tenant_id, register_id))
     sale = Sale(id=sale_id, tenant_id=tenant_id, receipt_no=receipt_no, register_id=register_id,
+                register_receipt_no=register_receipt_no, receipt_label=receipt_label,
                 drawer_session_id=drawer.id, cashier_id=actor, idempotency_key=f"bill:{order.id}",
                 request_hash=_hash({"bill": order.id}), correlation_id=str(uuid.uuid4()), created_at=now,
                 business_date=bdate, payment_method=tenders[0] if len(tenders) == 1 else "mixed",
@@ -394,6 +401,8 @@ def _issue_sale(s: Session, tenant_id: str, order: Order, st: BillState, registe
     s.add(sale)
     s.add_all(lines)
     s.flush()
+    journal.append(s, tenant_id=tenant_id, stream_id=journal.stream_for_register(register_id), entry_type="sale",
+                   entity_id=sale_id, summary=journal.sale_summary(sale, lines), now=now)
     from .models import RefundAllocation, SaleRefundState
 
     s.add_all(RefundAllocation(sale_line_id=ln.id, tenant_id=tenant_id, sale_id=sale_id, original_quantity=ln.quantity,

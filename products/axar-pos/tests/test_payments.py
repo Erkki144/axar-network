@@ -405,3 +405,25 @@ def test_parallel_import_of_one_bank_line_applies_it_once(a, app):
     assert sorted(r.json()[0]["status"] for r in rs) == ["duplicate"] * 5 + ["matched"]
     with app.state.session_factory() as s:
         assert s.scalar(select(CustomerInvoice.paid_cents)) == 1000
+
+
+def test_bill_sale_gets_register_number_and_journal_entry(a, app):
+    """C3 + O1a: the one sale a settled bill produces is numbered and
+    journaled exactly like a direct cash sale."""
+    from axar_pos import journal
+    from axar_pos.models import DeviceJournalEntry
+
+    a.open_drawer()
+    assert a.sell([("KOHV", 1)], 500).status_code == 201                  # register number 1
+    o = open_bill(a, [("KOHV", 2)])
+    pay(a, o["id"], "card", 200, 500)
+    sale_id = pay(a, o["id"], "cash", 300, 500, tendered_cents=300).json()["bill"]["sale_id"]
+    sale = a.get(f"/api/v1/sales/{sale_id}").json()
+    assert sale["register_receipt_no"] == 2
+    with app.state.session_factory() as s:
+        es = list(s.scalars(select(DeviceJournalEntry).where(
+            DeviceJournalEntry.stream_id == journal.stream_for_register(a.register_id()))
+            .order_by(DeviceJournalEntry.seq)))
+    assert [(e.seq, e.entity_id) for e in es][-1] == (2, sale_id)
+    v = a.as_role("manager").get(f"/api/v1/admin/registers/{a.register_id()}/journal/verify").json()
+    assert v["ok"] is True and v["entries"] == 2

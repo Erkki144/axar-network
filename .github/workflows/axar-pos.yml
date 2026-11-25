@@ -82,3 +82,19 @@ jobs:
       - run: pip install -r requirements-e2e.txt
       - run: python -m playwright install --with-deps chromium
       - run: python -m pytest tests_e2e -p no:cacheprovider -rA
+
+  dependency-audit:
+    # #34 SEC-3: known vulnerabilities in pinned Python dependencies (PyPI/OSV advisories).
+    # Fails the build on any finding; upgrade the pin (and re-run all suites) to fix.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: products/axar-pos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit==2.10.1
+      - run: pip-audit -r requirements.txt -r requirements-dev.txt -r requirements-e2e.txt --strict

@@ -559,8 +559,12 @@ def create_cash_sale(
     if not _claim_drawer(s, tenant_id, drawer.id, cash_due):
         s.rollback()
         raise NoOpenDrawer("the cash drawer was closed; sale not recorded")
-    # Lock order everywhere: drawer row, then counter row (no deadlock cycle).
+    # Lock order everywhere: drawer row, then counter rows (tenant receipt,
+    # register series, journal) - no deadlock cycle.
     receipt_no = next_number(s, tenant_id, "receipt", Sale, Sale.receipt_no)
+    from . import journal
+
+    register_receipt_no, receipt_label = journal.next_register_receipt(s, tenant_id, register)
 
     sale = Sale(
         id=sale_id,
@@ -584,12 +588,17 @@ def create_cash_sale(
         cash_due_cents=cash_due,
         tendered_cents=tendered_cents,
         change_cents=tendered_cents - cash_due,
+        register_receipt_no=register_receipt_no,
+        receipt_label=receipt_label,
     )
     s.add(sale)
     s.add_all(sale_lines)
     _sale_completed_event(s, sale, sale_lines, now, register.location_id)
     try:
-        s.flush()  # assigns sale line ids
+        s.flush()  # assigns sale line ids; a concurrent same-key sale fails HERE (handled below)
+        journal.append(s, tenant_id=tenant_id, stream_id=journal.stream_for_register(register_id),
+                       entry_type="sale", entity_id=sale_id, summary=journal.sale_summary(sale, sale_lines),
+                       now=now)
         s.add_all(
             RefundAllocation(
                 sale_line_id=ln.id,
@@ -929,9 +938,15 @@ def _create_cash_refund(
     s.add(refund)
     s.add_all(refund_lines)
     _refund_completed_event(s, refund, refund_lines, sale)
+    from . import journal
+
     if before_commit is not None:  # e.g. consume the step-up approval atomically
         before_commit(s, refund)  # a DomainError rolls back (create_cash_refund)
     try:
+        s.flush()  # a concurrent same-key refund fails HERE (handled below), before the journal
+        journal.append(s, tenant_id=tenant_id, stream_id=journal.stream_for_register(register_id),
+                       entry_type="refund", entity_id=refund.id,
+                       summary=journal.refund_summary(refund, refund_lines), now=now)
         s.commit()
     except IntegrityError:
         s.rollback()
@@ -1069,7 +1084,7 @@ def render_receipt_text(sale: Sale, tenant_name: str, settings: Settings) -> str
         tenant_name.center(width),
         "SIMULEERITUD TŠEKK / DEMO".center(width),
         "-" * width,
-        f"Tšekk nr {sale.receipt_no}",
+        f"Tšekk nr {sale.receipt_label or sale.receipt_no}",
         f"{sale.register.location.name} · {sale.register.name}"[:width],
         f"Aeg {local:%d.%m.%Y %H:%M}",
         f"Kassiir {sale.cashier_id}",
