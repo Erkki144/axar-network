@@ -267,6 +267,16 @@ class Principal:
                 return r
         return "none"
 
+    def visible_locations(self) -> frozenset[int | None] | None:
+        """Locations whose data this principal may see; None = whole tenant."""
+        if self.demo or "owner" in self.roles:
+            return None
+        if self.location_id is not None:
+            return frozenset({self.location_id})
+        if None in self.location_ids:  # tenant-wide manager
+            return None
+        return frozenset(self.location_ids)
+
     def can(self, permission: str) -> bool:
         return self.demo or bool(self.roles & set(PERMISSIONS[permission]))
 
@@ -302,7 +312,7 @@ def _new_session(s: Session, *, staff: Staff, device: Device | None, kind: str, 
 
 
 def resolve_session(s: Session, *, bearer: str | None, device_token: str | None,
-                    settings: Settings, now: datetime) -> Principal:
+                    settings: Settings, now: datetime, touch: bool = True) -> Principal:
     """Bearer session -> Principal, or Unauthorized. Checks expiry, idle time,
     revocation, staff active, device binding and device revocation."""
     if not bearer or len(bearer) > 200:
@@ -324,7 +334,9 @@ def resolve_session(s: Session, *, bearer: str | None, device_token: str | None,
         device = device_by_token(s, device_token)
         if device is None or device.id != sess.device_id:
             raise Unauthorized("this session belongs to another device")
-    if now - sess.last_seen_at >= TOUCH_EVERY:
+    # touch=False for background traffic (the realtime stream): only real
+    # staff actions keep a session from locking after inactivity.
+    if touch and now - sess.last_seen_at >= TOUCH_EVERY:
         s.execute(update(AuthSession).where(AuthSession.id == sess.id).values(last_seen_at=now))
         if device is not None:
             s.execute(update(Device).where(Device.id == device.id).values(last_seen_at=now))

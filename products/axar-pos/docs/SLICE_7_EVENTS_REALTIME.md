@@ -47,3 +47,18 @@ Status: **local / CI only.** Branch `claude/axar-pos-s9-events-0r9ip8`, stacked 
 - Each open stream polls the DB every 0.5 s with one indexed query. That is fine for tens of devices per site. For hundreds, add PostgreSQL `LISTEN/NOTIFY` fan-out; the interface stays the same.
 - No real consumer is registered yet. CONNECT (AION, #8) is the first intended one, through `run_consumer`. A scheduler/worker process for consumers is the next step.
 - Kitchen stations and the full fulfilment lifecycle are still future work (ADR-0003).
+
+## AION independent review (comment on #21) — reproduce, fix, mutation-check
+
+| # | Finding | Reproduced by (failed before the fix) | Fix | Mutant killed |
+| --- | --- | --- | --- | --- |
+| 1 | PIN/password failure counters: read-modify-write, lost increments | PG: 12 parallel wrong PINs → counters < attempts and **all 12 evaluated** (`test_concurrent_wrong_pins_are_all_counted`, `test_concurrent_wrong_passwords_lock_after_the_limit`) | device row, then staff row `FOR UPDATE` + re-read before the lockout check (#19) | removing the locks fails both (PG) |
+| 2a | stream re-check / reconnect renewed the session, so an idle till never locked | `test_open_or_reconnecting_stream_does_not_keep_an_idle_till_unlocked` | `touch=False` for the stream (dependency and re-checks) | ✓ |
+| 2b | stream used the original principal; a location-bound back-office manager saw every location | `test_stream_of_location_manager_back_office_session_is_location_scoped` | refreshed principal on every re-check; `Principal.visible_locations()`; ends if no roles are left | ✓ |
+| 3 | events were not savepoint-scoped; `before_commit` fires on savepoint release | `test_event_emitted_in_rolled_back_savepoint_is_not_written`, `test_released_savepoint_events_die_with_the_outer_rollback` | queued events remember their (sub)transaction; a nested rollback drops its own; written only at the outermost commit (also asserted: nothing written at release → lock ordering) | ✓ (both variants) |
+| 4 | dead letter advanced the cursor → later events applied before an earlier one | `test_block_policy_keeps_order_for_financial_consumers` | per-consumer `on_poison`: **`block` (default)** stops at the poison event until replayed/resolved; `skip` only when order does not matter | ✓ |
+| 5a | any `IntegrityError` on the inbox insert was treated as a duplicate (event silently skipped) | `test_non_duplicate_integrity_error_is_a_failure_not_a_skip` | duplicate only if the inbox row exists; otherwise a failure with retry | ✓ |
+| 5b | raw exception text stored in health/dead letters (could hold SQL parameters or secrets) | `test_errors_are_redacted_in_health_and_dead_letters` | only `Type/RootType fp=<hash>` is stored | ✓ |
+| 5c | retry branch ignored the fencing rowcount; the lease was kept after a failure | `test_failed_run_releases_its_lease_so_another_worker_can_retry` | fencing checked on every write; lease released on every early return | ✓ |
+| 6 | no real consumer and no worker | `test_worker_stages_financial_events_for_books_exactly_once` (3 workers in parallel + rerun), `test_corrupt_financial_event_blocks_books_export_instead_of_skipping` | `books.export` consumer (block policy) → dedicated `export_queue` outbox, no external effect in the handler; `python -m axar_pos.worker [--once]` | — |
+| + | pilot guard (G-SEC-2) | `test_pilot_profile_refuses_unsafe_configuration` | `AXAR_POS_PROFILE=pilot` refuses demo identity / SQLite / same app+owner connection / missing key, before any DB access (#19) | — |

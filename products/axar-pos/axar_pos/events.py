@@ -42,6 +42,7 @@ from sqlalchemy import event as sa_event, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from . import models as _models
 from .models import DeadLetter, EventConsumer, InboxEntry, OutboxEvent
 
 SOURCE = "axar-pos"
@@ -72,27 +73,46 @@ def emit(s: Session, *, tenant_id: str, type: str, payload: dict, aggregate_type
         aggregate_type=aggregate_type, aggregate_id=str(aggregate_id), aggregate_version=aggregate_version,
         causation_id=causation_id, actor=canonical(actor_of(s)), location_id=location_id,
     )
-    s.info.setdefault(_PENDING, []).append(ev)
+    # Remember which (sub)transaction emitted it: a rolled-back savepoint
+    # must take its events with it (AION review on #21).
+    txn = s.get_nested_transaction() or s.get_transaction()
+    s.info.setdefault(_PENDING, []).append((ev, txn))
     return ev
 
 
 @sa_event.listens_for(Session, "before_commit")
 def _write_pending_events(s: Session) -> None:
+    # before_commit also fires when a SAVEPOINT is released; that is not the
+    # end of the transaction, so events wait for the outermost commit.
+    if s.get_nested_transaction() is not None:
+        return
     pending = s.info.pop(_PENDING, None)
     if not pending:
         return
     from .services import next_number  # local import: services imports this module
 
-    for ev in pending:  # one counter row per tenant; taken last, held until commit
+    for ev, _txn in pending:  # one counter row per tenant; taken last, held until commit
         ev.recorded_seq = next_number(s, ev.tenant_id, "event", OutboxEvent, OutboxEvent.recorded_seq)
         s.add(ev)
     s.flush()
 
 
+def _within(txn, ancestor) -> bool:
+    while txn is not None:
+        if txn is ancestor:
+            return True
+        txn = txn.parent
+    return False
+
+
 @sa_event.listens_for(Session, "after_soft_rollback")
 def _drop_pending_events(s: Session, previous_transaction) -> None:
-    if not previous_transaction.nested:  # a savepoint rollback keeps the outer events
-        s.info.pop(_PENDING, None)
+    if not previous_transaction.nested:
+        s.info.pop(_PENDING, None)  # whole transaction gone: every queued event goes
+        return
+    pending = s.info.get(_PENDING)
+    if pending:  # a savepoint rolled back: drop only what it (or its children) emitted
+        s.info[_PENDING] = [(ev, txn) for ev, txn in pending if not _within(txn, previous_transaction)]
 
 
 # ------------------------------------------------------------------ reading
@@ -127,9 +147,23 @@ Handler = Callable[[Session, OutboxEvent], None]
 CONSUMERS: dict[str, Handler] = {}
 
 
-def consumer(name: str):
+POLICIES: dict[str, str] = {}
+
+
+def consumer(name: str, on_poison: str = "block"):
+    """Register a handler. ``on_poison``:
+    - ``block`` (default; financial / inventory consumers): after bounded
+      retries the event is dead-lettered and the consumer STOPS there, so no
+      later event is ever applied before an earlier one. An operator replays
+      or explicitly skips it (audited), then it continues in order.
+    - ``skip``: only for consumers where order does not matter (e.g. cache
+      invalidation): dead-letter and continue.
+    """
+    if on_poison not in ("block", "skip"):
+        raise ValueError(on_poison)
+
     def register(fn: Handler) -> Handler:
-        CONSUMERS[name] = fn
+        CONSUMERS[name], POLICIES[name] = fn, on_poison
         return fn
     return register
 
@@ -142,6 +176,16 @@ class RunResult:
     failed: bool = False
     lease_lost: bool = False
     not_leased: bool = False
+    blocked: bool = False
+
+
+def safe_error(e: BaseException) -> str:
+    """What we store about a failure: the exception type and a fingerprint of
+    its text, never the text itself (it can carry SQL parameters, tokens or
+    personal data). Full details belong in a protected log, not in the DB."""
+    root = getattr(e, "orig", None) or e
+    fp = hashlib.sha256(f"{type(root).__name__}:{root}".encode("utf-8", "replace")).hexdigest()[:12]
+    return f"{type(e).__name__}/{type(root).__name__} fp={fp}"
 
 
 def _backoff(attempts: int) -> timedelta:
@@ -180,13 +224,21 @@ def _advance(s: Session, c: EventConsumer, token: int, seq: int, now: datetime, 
     return res.rowcount == 1
 
 
+def _release(s: Session, name: str, tenant_id: str, token: int) -> None:
+    s.execute(update(EventConsumer).where(EventConsumer.name == name, EventConsumer.tenant_id == tenant_id,
+                                          EventConsumer.fencing_token == token)
+              .values(lease_owner=None, lease_until=None).execution_options(synchronize_session=False))
+    s.commit()
+
+
 def run_consumer(factory, name: str, tenant_id: str, *, worker: str, now: datetime,
-                 batch: int = 100, handler: Handler | None = None) -> RunResult:
+                 batch: int = 100, handler: Handler | None = None, on_poison: str | None = None) -> RunResult:
     """Process up to ``batch`` events for (consumer, tenant). Safe to run
     from several workers at once: only the lease holder makes progress."""
     from .db import bind_tenant
 
     fn = handler or CONSUMERS[name]
+    policy = on_poison or POLICIES.get(name, "block")
     out = RunResult()
     with factory() as s:
         bind_tenant(s, tenant_id)
@@ -194,9 +246,14 @@ def run_consumer(factory, name: str, tenant_id: str, *, worker: str, now: dateti
         if c is None:
             out.not_leased = True
             return out
-        if c.next_attempt_at is not None and now < c.next_attempt_at:
-            return out
         token = c.fencing_token
+        if c.blocked_at is not None:  # waiting for an operator (block policy)
+            out.blocked = True
+            _release(s, name, tenant_id, token)
+            return out
+        if c.next_attempt_at is not None and now < c.next_attempt_at:
+            _release(s, name, tenant_id, token)
+            return out
         evs = events_after(s, tenant_id, c.cursor, batch)
         s.commit()  # read-only; objects stay loaded (expire_on_commit=False)
         for ev in evs:
@@ -205,7 +262,20 @@ def run_consumer(factory, name: str, tenant_id: str, *, worker: str, now: dateti
                     s.add(InboxEntry(consumer=name, event_id=ev.id, tenant_id=tenant_id,
                                      recorded_seq=ev.recorded_seq, processed_at=now))
                     s.flush()
-            except IntegrityError:  # already applied (redelivery): just move on
+            except IntegrityError as dup:
+                # Only an existing inbox row means "already applied"; any other
+                # integrity error is a real failure and must not skip the event.
+                if s.get(_models.InboxEntry, (name, ev.id)) is None:
+                    s.rollback()
+                    s.execute(update(EventConsumer)
+                              .where(EventConsumer.name == name, EventConsumer.tenant_id == tenant_id,
+                                     EventConsumer.fencing_token == token)
+                              .values(failing_seq=ev.recorded_seq, attempts=c.attempts + 1,
+                                      last_error=safe_error(dup), next_attempt_at=now + _backoff(c.attempts + 1),
+                                      lease_owner=None, lease_until=None, updated_at=now))
+                    s.commit()
+                    out.failed = True
+                    return out
                 if not _advance(s, c, token, ev.recorded_seq, now, failing_seq=None, attempts=0,
                                 next_attempt_at=None, last_error=None):
                     s.rollback()
@@ -220,10 +290,25 @@ def run_consumer(factory, name: str, tenant_id: str, *, worker: str, now: dateti
             except Exception as e:  # the handler's effect is rolled back with the inbox row
                 s.rollback()
                 attempts = (c.attempts if c.failing_seq == ev.recorded_seq else 0) + 1
-                err = f"{type(e).__name__}: {e}"[:500]
+                err = safe_error(e)
                 if attempts >= MAX_ATTEMPTS:
                     s.add(DeadLetter(consumer=name, tenant_id=tenant_id, event_id=ev.id, recorded_seq=ev.recorded_seq,
                                      attempts=attempts, error=err, created_at=now))
+                    if policy == "block":  # keep the cursor BEFORE the event; stop here
+                        res = s.execute(update(EventConsumer)
+                                        .where(EventConsumer.name == name, EventConsumer.tenant_id == tenant_id,
+                                               EventConsumer.fencing_token == token)
+                                        .values(blocked_at=now, failing_seq=ev.recorded_seq, attempts=attempts,
+                                                last_error=err, lease_owner=None, lease_until=None, updated_at=now)
+                                        .execution_options(synchronize_session=False))
+                        if res.rowcount != 1:
+                            s.rollback()
+                            out.lease_lost = True
+                            return out
+                        s.commit()
+                        out.dead_lettered += 1
+                        out.blocked = True
+                        return out
                     ok = _advance(s, c, token, ev.recorded_seq, now, failing_seq=None, attempts=0,
                                   next_attempt_at=None, last_error=err)
                     if not ok:
@@ -234,11 +319,17 @@ def run_consumer(factory, name: str, tenant_id: str, *, worker: str, now: dateti
                     c.attempts, c.failing_seq = 0, None
                     out.dead_lettered += 1
                     continue
-                s.execute(update(EventConsumer)
-                          .where(EventConsumer.name == name, EventConsumer.tenant_id == tenant_id,
-                                 EventConsumer.fencing_token == token)
-                          .values(failing_seq=ev.recorded_seq, attempts=attempts, last_error=err,
-                                  next_attempt_at=now + _backoff(attempts), updated_at=now))
+                res = s.execute(update(EventConsumer)
+                                .where(EventConsumer.name == name, EventConsumer.tenant_id == tenant_id,
+                                       EventConsumer.fencing_token == token)
+                                .values(failing_seq=ev.recorded_seq, attempts=attempts, last_error=err,
+                                        next_attempt_at=now + _backoff(attempts), updated_at=now,
+                                        lease_owner=None, lease_until=None)  # let any worker retry later
+                                .execution_options(synchronize_session=False))
+                if res.rowcount != 1:
+                    s.rollback()
+                    out.lease_lost = True
+                    return out
                 s.commit()
                 out.failed = True
                 return out
@@ -277,11 +368,23 @@ def replay_dead_letter(factory, dead_letter_id: int, *, tenant_id: str, now: dat
             s.rollback()
             dl = s.get(DeadLetter, dead_letter_id)
             dl.resolved_at, dl.resolution = now, "already_applied"
+            _unblock_past(s, dl, now)
             s.commit()
             return
         fn(s, ev)
         dl.resolved_at, dl.resolution = now, "replayed"
+        _unblock_past(s, dl, now)
         s.commit()
+
+
+def _unblock_past(s: Session, dl: DeadLetter, now: datetime) -> None:
+    """The blocking event is now applied: move the cursor past it and resume."""
+    s.execute(update(EventConsumer)
+              .where(EventConsumer.name == dl.consumer, EventConsumer.tenant_id == dl.tenant_id,
+                     EventConsumer.failing_seq == dl.recorded_seq)
+              .values(blocked_at=None, failing_seq=None, attempts=0, next_attempt_at=None,
+                      cursor=dl.recorded_seq, updated_at=now)
+              .execution_options(synchronize_session=False))
 
 
 def consumer_health(s: Session, tenant_id: str) -> list[dict]:
