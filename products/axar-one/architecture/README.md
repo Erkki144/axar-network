@@ -20,7 +20,7 @@ This is deliverable (1): the actual gap audit, ADRs, contracts and dependency DA
 | [06-trust-and-permissions.md](06-trust-and-permissions.md) | trust boundaries, secrets, PII |
 | [07-failure-and-recovery.md](07-failure-and-recovery.md) | failure → today's evidence → target |
 | [08-requirements-to-tests.md](08-requirements-to-tests.md) | issue requirements → tests; proposed measurable targets |
-| [adr/](adr/) | ADR-0002 … ADR-0010 (ADR-0001 = `products/axar-pos/docs/ARCHITECTURE.md`) |
+| [adr/](adr/) | ADR-0002 … ADR-0011 (ADR-0001 = `products/axar-pos/docs/ARCHITECTURE.md`) |
 | [contracts/events/](contracts/events/) | JSON Schemas: v1 payloads (enforced by `products/axar-pos/tests/test_event_contracts.py`), v2 envelope (proposed) |
 
 **Open owner decisions:**

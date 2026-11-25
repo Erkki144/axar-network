@@ -4,7 +4,7 @@
 Rules (each has a test in ``tests/test_inventory.py``):
 - Quantities are integer MICRO base units (``QTY_SCALE``); values are integer
   cents, net of recoverable VAT. No floats anywhere.
-- Costing policy: moving weighted average (proposed, pending the accountant).
+- Costing policy: moving weighted average (accepted by the owner 25 Nov, ADR-0011).
   Consuming ``q`` of ``Q`` on hand with value ``V`` costs
   ``half_up(V * q / Q)``; consuming everything costs exactly ``V`` (no
   rounding residue is ever left on an empty balance).

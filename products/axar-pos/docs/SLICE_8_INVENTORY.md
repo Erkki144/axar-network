@@ -43,7 +43,7 @@ Status: **local / CI only.** Branch `claude/axar-inventory-s10-0r9ip8`, stacked 
 ## Design
 
 - **Exact quantities:** integers in micro base units (1 kg = 1 000 000). **Values:** integer cents, net of recoverable VAT.
-- **Moving weighted average** is the *proposed* policy, pending the accountant. Consuming q of Q costs `half_up(V·q/Q)`; consuming everything costs exactly V.
+- **Moving weighted average** is the accepted policy (owner decision 25 Nov, ADR-0011). Consuming q of Q costs `half_up(V·q/Q)`; consuming everything costs exactly V.
 - **Append-only `stock_movements`** (receipt, supplier_return, sale_consumption, production_consumption / production_output, invoice_adjustment, cogs_adjustment). Each is unique per (kind, reference, line, item), so a sale line can never be consumed twice.
 - **`stock_balances`** is the running total. It is locked `FOR UPDATE` in (item, warehouse) order, and `GET /api/v1/inventory/reconciliation` proves balance = Σ movements.
 - **Item ≠ menu offer:** an offer (`products`) consumes either a versioned recipe (`stock_mode=recipe`, ingredients per portion, effective dated) or a stocked item (`stock_mode=item`, finished or resale).
@@ -58,4 +58,4 @@ Status: **local / CI only.** Branch `claude/axar-inventory-s10-0r9ip8`, stacked 
 - **Documents and import:** purchase order, three-way match, credit notes, CSV/XML import with dry-run, lots/expiry/FEFO, stock counts, transfers, waste with reason.
 - **Accounting:** GRNI accrual and GL postings (with BOOKS / AXAR CONNECT); refund disposition; period close.
 - **Recipes:** nested recipes and yield/trim loss; modifiers.
-- **Pending the accountant:** the costing policy (moving average) and VAT/GRNI treatment.
+- **Pending the accountant:** VAT and goods-received-not-invoiced (GRNI) treatment. The costing policy is decided (ADR-0011).
