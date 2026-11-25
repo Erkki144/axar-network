@@ -166,10 +166,14 @@ POST /api/v1/sync/push   (device credentials + session-independent device signat
 | **O5** | installable shell (Tauri + sidecar), SQLCipher/keychain, local encrypted backup/restore, update-mid-sale, reinstall | hardware-in-the-loop on the pilot till |
 | **O6** | owner's full acceptance demo (#29): 2 outlets, 2 registers, 100+ offline sales with kitchen and receipt jobs, reboot mid-transaction, then reconcile | report with commit SHA and exact counts |
 
-## Not decided here (owner input needed)
+## Owner decisions (2026-11-25)
 
-- Maximum offline period: default 72 h?
-- Offline cash-refund cap.
-- Tills' operating systems and models: Windows or Linux mini-PC vs Android. This decides O5.
-- Whether a LAN print bridge is needed in the first pilot.
-- Whether receipt numbers may change format to per register (`K1-000123`). This needs an accountant's confirmation.
+| Question | Decision |
+| --- | --- |
+| Maximum offline period | **72 h** (default) |
+| Till platforms | **Windows and Android**. O5 delivers Windows first (Tauri shell + sidecar edge node); Android needs a validation spike before any commitment: Python edge on Android vs a native port of the sync agent |
+| Per-register receipt numbering (`K1-000123`) | **accepted** |
+| Offline cash-refund cap | owner had no preference → default **€50 per shift**; this-device sales only, manager PIN |
+| Who sets the limits | **the owner, in the POS settings screen**: the maximum offline period, the refund cap, the number prefix/format per register and the start number. Settings are server-side, versioned and audited; changes reach the tills through the signed snapshot; only the manager/owner role may change them |
+
+Still open: real legal entities and zoo outlet names (ADR-0013).
