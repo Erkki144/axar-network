@@ -434,8 +434,21 @@ def _locked(until: datetime | None, now: datetime) -> bool:
 
 def _verify_pin_for(s: Session, *, device: Device, staff_id: str, pin: str, now: datetime,
                     ip: str | None, event: str) -> Staff:
-    """Shared by PIN login and step-up approval: lockouts + audit."""
-    staff = s.scalar(select(Staff).where(Staff.id == staff_id, Staff.tenant_id == device.tenant_id))
+    """Shared by PIN login and step-up approval: lockouts + audit.
+
+    The device row and then the staff row are locked (``FOR UPDATE``, always
+    in this order) and re-read before the lockout check. Parallel guesses are
+    therefore serialized per device: none can pass the lockout check on a
+    stale counter, and no failure increment is lost (AION review on #21).
+    SQLite serializes writers anyway; ``FOR UPDATE`` is a no-op there.
+    """
+    locked_dev = s.scalar(select(Device).where(Device.id == device.id).with_for_update()
+                          .execution_options(populate_existing=True))
+    if locked_dev is None or locked_dev.revoked_at is not None:
+        raise Unauthorized("this device is not enrolled (or was revoked)")
+    device = locked_dev
+    staff = s.scalar(select(Staff).where(Staff.id == staff_id, Staff.tenant_id == device.tenant_id)
+                     .with_for_update().execution_options(populate_existing=True))
     if _locked(device.pin_locked_until, now) or (staff is not None and _locked(staff.pin_locked_until, now)):
         audit(s, now, event, "locked", tenant_id=device.tenant_id, staff_id=staff_id, device_id=device.id, ip=ip)
         s.commit()
@@ -479,7 +492,10 @@ def password_login(s: Session, *, tenant_id: str, login: str, password: str, tot
     from .db import bind_tenant
 
     bind_tenant(s, tenant_id)
-    staff = s.scalar(select(Staff).where(Staff.tenant_id == tenant_id, Staff.login == login))
+    # Row lock + fresh read: parallel guesses cannot all pass the lockout
+    # check on a stale counter, and no failure is lost.
+    staff = s.scalar(select(Staff).where(Staff.tenant_id == tenant_id, Staff.login == login)
+                     .with_for_update().execution_options(populate_existing=True))
     if staff is not None and _locked(staff.login_locked_until, now):
         audit(s, now, "login.password", "locked", tenant_id=tenant_id, staff_id=staff.id, ip=ip)
         s.commit()
