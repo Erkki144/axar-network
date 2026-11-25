@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/order.closed/2",
+  "title": "order.closed v2 payload",
+  "description": "Bill settled and its ONE sale (receipt) issued in the same transaction (payments.py, C3). status 'invoiced' = a bank-transfer part is still an open receivable; it later moves to 'paid' via order.changed v2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "order_id",
+    "table_id",
+    "status",
+    "version",
+    "sale_id"
+  ],
+  "properties": {
+    "order_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "table_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "enum": [
+        "paid",
+        "invoiced"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sale_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

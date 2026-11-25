@@ -38,7 +38,7 @@ class NoCacheStatic(StaticFiles):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-from . import __version__, auth, events, inventory, offline, orders, services, sync
+from . import __version__, auth, events, inventory, offline, orders, payments, services, sync
 from .config import Settings
 from .db import bind_tenant, init_db, make_engine, request_factory, seed_demo
 from .models import DrawerSession, Refund, Register, Sale, Tenant
@@ -82,6 +82,32 @@ class PayOrderIn(Strict):
     version: Version
     register_id: Annotated[int, Field(strict=True, ge=1)]
     tendered_cents: Annotated[int, Field(strict=True, ge=0, le=100_000_000)]
+
+
+class BillPaymentIn(Strict):
+    """One tender against an open bill (C3). ``expected_total_cents`` is the
+    total the device showed; a changed bill is rejected (409 bill_changed)."""
+    method: Literal["cash", "card", "transfer"]
+    register_id: Annotated[int, Field(strict=True, ge=1)]
+    expected_total_cents: Cents
+    amount_cents: Annotated[int, Field(strict=True, ge=1, le=100_000_000)]
+    tendered_cents: Cents = 0                                   # cash
+    simulate: Literal["approved", "declined", "timeout"] = "approved"  # card (MOCK terminal)
+    customer_name: Annotated[str, Field(max_length=200)] = ""   # transfer
+    customer_code: Annotated[str | None, Field(max_length=32)] = None
+    due_days: Annotated[int, Field(strict=True, ge=0, le=90)] = 14
+
+
+class BankLineIn(Strict):
+    bank_tx_id: Annotated[str, Field(min_length=1, max_length=64)]
+    booked_date: date
+    amount_cents: Annotated[int, Field(strict=True, ge=-100_000_000, le=100_000_000)]
+    reference: Annotated[str, Field(max_length=35)] = ""
+    payer: Annotated[str, Field(max_length=200)] = ""
+
+
+class BankImportIn(Strict):
+    lines: Annotated[list[BankLineIn], Field(min_length=1, max_length=1000)]
 
 
 class QuoteIn(Strict):
@@ -790,7 +816,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             o = orders.open_order_for_table(s, who.tenant_id, t.id)
             out.append({"id": t.id, "code": t.code, "name": t.name, "location_id": t.location_id,
                         "open_order": None if o is None else {
-                            "id": o.id, "version": o.version,
+                            "id": o.id, "version": o.version, "status": o.status,
                             "item_count": sum(ln.quantity for ln in o.lines)}})
         return out
 
@@ -838,6 +864,66 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             actor_device_id=who.device_id, actor_session_id=who.session_id)
         return JSONResponse(status_code=200 if replayed else 201, content=_sale_out(sale),
                             headers={"Idempotent-Replayed": "true" if replayed else "false"})
+
+    # ---------------------------------------------------------- bill payments (C3)
+
+    Receivables = Annotated[auth.Principal, Depends(need("receivables"))]
+
+    def invoice_out(i) -> dict:
+        return {"id": i.id, "invoice_no": i.invoice_no, "reference_no": i.reference_no, "order_id": i.order_id,
+                "sale_id": i.sale_id, "customer_name": i.customer_name, "customer_code": i.customer_code,
+                "amount_cents": i.amount_cents, "paid_cents": i.paid_cents,
+                "outstanding_cents": i.amount_cents - i.paid_cents, "status": i.status,
+                "due_date": i.due_date.isoformat(), "created_at": i.created_at.isoformat()}
+
+    @app.get("/api/v1/orders/{order_id}/bill")
+    def bill_get(order_id: str, who: Seller, s: Db):
+        o = visible_order(s, who, order_id)
+        return payments.bill_out(o, payments.bill_state(s, who.tenant_id, o, settings.clock(), settings))
+
+    @app.post("/api/v1/orders/{order_id}/payments")
+    def bill_pay(order_id: str, body: BillPaymentIn, who: Seller, s: Db,
+                 idempotency_key: Annotated[str, Header(min_length=8, max_length=128)]):
+        till_register(who, body.register_id)
+        visible_order(s, who, order_id)
+        common = dict(tenant_id=who.tenant_id, order_id=order_id, register_id=body.register_id,
+                      expected_total_cents=body.expected_total_cents, amount_cents=body.amount_cents,
+                      idempotency_key=idempotency_key, actor=who.cashier_id, settings=settings,
+                      now=settings.clock())
+        if body.method == "cash":
+            p, replayed = payments.pay_cash(s, tendered_cents=body.tendered_cents, **common)
+        elif body.method == "card":
+            p, replayed = payments.pay_card(s, simulate=body.simulate, **common)
+        else:
+            p, replayed = payments.pay_transfer(s, customer_name=body.customer_name,
+                                                customer_code=body.customer_code, due_days=body.due_days,
+                                                **common)
+        o = orders.get_order(s, who.tenant_id, order_id)
+        bill = payments.bill_out(o, payments.bill_state(s, who.tenant_id, o, settings.clock(), settings))
+        payment = next(x for x in bill["payments"] if x["id"] == p.id)
+        return JSONResponse(status_code=200 if replayed else 201, content={"payment": payment, "bill": bill},
+                            headers={"Idempotent-Replayed": "true" if replayed else "false"})
+
+    @app.post("/api/v1/payments/{payment_id}/reconcile")
+    def card_reconcile(payment_id: str, who: Seller, s: Db):
+        """Ask the (MOCK) provider what happened to a card payment whose answer was lost."""
+        visible_order(s, who, payments.get_payment(s, who.tenant_id, payment_id).order_id)
+        p = payments.reconcile_card(s, tenant_id=who.tenant_id, payment_id=payment_id, settings=settings,
+                                    now=settings.clock())
+        o = visible_order(s, who, p.order_id)
+        return payments.bill_out(o, payments.bill_state(s, who.tenant_id, o, settings.clock(), settings))
+
+    @app.get("/api/v1/receivables/invoices")
+    def receivable_invoices(who: Receivables, s: Db):
+        return [invoice_out(i) for i in payments.invoices(s, who.tenant_id)]
+
+    @app.post("/api/v1/receivables/bank-import")
+    def bank_import(body: BankImportIn, who: Receivables, s: Db):
+        """SANDBOX statement import (no real bank connection): match by reference."""
+        return payments.import_bank_lines(
+            s, tenant_id=who.tenant_id, settings=settings, now=settings.clock(),
+            lines=[payments.BankLine(x.bank_tx_id, x.booked_date, x.amount_cents, x.reference, x.payer)
+                   for x in body.lines])
 
     @app.get("/api/v1/kitchen/tickets")
     def kitchen_tickets(who: KitchenReader, s: Db):

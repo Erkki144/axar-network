@@ -240,15 +240,30 @@ def open_drawer(
 
 
 def ledger_cash_sales(s: Session, tenant_id: str, drawer_id: int) -> tuple[int, int]:
-    """(Σ cash_due, count) recomputed from the immutable sales ledger."""
+    """(Σ cash in, count of cash takings) recomputed from immutable records.
+
+    Direct cash sales count with their ``cash_due``. A bill settled with
+    payments (C3) takes its cash through each captured cash *payment* (which
+    may happen at different registers), so its sale is excluded here and the
+    payments are counted instead.
+    """
+    from .models import Payment
+
+    bill_sale = select(Payment.id).where(Payment.sale_id == Sale.id).exists()
     total, n = s.execute(
         select(func.coalesce(func.sum(Sale.cash_due_cents), 0), func.count(Sale.id)).where(
             Sale.tenant_id == tenant_id,
             Sale.drawer_session_id == drawer_id,
             Sale.payment_method == "cash",
+            ~bill_sale,
         )
     ).one()
-    return int(total), int(n)
+    p_total, p_n = s.execute(
+        select(func.coalesce(func.sum(Payment.amount_cents + Payment.rounding_cents), 0), func.count(Payment.id))
+        .where(Payment.tenant_id == tenant_id, Payment.drawer_session_id == drawer_id,
+               Payment.method == "cash", Payment.status == "captured")
+    ).one()
+    return int(total) + int(p_total), int(n) + int(p_n)
 
 
 def ledger_cash_refunds(s: Session, tenant_id: str, drawer_id: int) -> tuple[int, int]:
@@ -759,6 +774,8 @@ def _create_cash_refund(
         return _refund_replay_or_conflict(existing, req_hash)
 
     sale = get_sale(s, tenant_id, sale_id)  # 404 across tenants
+    if sale.payment_method != "cash":
+        raise InvalidRefund("only cash sales can be refunded in cash; card/transfer refunds are a later slice")
     # Serialize refunds of ONE sale: on PostgreSQL concurrent refunds would
     # otherwise lose the compare-and-swap below (false "over_refund") or
     # deadlock on line rows taken in different orders. Everything read after
@@ -1013,7 +1030,7 @@ def daily_summary(s: Session, tenant_id: str, business_date: date) -> dict:
                                                       "cash_collected_cents": 0})
         r["sale_count"] += 1
         r["total_cents"] += sale.total_cents
-        r["cash_collected_cents"] += sale.cash_due_cents
+        r["cash_collected_cents"] += sale.cash_due_cents if sale.payment_method in ("cash", "mixed") else 0
         for ln in sale.lines:
             b = by_rate.setdefault(ln.vat_rate_bp, {"gross_cents": 0, "vat_cents": 0, "net_cents": 0})
             b["gross_cents"] += ln.gross_cents
@@ -1039,7 +1056,8 @@ def daily_summary(s: Session, tenant_id: str, business_date: date) -> dict:
 
     sales_total = sum(x.total_cents for x in sales)
     sales_vat = sum(x.vat_cents for x in sales)
-    cash_in = sum(x.cash_due_cents for x in sales if x.payment_method == "cash")
+    # cash_due of a bill sale (C3) is the cash part only, so this is cash in.
+    cash_in = sum(x.cash_due_cents for x in sales if x.payment_method in ("cash", "mixed"))
     refund_total = sum(x.total_cents for x in refunds)
     refund_vat = sum(x.vat_cents for x in refunds)
     cash_out = sum(x.cash_paid_cents for x in refunds if x.payment_method == "cash")
@@ -1061,7 +1079,7 @@ def daily_summary(s: Session, tenant_id: str, business_date: date) -> dict:
         "net_cents": sum(x.net_cents for x in sales),
         "vat_cents": sum(x.vat_cents for x in sales),
         "cash_rounding_cents": sum(x.cash_rounding_cents for x in sales),
-        "cash_collected_cents": sum(x.cash_due_cents for x in sales if x.payment_method == "cash"),
+        "cash_collected_cents": cash_in,
         "first_receipt_no": sales[0].receipt_no if sales else None,
         "last_receipt_no": sales[-1].receipt_no if sales else None,
         "vat_breakdown": [{"vat_rate_bp": r, **v} for r, v in sorted(by_rate.items())],

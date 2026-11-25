@@ -71,6 +71,8 @@ def test_app_role_cannot_update_or_delete_append_only_tables(a, app):
                 "DELETE FROM auth_sessions", "DELETE FROM devices",
                 "UPDATE stock_movements SET value_cents = 0", "DELETE FROM stock_movements",
                 "DELETE FROM recipe_lines", "UPDATE recipes SET version = 9",
+                "UPDATE bank_transactions SET amount_cents = 0", "DELETE FROM bank_transactions",
+                "DELETE FROM payments", "DELETE FROM customer_invoices", "UPDATE mock_terminal_txns SET result = 'x'",
                 "UPDATE device_journal SET hash = 'x'", "DELETE FROM device_journal"):
         with app_conn(app, "t-a") as c:
             with pytest.raises(ProgrammingError, match="permission denied"):

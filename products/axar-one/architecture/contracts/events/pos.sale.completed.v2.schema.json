@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/pos.sale.completed/2",
+  "title": "pos.sale.completed v2 payload (bill settled with one or more tenders; products/axar-pos/axar_pos/payments.py:_issue_sale)",
+  "description": "ONE immutable sale per bill, issued when payments (captured cash/card, pending transfer receivables) cover the total. VAT/revenue are recognized here, not at cash receipt. Identities: total = \u03a3 tender amount; cash_rounding = \u03a3 tender rounding (cash only); cash_due = \u03a3 cash tender (amount + rounding). simulated=true: no real card or bank processing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sale_id",
+    "receipt_no",
+    "register_id",
+    "drawer_session_id",
+    "order_id",
+    "business_date",
+    "currency",
+    "simulated",
+    "payment_method",
+    "total_cents",
+    "vat_cents",
+    "net_cents",
+    "cash_due_cents",
+    "cash_rounding_cents",
+    "tenders",
+    "lines"
+  ],
+  "properties": {
+    "sale_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "receipt_no": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "register_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "drawer_session_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "order_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "business_date": {
+      "type": "string",
+      "format": "date"
+    },
+    "currency": {
+      "const": "EUR"
+    },
+    "simulated": {
+      "const": true
+    },
+    "payment_method": {
+      "enum": [
+        "cash",
+        "card",
+        "transfer",
+        "mixed"
+      ]
+    },
+    "total_cents": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "vat_cents": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "net_cents": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cash_due_cents": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cash_rounding_cents": {
+      "type": "integer",
+      "minimum": -2,
+      "maximum": 2
+    },
+    "tenders": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "payment_id",
+          "method",
+          "status",
+          "amount_cents",
+          "rounding_cents",
+          "invoice_id"
+        ],
+        "properties": {
+          "payment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "method": {
+            "enum": [
+              "cash",
+              "card",
+              "transfer"
+            ]
+          },
+          "status": {
+            "enum": [
+              "captured",
+              "pending"
+            ]
+          },
+          "amount_cents": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "rounding_cents": {
+            "type": "integer",
+            "minimum": -2,
+            "maximum": 2
+          },
+          "invoice_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "lines": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sku",
+          "quantity",
+          "unit_price_cents",
+          "gross_cents",
+          "vat_rate_bp",
+          "vat_cents"
+        ],
+        "properties": {
+          "sku": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 999
+          },
+          "unit_price_cents": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "gross_cents": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "vat_rate_bp": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "vat_cents": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

@@ -36,7 +36,7 @@ const LS_REGISTER = 'axar.one.register';
 // Written BEFORE the POST, cleared only after a definitive server answer.
 const LS_PENDING = 'axar.one.pending.v1';
 const PENDING_PATHS = [/^\/api\/v1\/sales\/cash$/, /^\/api\/v1\/sales\/[0-9a-f-]{36}\/refunds$/,
-  /^\/api\/v1\/orders\/[0-9a-f-]{36}\/pay-cash$/];
+  /^\/api\/v1\/orders\/[0-9a-f-]{36}\/pay-cash$/, /^\/api\/v1\/orders\/[0-9a-f-]{36}\/payments$/];
 const ICONS = { Kohv: ['☕', 'sand'], Toit: ['🥐', 'rose'], Joogid: ['💧', 'sky'], Muud: ['📦', 'lilac'] };
 
 // ------------------------------------------------------------------ HTTP layer
@@ -107,6 +107,7 @@ const S = {
   mode: 'express', category: 'Kõik',
   tables: [], tablesError: '', tableId: null, order: null, // server-side table bills
   orderBusy: false, orderQueue: Promise.resolve(), orderGen: 0, orderMsg: { text: '', cls: '' },
+  bill: null, // table bill payment dialog (C3)
   tickets: [], ticketsError: '', kitchenPending: null, pollTimer: null, pollBusy: false, lastPoll: 0,
   walkin: {},                 // registerId -> {productId: qty}, memory only
   quote: null, quoteSig: '', quoteError: '', quoteSeq: 0, quoteTimer: null,
@@ -182,6 +183,16 @@ function validRecord(rec) {
     const m = /^\/api\/v1\/orders\/([0-9a-f-]{36})\/pay-cash$/.exec(rec.path);
     return Boolean(m) && UUID_RE.test(m[1]) && onlyKeys(b, ['version', 'register_id', 'tendered_cents'])
       && isInt(b.version, 1, 1_000_000_000) && rec.cartKey === `order:${m[1]}`;
+  }
+  if (rec.op === 'billpay') {
+    // One tender against a table bill (C3). Same strict shape as the server.
+    const m = /^\/api\/v1\/orders\/([0-9a-f-]{36})\/payments$/.exec(rec.path);
+    return Boolean(m) && UUID_RE.test(m[1]) && rec.cartKey === `order:${m[1]}` && onlyKeys(rec.headers || {}, [])
+      && onlyKeys(b, ['method', 'register_id', 'expected_total_cents', 'amount_cents', 'tendered_cents', 'simulate', 'customer_name'])
+      && ['cash', 'card', 'transfer'].includes(b.method) && isInt(b.expected_total_cents, 0, 100_000_000)
+      && isInt(b.amount_cents, 1, 100_000_000) && (b.tendered_cents === undefined || isInt(b.tendered_cents, 0, 100_000_000))
+      && (b.simulate === undefined || ['approved', 'declined', 'timeout'].includes(b.simulate))
+      && (b.customer_name === undefined || (typeof b.customer_name === 'string' && b.customer_name.length <= 200));
   }
   if (rec.op === 'refund') {
     if (!okLines()) return false;
@@ -374,10 +385,15 @@ function renderTotals() {
   else state.textContent = '';
   renderMiniCart(lines, q);
   const pay = $('pay-button');
-  const resuming = S.payment?.state === 'unconfirmed' && S.payment.sig === cartSig(lines);
+  const resuming = (S.payment?.state === 'unconfirmed' && S.payment.sig === cartSig(lines))
+    || (S.mode === 'tables' && S.bill?.state === 'unconfirmed' && S.bill.orderId === S.order?.id);
   const orderReady = S.mode !== 'tables' || (S.order && !S.orderBusy);
   pay.disabled = !S.storageOk || !S.locksOk || Boolean(S.recovery) || (!(S.drawer && ready && lines.length && orderReady) && !resuming);
-  pay.firstChild.textContent = resuming ? 'Lõpeta pooleli makse ' : 'Võta sularaha ';
+  const partly = S.mode === 'tables' && S.order?.status === 'partially_paid';
+  pay.firstChild.textContent = resuming ? 'Lõpeta pooleli makse ' : partly ? 'Maksa ülejäänu ' : 'Võta sularaha ';
+  const split = $('split-button');
+  split.hidden = S.mode !== 'tables';
+  split.disabled = pay.disabled && !resuming;
 }
 
 function renderDrawerStatus() {
@@ -511,7 +527,8 @@ function renderTableGrid() {
     const count = tb.open_order?.item_count || 0;
     const b = el('button', `table-card${tb.id === S.tableId ? ' selected' : ''}${count ? ' occupied' : ''}`); b.type = 'button';
     b.dataset.table = tb.code;
-    b.append(el('strong', null, tb.name), el('small', null, count ? `Arve avatud · ${count} tk` : 'Vaba'));
+    const partly = tb.open_order?.status === 'partially_paid';
+    b.append(el('strong', null, tb.name), el('small', null, count ? `${partly ? 'Osaliselt tasutud' : 'Arve avatud'} · ${count} tk` : 'Vaba'));
     b.addEventListener('click', () => selectTable(tb.id));
     grid.append(b);
   }
@@ -529,7 +546,7 @@ function setOrderMessage(text, cls = '') {
 function syncTableSummary() {
   if (!S.order) return;
   const tb = S.tables.find((x) => x.id === S.order.table_id);
-  if (tb) tb.open_order = { id: S.order.id, version: S.order.version, item_count: S.order.lines.reduce((n, l) => n + l.quantity, 0) };
+  if (tb) tb.open_order = { id: S.order.id, version: S.order.version, status: S.order.status, item_count: S.order.lines.reduce((n, l) => n + l.quantity, 0) };
 }
 
 function refreshTableView() {
@@ -549,7 +566,7 @@ async function reloadOrder() {
   try {
     const { data } = await api(`/api/v1/orders/${cur.id}`);
     if (S.order?.id !== data.id) return;
-    if (data.status !== 'open') {
+    if (!['open', 'partially_paid'].includes(data.status)) {
       S.order = null; S.tableId = null; S.orderGen++;
       setOrderMessage(`${data.table_name}: arve on tasutud (teises seadmes või aknas).`);
       return;
@@ -629,6 +646,7 @@ function mutateOrder(apply, okMsg = '') {
         setOrderMessage('Arvet muudeti teises seadmes – näitan värsket arvet. Korda viimast muudatust.', 'error');
       } else if (e instanceof ApiError && e.code === 'order_not_open') {
         await reloadOrder();
+        if (S.order?.status === 'partially_paid') setOrderMessage('Arve on osaliselt tasutud – ridu enam ei muudeta. Jätka maksmist.', 'error');
       } else {
         setOrderMessage(`Arvet ei salvestatud: ${e.message}`, 'error');
       }
@@ -766,6 +784,7 @@ async function applyLive() {
   if ((all || p.has('tables')) && S.mode === 'tables') await refreshTables();
   if ((all || p.has('kitchen')) && S.mode === 'kitchen') await loadTickets();
   if (all || p.has('drawer')) await refreshDrawer();
+  if ((all || p.has('tables')) && S.bill && !$('modal').hidden && ['input', 'error'].includes(S.bill.state)) await loadBill();
   if ((all || p.has('stock')) && S.mode === 'inventory') await inventoryUi.refresh();
 }
 
@@ -856,7 +875,8 @@ function openModal(build) {
   if (focusable) focusable.focus();
 }
 function closeModal() {
-  if (S.payment?.state === 'sending' || S.refund?.state === 'sending') return; // never abandon an in-flight request
+  if (S.payment?.state === 'sending' || S.refund?.state === 'sending' || S.bill?.state === 'sending') return; // never abandon an in-flight request
+  if (S.bill && S.bill.state !== 'unconfirmed') S.bill = null;
   if (S.recovery) return; // recovery screen is blocking until resolved
   $('modal').hidden = true;
   renderBasket();
@@ -1073,6 +1093,265 @@ async function submitPayment() {
   }
   if (!$('modal').hidden) renderPayment($('modal-content'));
   renderTotals();
+}
+
+
+// --------------------------------------------------- table bill payments (C3)
+// One bill, many tenders: cash, card (SIMULATED terminal) and bank transfer
+// (a receivable until the bank statement matches it). The server owns every
+// amount; the device sends the total it showed and the server refuses a bill
+// that changed meanwhile. Each tender goes through the same crash-safe
+// journal + Idempotency-Key as a sale.
+
+const METHOD_ET = { cash: 'Sularaha', card: 'Kaart', transfer: 'Ülekanne' };
+const PAY_STATUS_ET = { captured: 'laekunud', pending: 'ootab panka', unknown: 'teadmata', declined: 'keeldutud' };
+const roundCash5 = (c) => Math.floor((2 * c + 5) / 10) * 5; // == server round_cash(c, 5), c >= 0
+
+async function openBillPayment() {
+  const order = S.order;
+  if (S.mode !== 'tables' || !order || S.orderBusy) return;
+  if (!(S.bill && S.bill.orderId === order.id && S.bill.state === 'unconfirmed')) {
+    S.bill = { orderId: order.id, cartKey: cartKey(), data: null, method: 'cash', amount: null, tendered: null,
+      simulate: 'approved', customer: '', key: null, bodySig: null, body: null, state: 'loading', error: '', note: '' };
+  }
+  openModal(renderBill);
+  await loadBill();
+}
+
+async function loadBill() {
+  const b = S.bill; if (!b) return;
+  try {
+    const { data } = await api(`/api/v1/orders/${b.orderId}/bill`);
+    if (S.bill !== b) return;
+    b.data = data;
+    if (b.state === 'loading') b.state = 'input';
+    if (b.state === 'input' && (b.amount == null || b.amount > data.remaining_cents)) b.amount = data.remaining_cents;
+  } catch (e) {
+    if (S.bill !== b) return;
+    if (b.state !== 'unconfirmed') { b.state = 'error'; b.error = e.message; }
+  }
+  if (!$('modal').hidden && S.bill === b && b.state !== 'sending') renderBill($('modal-content'));
+}
+
+function billDue(b) {
+  const d = b.data;
+  if (b.method !== 'cash' || !d) return b.amount;
+  const final = b.amount === d.remaining_cents && d.in_flight_cents === 0;
+  return final ? roundCash5(b.amount) : b.amount;
+}
+
+function renderBill(c) {
+  const b = S.bill;
+  c.replaceChildren();
+  const title = el('h2', null, 'Arve tasumine'); title.id = 'dialog-title';
+  c.append(title, el('p', 'muted', 'Summad arvutab server. Kaart ja pank on SIMULEERITUD – päris raha ei liigu.'));
+  const d = b.data;
+  if (!d) { c.append(b.state === 'error' ? stateBox('error', `Arvet ei saanud laadida: ${b.error}`) : stateBox('busy', 'Laadin arvet…')); return; }
+  const sums = el('div', 'bill-sums'); sums.id = 'bill-sums';
+  const sum = (id, label, cents, cls = '') => {
+    const row = el('div', `summary-line ${cls}`); const v = el('strong', null, formatEuro(cents)); v.id = id;
+    row.append(el('span', null, label), v); sums.append(row);
+  };
+  sum('bill-total', 'Arve kokku', d.total_cents);
+  sum('bill-paid', 'Tasutud', d.paid_cents);
+  if (d.pending_transfer_cents) sum('bill-pending', 'Ülekandega (ootab panka)', d.pending_transfer_cents);
+  if (d.in_flight_cents) sum('bill-inflight', 'Kaardimakse olek teadmata', d.in_flight_cents, 'bad');
+  sum('bill-remaining', 'Jääk tasuda', d.remaining_cents, 'grand');
+  c.append(sums);
+
+  const list = el('ul', 'bill-payments'); list.id = 'bill-payments';
+  for (const p of d.payments) {
+    const li = el('li', `pay-${p.status}`);
+    li.append(el('span', null, `${METHOD_ET[p.method]} ${formatEuro(p.amount_cents)}${p.rounding_cents ? ` (ümardus ${formatEuro(p.rounding_cents)})` : ''}`),
+      el('span', 'muted', PAY_STATUS_ET[p.status] || p.status));
+    if (p.method === 'card' && p.status === 'unknown') {
+      const rb = el('button', 'secondary-btn', 'Küsi terminalist'); rb.type = 'button'; rb.dataset.reconcile = p.id;
+      rb.addEventListener('click', () => reconcileCard(p.id, rb));
+      li.append(rb);
+    }
+    list.append(li);
+  }
+  if (d.payments.length) c.append(el('div', 'section-label', 'Maksed'), list);
+
+  if (d.status !== 'open' && d.status !== 'partially_paid') {
+    c.append(stateBox('ok', d.status === 'invoiced' ? 'Arve on tasutud; ülekande osa ootab panka.' : 'Arve on tasutud.'));
+    return;
+  }
+  if (d.in_flight_cents) c.append(stateBox('unconfirmed', 'Kaardimakse vastus jäi saamata. Ära küsi kliendilt sama summat uuesti – vajuta „Küsi terminalist“.'));
+  if (d.status === 'partially_paid') c.append(el('p', 'muted', 'Osaliselt tasutud arve ridu enam ei muudeta.'));
+
+  const locked = b.state === 'sending' || b.state === 'unconfirmed';
+  const methods = el('div', 'method-tabs'); methods.setAttribute('role', 'group'); methods.setAttribute('aria-label', 'Makseviis');
+  for (const m of ['cash', 'card', 'transfer']) {
+    const mb = el('button', m === b.method ? 'active' : '', METHOD_ET[m]); mb.type = 'button'; mb.id = `method-${m}`;
+    mb.setAttribute('aria-pressed', String(m === b.method)); mb.disabled = locked;
+    mb.addEventListener('click', () => { b.method = m; renderBill(c); });
+    methods.append(mb);
+  }
+  c.append(methods);
+
+  const row = el('div', 'form-row');
+  const lab = el('label', 'section-label', 'Summa (€)'); lab.htmlFor = 'bill-amount';
+  const amount = el('input', 'tender-input'); amount.id = 'bill-amount'; amount.inputMode = 'decimal';
+  amount.value = centsToInput(b.amount ?? d.remaining_cents); amount.disabled = locked;
+  row.append(lab, amount);
+  const quick = el('div', 'quick-amounts');
+  const half = Math.floor(d.remaining_cents / 2 / 5) * 5;
+  for (const [label, cents] of [['Kogu jääk', d.remaining_cents], ['Pool', half]]) {
+    if (cents <= 0) continue;
+    const qb = el('button', null, label); qb.type = 'button'; qb.disabled = locked;
+    qb.addEventListener('click', () => { amount.value = centsToInput(cents); update(); });
+    quick.append(qb);
+  }
+  c.append(row, quick);
+
+  let tender = null, change = null, cust = null, sim = null;
+  if (b.method === 'cash') {
+    const tr = el('div', 'form-row');
+    const tl = el('label', 'section-label', 'Kliendilt saadud (€)'); tl.htmlFor = 'bill-tendered';
+    tender = el('input', 'tender-input'); tender.id = 'bill-tendered'; tender.inputMode = 'decimal'; tender.disabled = locked;
+    tender.value = centsToInput(b.tendered ?? billDue(b));
+    tr.append(tl, tender);
+    const cl = el('div', 'summary-line'); change = el('strong'); change.id = 'bill-change';
+    cl.append(el('span', null, 'Tagastusraha'), change);
+    c.append(tr, cl);
+  } else if (b.method === 'card') {
+    const sr = el('div', 'form-row');
+    const sl = el('label', 'section-label', 'DEMO terminali vastus'); sl.htmlFor = 'bill-simulate';
+    sim = el('select'); sim.id = 'bill-simulate'; sim.disabled = locked;
+    for (const [v, txt] of [['approved', 'Kinnitatud'], ['declined', 'Keeldutud'], ['timeout', 'Vastus kadus (side katkes)']]) {
+      const o = el('option', null, txt); o.value = v; o.selected = v === b.simulate; sim.append(o);
+    }
+    sim.addEventListener('change', () => { b.simulate = sim.value; });
+    sr.append(sl, sim); c.append(sr);
+  } else {
+    const cr = el('div', 'form-row');
+    const cl = el('label', 'section-label', 'Maksja (ettevõte või isik)'); cl.htmlFor = 'bill-customer';
+    cust = el('input'); cust.id = 'bill-customer'; cust.autocomplete = 'off'; cust.value = b.customer; cust.disabled = locked;
+    cr.append(cl, cust);
+    c.append(cr, el('p', 'muted', 'Server koostab arve viitenumbriga. Summa loetakse laekunuks alles pangaväljavõtte sobitamisel.'));
+  }
+  const msg = el('div', 'dialog-error'); msg.id = 'bill-error'; msg.setAttribute('role', 'alert');
+  c.append(msg);
+  if (b.note) c.append(stateBox('ok', b.note));
+  if (b.state === 'sending') c.append(stateBox('busy', 'Saadan makse serverisse…'));
+  if (b.state === 'unconfirmed') c.append(stateBox('unconfirmed', `Makse olek on teadmata (${b.error}). Server võis selle juba salvestada – ära võta raha uuesti, vajuta „Proovi uuesti“. Sama makset ei registreerita kaks korda.`));
+  if (b.state === 'error' && b.error) c.append(stateBox('error', `Makset ei salvestatud: ${b.error}`));
+  const confirm = el('button', 'primary-btn'); confirm.type = 'button'; confirm.id = 'bill-confirm';
+  confirm.textContent = b.state === 'unconfirmed' ? 'Proovi uuesti (sama makse)' : b.state === 'sending' ? 'Saadan…'
+    : `Registreeri ${METHOD_ET[b.method].toLowerCase()}`;
+  c.append(confirm);
+
+  function update() {
+    if (locked) { confirm.disabled = b.state === 'sending'; return; }
+    const cents = parseEuroInput(amount.value);
+    confirm.disabled = true;
+    if (cents === null || cents <= 0) { msg.textContent = 'Sisesta korrektne summa, nt 20,00'; return; }
+    if (cents > d.remaining_cents) { msg.textContent = `Summa ületab jäägi (${formatEuro(d.remaining_cents)}).`; return; }
+    b.amount = cents;
+    if (b.method === 'cash') {
+      const final = cents === d.remaining_cents && d.in_flight_cents === 0;
+      if (!final && cents % 5) { msg.textContent = 'Sularaha osamakse peab olema 5 sendi kordne.'; change.textContent = '—'; return; }
+      const due = billDue(b);
+      const tc = parseEuroInput(tender.value);
+      if (tc === null) { msg.textContent = 'Sisesta saadud summa'; change.textContent = '—'; return; }
+      b.tendered = tc;
+      if (tc < due) { msg.textContent = `Sularahast ei piisa (vaja ${formatEuro(due)}).`; change.textContent = '—'; return; }
+      change.textContent = formatEuro(tc - due);
+    }
+    if (b.method === 'transfer') {
+      b.customer = cust.value;
+      if (cust.value.trim().length < 2) { msg.textContent = 'Sisesta maksja nimi.'; return; }
+    }
+    msg.textContent = ''; confirm.disabled = false;
+  }
+  amount.addEventListener('input', () => { if (b.method === 'cash' && tender) { const x = parseEuroInput(amount.value); if (x !== null) { b.amount = x; tender.value = centsToInput(billDue(b)); } } update(); });
+  tender?.addEventListener('input', update);
+  cust?.addEventListener('input', update);
+  confirm.addEventListener('click', submitBillPayment);
+  update();
+}
+
+async function submitBillPayment() {
+  const b = S.bill;
+  if (!b || !b.data || b.state === 'sending') return; // double-tap guard
+  let body;
+  if (b.state === 'unconfirmed') body = b.body;         // retry: byte-for-byte the same request
+  else {
+    body = { method: b.method, register_id: S.registerId, expected_total_cents: b.data.total_cents, amount_cents: b.amount };
+    if (b.method === 'cash') body.tendered_cents = b.tendered;
+    if (b.method === 'card') body.simulate = b.simulate;
+    if (b.method === 'transfer') body.customer_name = b.customer.trim();
+    const sig = JSON.stringify(body);
+    if (!b.key || b.bodySig !== sig) { b.key = newKey(); b.bodySig = sig; }
+    b.body = body;
+  }
+  const retry = b.state === 'unconfirmed';
+  b.state = 'sending'; b.error = ''; b.note = '';
+  renderBill($('modal-content'));
+  const path = `/api/v1/orders/${b.orderId}/payments`;
+  const rec = { op: 'billpay', key: b.key, path, body, headers: {}, cartKey: b.cartKey, createdAt: new Date().toISOString() };
+  const out = await runMoneyOperation(rec, null);
+  if (out.blocked) {
+    b.error = out.blocked;
+    if (retry) b.state = 'unconfirmed'; else { b.state = 'error'; b.key = null; b.bodySig = null; }
+  } else if (out.data) {
+    b.key = null; b.bodySig = null; b.body = null;
+    await billPaid(b.orderId, out.data);
+    return;
+  } else if (isUncertain(out.err)) {
+    b.state = 'unconfirmed'; b.error = out.err.message;   // journal stays
+  } else {
+    b.state = 'error'; b.error = out.err.message; b.key = null; b.bodySig = null;
+    if (out.err.code === 'no_open_drawer') refreshDrawer();
+    if (out.err.code === 'bill_changed') b.error = 'arvet muudeti teises seadmes – kontrolli summat ja proovi uuesti';
+    if (['bill_changed', 'overpayment', 'bill_closed'].includes(out.err.code)) { b.state = 'input'; b.note = ''; await loadBill(); b.state = 'error'; b.error = b.error || out.err.message; }
+  }
+  if (!$('modal').hidden && S.bill === b) renderBill($('modal-content'));
+  renderTotals();
+}
+
+/** After a recorded tender: show the receipt when the bill is settled, else the bill. */
+async function billPaid(orderId, data, note = '') {
+  const { payment, bill } = data;
+  refreshDrawer();
+  if (bill.sale_id) {
+    clearPaidCart(`order:${orderId}`);
+    S.bill = null;
+    try {
+      const { data: sale } = await api(`/api/v1/sales/${bill.sale_id}`);
+      if ($('modal').hidden) openModal(() => {});
+      await showReceipt(sale, bill.status === 'invoiced' ? 'Ülekande osa on arvel ja ootab panka.' : '');
+    } catch (e) {
+      openModal((c) => c.replaceChildren(stateBox('ok', `Arve on tasutud (tšeki laadimine ebaõnnestus: ${e.message}).`)));
+    }
+    return;
+  }
+  if (!S.bill || S.bill.orderId !== orderId) {
+    S.bill = { orderId, cartKey: `order:${orderId}`, data: null, method: 'cash', amount: null, tendered: null,
+      simulate: 'approved', customer: '', key: null, bodySig: null, body: null, state: 'input', error: '', note: '' };
+  }
+  const b = S.bill;
+  b.data = bill; b.state = 'input'; b.amount = bill.remaining_cents; b.tendered = null;
+  b.note = note || (payment.status === 'declined' ? '' : `${METHOD_ET[payment.method]} ${formatEuro(payment.amount_cents)} registreeritud.`);
+  if (payment.status === 'declined') { b.state = 'error'; b.error = 'kaart keeldus – küsi teist makseviisi'; }
+  if ($('modal').hidden) openModal(renderBill); else renderBill($('modal-content'));
+  announce(b.note || 'Kaart keeldus');
+  refreshTables().then(() => renderBasket());   // bill status + table card (also without the live stream)
+}
+
+async function reconcileCard(paymentId, btn) {
+  btn.disabled = true; btn.textContent = 'Küsin…';
+  try {
+    const { data } = await api(`/api/v1/payments/${paymentId}/reconcile`, { method: 'POST' });
+    const p = data.payments.find((x) => x.id === paymentId);
+    await billPaid(S.bill.orderId, { payment: p, bill: data },
+      p.status === 'captured' ? 'Terminal kinnitas: kaardimakse laekus.' : '');
+    if (p.status === 'declined' && S.bill) { S.bill.state = 'error'; S.bill.error = 'terminali andmetel makset ei toimunud – küsi uuesti'; renderBill($('modal-content')); }
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Küsi terminalist';
+    if (S.bill) { S.bill.error = e.message; S.bill.state = 'error'; renderBill($('modal-content')); }
+  }
 }
 
 const CLEANUP_WARNING = 'Makse on serveris salvestatud, aga seadme olekut ei õnnestunud puhastada (salvestus ei tööta). Kassa on lukus; pärast salvestuse taastumist laadi leht uuesti – sama makset ei registreerita kaks korda.';
@@ -1331,7 +1610,7 @@ function renderRecovery(c, note = '', cls = 'unconfirmed') {
   const box = el('div'); box.id = 'recovery';
   const bad = found.state === 'corrupt' || found.state === 'unreadable';
   const title = el('h2', null, bad ? 'Pooleli tehingu kirje on loetamatu'
-    : found.rec.op === 'sale' ? 'Pooleli makse' : 'Pooleli tagastus');
+    : found.rec.op === 'refund' ? 'Pooleli tagastus' : 'Pooleli makse');
   title.id = 'dialog-title';
   box.append(title);
   if (bad) {
@@ -1352,7 +1631,9 @@ function renderRecovery(c, note = '', cls = 'unconfirmed') {
     box.append(discard);
   } else {
     const { rec } = found;
-    const what = rec.op === 'sale'
+    const what = rec.op === 'billpay'
+      ? `Lauaarve osamakse: ${METHOD_ET[rec.body.method]} ${formatEuro(rec.body.amount_cents)}.`
+      : rec.op === 'sale'
       ? `${rec.body.lines ? `Kassamüük, ${rec.body.lines.length} rida` : 'Lauaarve tasumine'}. Kliendilt vastu võetud ${formatEuro(rec.body.tendered_cents)}.`
       : `Tagastus tšekist, ${rec.body.lines.length} rida. Põhjus: ${rec.body.reason}`;
     box.append(el('p', 'muted', `${what} Alustatud ${new Date(rec.createdAt).toLocaleString('et-EE', { timeZone: 'Europe/Tallinn' })}.`));
@@ -1376,6 +1657,12 @@ async function recoverPending(btn) {
   const cleanup = rec.op === 'sale' && rec.cartKey ? () => clearPaidCart(rec.cartKey) : null;
   const out = await runMoneyOperation(rec, cleanup);
   if (out.blocked) { renderRecovery($('modal-content'), `Ei saanud jätkata: ${out.blocked}.`); return; }
+  if (out.data && rec.op === 'billpay') {
+    S.recovery = null; $('close-modal').hidden = false;
+    if (S.bill?.key === rec.key) S.bill = null;
+    await billPaid(rec.path.split('/')[4], out.data, 'Pooleli makse lõpetati.');
+    return;
+  }
   if (out.data) {
     if (S.payment?.key === rec.key) S.payment = null;
     if (S.refund?.key === rec.key) S.refund = null;
@@ -1402,7 +1689,7 @@ function checkPendingJournal() {
   const found = readPending();
   if (found.state === 'none') return;
   // Our own in-flight attempt in this tab is handled by its own dialog.
-  if (found.state === 'ok' && (S.payment?.key === found.rec.key || S.refund?.key === found.rec.key)) return;
+  if (found.state === 'ok' && [S.payment?.key, S.refund?.key, S.bill?.key].includes(found.rec.key)) return;
   if (found.state === 'ok' && found.rec.registerId && S.registers.some((r) => r.id === found.rec.registerId)) {
     S.registerId = found.rec.registerId; renderRegisterSelect(); refreshDrawer();
   }
@@ -1669,11 +1956,16 @@ async function loadWorkspace() {
 
 document.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => activateMode(b.dataset.mode)));
 $('register-select').addEventListener('change', (e) => selectRegister(Number(e.target.value)));
-$('pay-button').addEventListener('click', openPayment);
+// Tables: one-shot cash stays the quick path; a partially paid bill (or a
+// pending tender) always continues in the split-payment dialog.
+const startPayment = () => (S.mode === 'tables' && (S.order?.status === 'partially_paid' || S.bill?.state === 'unconfirmed')
+  ? openBillPayment() : openPayment());
+$('split-button').addEventListener('click', openBillPayment);
+$('pay-button').addEventListener('click', startPayment);
 $('lock-button').addEventListener('click', lockTill);
 $('lock-top').addEventListener('click', lockTill);
 $('mini-pay').addEventListener('click', () => {
-  if (!$('pay-button').disabled) openPayment();
+  if (!$('pay-button').disabled) startPayment();
   else $('checkout-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
 });
 $('mini-view').addEventListener('click', () => $('checkout-panel').scrollIntoView({ behavior: 'smooth', block: 'start' }));

@@ -27,6 +27,6 @@ number, so the history is one straight line.
 | 0005 | `device_journal_register_series` | `main` (PR #49) | released |
 | 0006 | `offline_sync` | PR #53 (O1b) | open |
 | 0007 | `offline_limit` | PR O1c (stacked on #53) | open |
-| 0008 | `payments_c3` | PR #26 | open; currently numbered 0006 and must become 0008 (parent 0007) if it merges after #53 and O1c |
+| 0008 | `payments_c3` | PR #26 (stacked on O1c) | open |
 
 When a PR merges, update this table in the same PR.

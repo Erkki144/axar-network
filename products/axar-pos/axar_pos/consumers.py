@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from .events import consumer
 from .models import ExportQueue, OutboxEvent
 
-BOOKS_EVENTS = {("pos.sale.completed", 1), ("pos.refund.completed", 1)}
+BOOKS_EVENTS = {("pos.sale.completed", 1), ("pos.sale.completed", 2), ("pos.refund.completed", 1)}
 
 
 class CorruptEvent(ValueError):
@@ -35,8 +35,8 @@ def stock_consume(s: Session, ev: OutboxEvent) -> None:
     """A completed sale consumes stock (recipe ingredients or a stocked item).
     Idempotent twice over: the inbox, and a unique movement reference per
     (sale, line, item). Refunds do not restock (explicit disposition later)."""
-    if (ev.type, ev.version) != ("pos.sale.completed", 1):
-        return
+    if ev.type != "pos.sale.completed" or ev.version not in (1, 2):
+        return  # v2 = bill settled with split tenders (C3); lines are identical
     import json
     from datetime import date
 

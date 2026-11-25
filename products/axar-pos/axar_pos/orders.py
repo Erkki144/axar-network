@@ -64,7 +64,7 @@ def get_table(s: Session, tenant_id: str, table_id: int) -> DiningTable:
 
 def open_order_for_table(s: Session, tenant_id: str, table_id: int) -> Order | None:
     return s.scalar(select(Order).where(Order.tenant_id == tenant_id, Order.table_id == table_id,
-                                        Order.status == "open"))
+                                        Order.status.in_(("open", "partially_paid"))))
 
 
 def get_order(s: Session, tenant_id: str, order_id: str) -> Order:
@@ -239,6 +239,9 @@ def pay_order_cash(s: Session, *, tenant_id: str, order_id: str, expected_versio
     order = get_order(s, tenant_id, order_id)
     if not order.lines:
         raise InvalidOrder("order is empty")
+    # Lock order (C3): bill row first, then the drawer inside the sale — the
+    # same order as split payments, so the two paths cannot deadlock.
+    s.execute(select(Order.id).where(Order.id == order_id, Order.tenant_id == tenant_id).with_for_update())
     lines = [services.LineRequest(ln.product_id, ln.quantity) for ln in order.lines]
 
     def close_order(sess: Session, sale: Sale) -> None:
@@ -274,4 +277,9 @@ def operation_status(s: Session, tenant_id: str, idempotency_key: str) -> dict:
     refund = s.scalar(select(Refund).where(Refund.tenant_id == tenant_id, Refund.idempotency_key == idempotency_key))
     if refund is not None:
         return {"status": "recorded", "kind": "refund", "id": refund.id}
+    from .models import Payment
+
+    pay = s.scalar(select(Payment).where(Payment.tenant_id == tenant_id, Payment.idempotency_key == idempotency_key))
+    if pay is not None:
+        return {"status": "recorded", "kind": "payment", "id": pay.id}
     return {"status": "not_recorded"}

@@ -334,10 +334,12 @@ def test_role_matrix(shop, world):
     assert kitchen.get("/api/v1/kitchen/tickets").status_code == 200
     assert shop["till"].get("/api/v1/reports/daily").status_code == 403
     assert shop["till"].get("/api/v1/admin/staff").status_code == 403
+    assert shop["till"].get("/api/v1/receivables/invoices").status_code == 403     # C3: managers only
     mgr_till = world.till(shop["dev"], shop["manager"], "7351")
     r = mgr_till.get("/api/v1/admin/staff")
     assert r.status_code == 403 and r.json()["error"] == "mfa_required"   # PIN is not strong auth
     assert shop["adm"].get("/api/v1/reports/daily").status_code == 200
+    assert shop["adm"].get("/api/v1/receivables/invoices").status_code == 200
     me = shop["till"].get("/api/v1/auth/me").json()
     assert set(me["roles"]) == {"cashier", "waiter"} and "refund.request" in me["permissions"]
 

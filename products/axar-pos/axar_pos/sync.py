@@ -106,6 +106,9 @@ def _apply(s: Session, *, tenant_id: str, device_id: str, w: dict, payload: dict
         raise _Quarantine("refund sync is not supported yet (O3); review manually")
     if w["type"] != "sale":
         raise _Quarantine(f"unknown entry type {w['type']!r}")
+    if payload.get("kind") == "bill":
+        raise _Quarantine("table bill paid offline (split/card/transfer tenders) - automatic sync is not "
+                          "supported yet; review and record manually")
     reg, lines, payload = _plan_sale(s, tenant_id, payload, settings, now)
     try:
         sale, replayed = services.create_cash_sale(
