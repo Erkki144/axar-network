@@ -41,7 +41,7 @@ class NoCacheStatic(StaticFiles):
 from . import __version__, auth, events, inventory, orders, services
 from .config import Settings
 from .db import bind_tenant, init_db, make_engine, request_factory, seed_demo
-from .models import DrawerSession, Refund, Sale, Tenant
+from .models import DrawerSession, Refund, Register, Sale, Tenant
 
 STATIC = Path(__file__).parent / "static"
 
@@ -92,6 +92,13 @@ class CashSaleIn(Strict):
     register_id: Id
     lines: Annotated[list[SaleLineIn], Field(min_length=1, max_length=200)]
     tendered_cents: Cents
+
+
+class ReceiptSeriesIn(Strict):
+    """Per-register receipt series (owner decision 2026-11-25: set in settings).
+    ``prefix`` null = labels off. ``next_number`` can only move forward."""
+    prefix: Annotated[str | None, Field(pattern=r"^[A-Z0-9]{1,8}$")] = None
+    next_number: Annotated[int, Field(strict=True, ge=1, le=99_999_999)]
 
 
 class DrawerOpenIn(Strict):
@@ -264,6 +271,8 @@ def _sale_out(sale: Sale) -> dict:
     return {
         "id": sale.id,
         "receipt_no": sale.receipt_no,
+        "register_receipt_no": sale.register_receipt_no,
+        "receipt_label": sale.receipt_label,
         "register_id": sale.register_id,
         "drawer_session_id": sale.drawer_session_id,
         "cashier_id": sale.cashier_id,
@@ -1062,6 +1071,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/admin/devices/{device_id}/revoke")
     def admin_revoke(device_id: str, who: Who, s: Db):
         return device_out(auth.revoke_device(s, who, device_id, settings.clock()))
+
+    # ------------------------------------------- receipt series + journal (O1a)
+
+    @app.get("/api/v1/admin/registers/{register_id}/receipt-series")
+    def receipt_series_get(register_id: int, who: Who, s: Db):
+        reg = services.get_register(s, who.tenant_id, register_id)
+        auth.require_admin(who, reg.location_id)
+        return _series_out(s, who.tenant_id, reg)
+
+    @app.put("/api/v1/admin/registers/{register_id}/receipt-series")
+    def receipt_series_put(register_id: int, body: ReceiptSeriesIn, who: Who, s: Db):
+        reg = s.scalar(select(Register).where(Register.id == register_id, Register.tenant_id == who.tenant_id)
+                       .with_for_update(of=Register))
+        if reg is None:
+            raise services.NotFound("register not found")
+        auth.require_admin(who, reg.location_id)
+        last = _series_last(s, who.tenant_id, reg)
+        if body.next_number <= last:
+            raise services.Conflict(f"next_number must be greater than the last issued number {last} "
+                                    "(receipt numbers are never reused)")
+        before = {"prefix": reg.receipt_prefix, "floor": reg.receipt_floor}
+        reg.receipt_prefix, reg.receipt_floor = body.prefix, body.next_number
+        auth.audit(s, settings.clock(), "receipt_series.changed", "ok", tenant_id=who.tenant_id,
+                   staff_id=who.staff_id, device_id=who.device_id, session_id=who.session_id,
+                   detail=json.dumps({"register_id": reg.id, "before": before,
+                                      "after": {"prefix": body.prefix, "floor": body.next_number}}))
+        s.commit()
+        return _series_out(s, who.tenant_id, reg)
+
+    def _series_last(s: Session, tenant_id: str, reg) -> int:
+        from sqlalchemy import func as _f
+
+        return s.scalar(select(_f.coalesce(_f.max(Sale.register_receipt_no), 0)).where(
+            Sale.tenant_id == tenant_id, Sale.register_id == reg.id)) or 0
+
+    def _series_out(s: Session, tenant_id: str, reg) -> dict:
+        last = _series_last(s, tenant_id, reg)
+        nxt = max(last + 1, reg.receipt_floor or 1)
+        return {"register_id": reg.id, "prefix": reg.receipt_prefix, "last_number": last, "next_number": nxt,
+                "next_label": f"{reg.receipt_prefix}-{nxt:06d}" if reg.receipt_prefix else None}
+
+    @app.get("/api/v1/admin/registers/{register_id}/journal/verify")
+    def journal_verify(register_id: int, who: Who, s: Db):
+        """Recompute the register's hash-chained journal against the records."""
+        from . import journal
+
+        reg = services.get_register(s, who.tenant_id, register_id)
+        auth.require_admin(who, reg.location_id)
+        return journal.verify(s, who.tenant_id, journal.stream_for_register(reg.id))
 
     @app.get("/api/v1/admin/auth-events")
     def admin_events(who: Who, s: Db, limit: Annotated[int, Query(ge=1, le=500)] = 100):

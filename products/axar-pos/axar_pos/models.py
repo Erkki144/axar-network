@@ -105,6 +105,11 @@ class Register(Base):
     code: Mapped[str] = mapped_column(String(32))
     name: Mapped[str] = mapped_column(String(200))
     active: Mapped[bool] = mapped_column(default=True)
+    # Per-register receipt series (ADR-0012 §3), set by a manager in settings.
+    # NULL prefix = labels off (receipts show the tenant number as before);
+    # the per-register number is always assigned (offline tills need it).
+    receipt_prefix: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    receipt_floor: Mapped[int] = mapped_column(Integer, default=1, server_default="1")  # next number >= floor
 
     location: Mapped[Location] = relationship(lazy="joined")
 
@@ -207,6 +212,9 @@ class Sale(Base):
     cash_due_cents: Mapped[int] = mapped_column(BigInteger)
     tendered_cents: Mapped[int] = mapped_column(BigInteger)
     change_cents: Mapped[int] = mapped_column(BigInteger)
+    # Per-register series (gap-free per register); NULL on sales made before 0005.
+    register_receipt_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    receipt_label: Mapped[str | None] = mapped_column(String(24), nullable=True)  # e.g. K1-000123
 
     lines: Mapped[list["SaleLine"]] = relationship(
         back_populates="sale", order_by="SaleLine.line_no", lazy="selectin"
@@ -216,6 +224,7 @@ class Sale(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "idempotency_key", name="uq_sale_idempotency"),
         UniqueConstraint("tenant_id", "receipt_no", name="uq_sale_receipt_no"),
+        UniqueConstraint("tenant_id", "register_id", "register_receipt_no", name="uq_sale_register_receipt"),
     )
 
 
@@ -850,7 +859,32 @@ class AuthEvent(Base):
     detail: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
 
-APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent, KitchenTicketLine, AuthEvent, StockMovement)
+class DeviceJournalEntry(Base):
+    """Append-only, hash-chained journal of money operations per stream
+    (ADR-0012 §3). Today a stream is one register on the central server
+    (``register:<id>``); on an offline edge node it is the device. The entry
+    stores a hash of a canonical summary of the business record, so a later
+    change to the sale/refund, a deleted entry or an edited hash is detected
+    by ``journal.verify``. Sync (push/ack) is a later stage (O1b)."""
+
+    __tablename__ = "device_journal"
+
+    id: Mapped[str] = mapped_column(String(26), primary_key=True)  # ULID
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    stream_id: Mapped[str] = mapped_column(String(64))
+    seq: Mapped[int] = mapped_column(Integer)
+    entry_type: Mapped[str] = mapped_column(String(32))      # sale | refund
+    entity_id: Mapped[str] = mapped_column(String(36))
+    summary_hash: Mapped[str] = mapped_column(String(64))
+    prev_hash: Mapped[str] = mapped_column(String(64))
+    hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime]
+
+    __table_args__ = (UniqueConstraint("tenant_id", "stream_id", "seq", name="uq_journal_stream_seq"),)
+
+
+APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent, KitchenTicketLine, AuthEvent, StockMovement,
+               DeviceJournalEntry)
 
 
 class AppendOnlyViolation(RuntimeError):
