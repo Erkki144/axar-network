@@ -114,6 +114,14 @@ missed. Already-applied migrations 0001–0005 are not changed.
 | A till must have been online once | no contact record → selling refused | `test_a_till_that_never_connected_cannot_sell` |
 | The central server is never limited | the guard is a no-op without `AXAR_POS_EDGE_DEVICE_ID` | `test_the_central_server_is_never_limited` |
 
-`GET /api/v1/sync/status` (edge only) tells the till UI whether it may sell, the deadline and the remaining seconds, for a warning banner (the banner itself is the next UI step).
+`GET /api/v1/sync/status` (edge only) tells the till UI whether it may sell, the deadline and the remaining seconds.
+
+### Till UI (O1d)
+- **Warning banner** (yellow) when 12 h or less remain: "Keskserveriga pole ühendust. Kassa lukustub 8 h 59 min pärast (piirang 72 h), kui ühendus ei taastu. Müügid on alles."
+- **Lock banner** (red) with the reason: limit exceeded, clock set back, or never connected.
+- Refreshed every 60 s and immediately after a refused sale. A central (non-edge) till asks once, gets 404 and stops.
+- A refused sale shows "Makset ei salvestatud: Kassa on lukus …" and keeps the basket.
+- `offline_limit_exceeded` / `clock_moved_back` are treated as **definitive** (nothing recorded): the server checks the idempotency key before the offline guard, so a recorded sale would have been replayed. The payment journal is cleared instead of being left "unknown".
+- Tests: `tests_e2e/test_offline_banner.py` (warning + selling works, lock + basket kept + selling after contact, clock set back, no banner centrally).
 
 Migration `0007_offline_limit`: `pos_settings` (central) and `edge_sync_state` (edge), RLS + grants without DELETE.

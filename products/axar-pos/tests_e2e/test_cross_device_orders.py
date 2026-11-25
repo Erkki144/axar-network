@@ -127,7 +127,10 @@ def test_kitchen_ticket_from_waiter_device_appears_in_kitchen_device(device, ser
 
 
 def test_lost_kitchen_answer_retry_does_not_duplicate_ticket(device, server):
-    waiter = device()
+    # Live stream off for this device: otherwise the "kitchen ticket created"
+    # event can refresh the bill before the retry (button -> "all sent"), and
+    # the retry path under test would not run. Polling is frozen below too.
+    waiter = device(block_stream=True)
     open_table(waiter, "Terrass 02")
     add(waiter, "Kohv")
     expect(waiter.locator("#basket-count")).to_have_text("1")
