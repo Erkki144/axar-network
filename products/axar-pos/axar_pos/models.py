@@ -111,6 +111,8 @@ class Product(Base):
     name: Mapped[str] = mapped_column(String(200))
     price_cents: Mapped[int] = mapped_column(Integer)  # VAT-inclusive
     tax_category: Mapped[str] = mapped_column(String(32), default="standard")
+    # Menu grouping for the cashier UI only; no financial meaning.
+    category: Mapped[str] = mapped_column(String(64), default="Muud")
     active: Mapped[bool] = mapped_column(default=True)
 
     __table_args__ = (UniqueConstraint("tenant_id", "sku"),)

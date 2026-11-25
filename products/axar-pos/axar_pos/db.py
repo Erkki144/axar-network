@@ -62,13 +62,18 @@ def init_db(engine: Engine) -> sessionmaker[Session]:
     return factory
 
 
-DEMO_PRODUCTS = [
-    ("KOHV", "Kohv", 250, "standard"),
-    ("LATTE", "Latte", 380, "standard"),
-    ("TEE", "Tee", 200, "standard"),
-    ("SAIAKE", "Kaneelisaiake", 295, "standard"),
-    ("VESI", "Mineraalvesi 0,5 l", 180, "standard"),
-    ("RAAMAT", "Raamat", 1599, "reduced"),
+DEMO_PRODUCTS = [  # sku, name, price (cents, VAT incl.), tax category, menu category
+    ("KOHV", "Kohv", 250, "standard", "Kohv"),
+    ("LATTE", "Latte", 380, "standard", "Kohv"),
+    ("CAPPU", "Cappuccino", 330, "standard", "Kohv"),
+    ("TEE", "Tee", 200, "standard", "Kohv"),
+    ("SAIAKE", "Kaneelisaiake", 295, "standard", "Toit"),
+    ("CROISSANT", "Võicroissant", 290, "standard", "Toit"),
+    ("SUPP", "Päevasupp", 590, "standard", "Toit"),
+    ("VOILEIB", "Võileib", 499, "standard", "Toit"),
+    ("VESI", "Mineraalvesi 0,5 l", 180, "standard", "Joogid"),
+    ("MAHL", "Õunamahl", 271, "standard", "Joogid"),
+    ("RAAMAT", "Raamat", 1599, "reduced", "Muud"),
 ]
 
 
@@ -84,6 +89,6 @@ def seed_demo(factory: sessionmaker[Session], tenant_id: str = "demo") -> None:
                 Register(tenant_id=tenant_id, location_id=loc.id, code="KASSA1", name="Kassa 1"),
                 Register(tenant_id=tenant_id, location_id=loc.id, code="KASSA2", name="Kassa 2"),
             ])
-            for sku, name, price, cat in DEMO_PRODUCTS:
+            for sku, name, price, cat, menu in DEMO_PRODUCTS:
                 s.add(Product(tenant_id=tenant_id, sku=sku, name=name,
-                              price_cents=price, tax_category=cat))
+                              price_cents=price, tax_category=cat, category=menu))

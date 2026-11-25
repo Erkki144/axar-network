@@ -11,9 +11,10 @@ def count(app, model):
 
 def test_health_and_ui(client):
     assert client.get("/health").json()["payments"] == "simulated-cash-only"
-    r = client.get("/")
+    r = client.get("/")  # redirects to the AXAR ONE cashier UI
     assert r.status_code == 200
-    assert "AXAR POS" in r.text and 'lang="et"' in r.text
+    assert "AXAR ONE" in r.text and 'lang="et"' in r.text
+    assert "AXAR POS" in client.get("/classic").text
 
 
 def test_sale_requires_open_drawer(a):

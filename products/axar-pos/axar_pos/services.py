@@ -359,6 +359,77 @@ def _request_hash(register_id: int, lines: list[LineRequest], tendered_cents: in
     )
 
 
+def _price_lines(s: Session, tenant_id: str, lines: list[LineRequest], bdate: date,
+                 sale_id: str | None) -> list[SaleLine]:
+    """Server-side pricing: catalog price × quantity, VAT by business date.
+
+    Single source of truth for both real sales and quotes. Returns unsaved
+    SaleLine snapshots (never added to the session here).
+    """
+    out: list[SaleLine] = []
+    for i, req in enumerate(lines, start=1):
+        p = s.scalar(
+            select(Product).where(
+                Product.id == req.product_id,
+                Product.tenant_id == tenant_id,
+                Product.active.is_(True),
+            )
+        )
+        if p is None:
+            # Same response for "missing" and "belongs to another tenant".
+            raise NotFound(f"product {req.product_id} not found")
+        rate = tax_rate_for(s, p.tax_category, bdate)
+        gross = p.price_cents * req.quantity
+        vat = vat_from_gross(gross, rate)
+        out.append(SaleLine(
+            sale_id=sale_id,
+            tenant_id=tenant_id,
+            line_no=i,
+            product_id=p.id,
+            sku=p.sku,
+            name=p.name,
+            unit_price_cents=p.price_cents,
+            quantity=req.quantity,
+            gross_cents=gross,
+            tax_category=p.tax_category,
+            vat_rate_bp=rate,
+            vat_cents=vat,
+            net_cents=gross - vat,
+        ))
+    return out
+
+
+def quote_cash_sale(s: Session, *, tenant_id: str, lines: list[LineRequest],
+                    settings: Settings, now: datetime) -> dict:
+    """Read-only price preview with exactly the sale's pricing; writes nothing.
+
+    The UI shows these server numbers instead of computing VAT/rounding itself.
+    The authoritative amounts are still the ones returned by the sale.
+    """
+    bdate = business_date_for(now, settings)
+    priced = _price_lines(s, tenant_id, lines, bdate, None)
+    s.rollback()  # nothing to persist; release the transaction
+    total = sum(ln.gross_cents for ln in priced)
+    vat_total = sum(ln.vat_cents for ln in priced)
+    cash_due = round_cash(total, settings.cash_rounding_step_cents)
+    return {
+        "business_date": bdate.isoformat(),
+        "total_cents": total,
+        "vat_cents": vat_total,
+        "net_cents": total - vat_total,
+        "cash_rounding_cents": cash_due - total,
+        "cash_due_cents": cash_due,
+        "lines": [
+            {"line_no": ln.line_no, "product_id": ln.product_id, "sku": ln.sku,
+             "name": ln.name, "unit_price_cents": ln.unit_price_cents,
+             "quantity": ln.quantity, "gross_cents": ln.gross_cents,
+             "vat_rate_bp": ln.vat_rate_bp, "vat_cents": ln.vat_cents}
+            for ln in priced
+        ],
+        "binding": False,
+    }
+
+
 def _find_by_key(s: Session, tenant_id: str, key: str) -> Sale | None:
     return s.scalar(
         select(Sale).where(Sale.tenant_id == tenant_id, Sale.idempotency_key == key)
@@ -405,39 +476,7 @@ def create_cash_sale(
     sale_id = str(uuid.uuid4())
     correlation_id = str(uuid.uuid4())
 
-    sale_lines: list[SaleLine] = []
-    for i, req in enumerate(lines, start=1):
-        p = s.scalar(
-            select(Product).where(
-                Product.id == req.product_id,
-                Product.tenant_id == tenant_id,
-                Product.active.is_(True),
-            )
-        )
-        if p is None:
-            # Same response for "missing" and "belongs to another tenant".
-            raise NotFound(f"product {req.product_id} not found")
-        rate = tax_rate_for(s, p.tax_category, bdate)
-        gross = p.price_cents * req.quantity
-        vat = vat_from_gross(gross, rate)
-        sale_lines.append(
-            SaleLine(
-                sale_id=sale_id,
-                tenant_id=tenant_id,
-                line_no=i,
-                product_id=p.id,
-                sku=p.sku,
-                name=p.name,
-                unit_price_cents=p.price_cents,
-                quantity=req.quantity,
-                gross_cents=gross,
-                tax_category=p.tax_category,
-                vat_rate_bp=rate,
-                vat_cents=vat,
-                net_cents=gross - vat,
-            )
-        )
-
+    sale_lines = _price_lines(s, tenant_id, lines, bdate, sale_id)
     total = sum(ln.gross_cents for ln in sale_lines)
     vat_total = sum(ln.vat_cents for ln in sale_lines)
     cash_due = round_cash(total, settings.cash_rounding_step_cents)
