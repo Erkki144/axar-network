@@ -38,7 +38,7 @@ class NoCacheStatic(StaticFiles):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-from . import __version__, auth, events, orders, services
+from . import __version__, auth, events, inventory, orders, services
 from .config import Settings
 from .db import bind_tenant, init_db, make_engine, request_factory, seed_demo
 from .models import DrawerSession, Refund, Sale, Tenant
@@ -177,6 +177,77 @@ class EnrollCodeIn(Strict):
     location_id: Id
     register_id: Annotated[int | None, Field(strict=True, ge=1)] = None
     device_name: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class ItemIn(Strict):
+    sku: Annotated[str, Field(min_length=1, max_length=64)]
+    name: Annotated[str, Field(min_length=1, max_length=200)]
+    kind: Literal["ingredient", "finished", "resale", "packaging"]
+    uom: Literal["kg", "l", "pcs"]
+
+
+class WarehouseIn(Strict):
+    location_id: Id
+    code: Annotated[str, Field(min_length=1, max_length=32)]
+    name: Annotated[str, Field(min_length=1, max_length=100)]
+    is_default: bool = False
+
+
+class SupplierIn(Strict):
+    code: Annotated[str, Field(min_length=1, max_length=32)]
+    name: Annotated[str, Field(min_length=1, max_length=200)]
+
+
+MicroQty = Annotated[int, Field(strict=True, ge=1, le=10**15)]
+
+
+class DocLineIn(Strict):
+    item_id: Id
+    qty_micro: MicroQty
+    net_cents: Cents
+    vat_rate_bp: Annotated[int, Field(strict=True, ge=0, le=10000)]
+    vat_recoverable: bool = True
+
+
+class SupplierDocIn(Strict):
+    supplier_id: Id
+    doc_type: Literal["delivery_note", "invoice"]
+    doc_no: Annotated[str, Field(min_length=1, max_length=64)]
+    doc_date: date
+    warehouse_id: Id
+    lines: Annotated[list[DocLineIn], Field(min_length=1, max_length=500)]
+    freight_cents: Cents = 0
+    matches_document_id: Annotated[str | None, Field(max_length=36)] = None
+
+
+class ReturnIn(Strict):
+    item_id: Id
+    qty_micro: MicroQty
+    return_no: Annotated[str, Field(min_length=1, max_length=64)]
+
+
+class RecipeLineIn(Strict):
+    item_id: Id
+    qty_micro: MicroQty
+
+
+class RecipeIn(Strict):
+    product_id: Annotated[int | None, Field(strict=True, ge=1)] = None
+    output_item_id: Annotated[int | None, Field(strict=True, ge=1)] = None
+    lines: Annotated[list[RecipeLineIn], Field(min_length=1, max_length=100)]
+    yield_micro: MicroQty = 1_000_000
+    valid_from: date
+
+
+class SellItemIn(Strict):
+    product_id: Id
+    item_id: Id
+
+
+class ProduceIn(Strict):
+    output_item_id: Id
+    warehouse_id: Id
+    batches: Annotated[int, Field(strict=True, ge=1, le=10_000)]
 
 
 def drawer_close_hash(drawer_id: int, counted_cents: int) -> str:
@@ -967,5 +1038,95 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                          .order_by(auth.AuthEvent.id.desc()).limit(limit))
         return [{"at": e.at.isoformat(), "event": e.event, "outcome": e.outcome, "staff_id": e.staff_id,
                  "device_id": e.device_id, "detail": e.detail} for e in rows]
+
+    # ------------------------------------------------------ inventory (#14)
+
+    Stockkeeper = Annotated[auth.Principal, Depends(need("inventory"))]
+
+    def doc_out(d) -> dict:
+        return {"id": d.id, "supplier_id": d.supplier_id, "doc_type": d.doc_type, "doc_no": d.doc_no,
+                "doc_date": d.doc_date.isoformat(), "warehouse_id": d.warehouse_id, "status": d.status,
+                "freight_cents": d.freight_cents, "matches_document_id": d.matches_document_id,
+                "lines": [{"line_no": ln.line_no, "item_id": ln.item_id, "qty_micro": ln.qty_micro,
+                           "net_cents": ln.net_cents, "vat_rate_bp": ln.vat_rate_bp,
+                           "vat_recoverable": ln.vat_recoverable} for ln in d.lines]}
+
+    @app.post("/api/v1/inventory/items", status_code=201)
+    def inv_item(body: ItemIn, who: Stockkeeper, s: Db):
+        it = inventory.create_item(s, who.tenant_id, sku=body.sku, name=body.name, kind=body.kind, uom=body.uom)
+        return {"id": it.id, "sku": it.sku, "name": it.name, "kind": it.kind, "uom": it.uom}
+
+    @app.post("/api/v1/inventory/warehouses", status_code=201)
+    def inv_wh(body: WarehouseIn, who: Stockkeeper, s: Db):
+        w = inventory.create_warehouse(s, who.tenant_id, location_id=body.location_id, code=body.code,
+                                       name=body.name, is_default=body.is_default)
+        return {"id": w.id, "code": w.code, "location_id": w.location_id, "is_default": w.is_default}
+
+    @app.post("/api/v1/inventory/suppliers", status_code=201)
+    def inv_supplier(body: SupplierIn, who: Stockkeeper, s: Db):
+        sp = inventory.create_supplier(s, who.tenant_id, code=body.code, name=body.name)
+        return {"id": sp.id, "code": sp.code, "name": sp.name}
+
+    @app.post("/api/v1/inventory/documents", status_code=201)
+    def inv_doc(body: SupplierDocIn, who: Stockkeeper, s: Db):
+        d = inventory.create_document(
+            s, who.tenant_id, supplier_id=body.supplier_id, doc_type=body.doc_type, doc_no=body.doc_no,
+            doc_date=body.doc_date, warehouse_id=body.warehouse_id, freight_cents=body.freight_cents,
+            lines=[inventory.DocLine(x.item_id, x.qty_micro, x.net_cents, x.vat_rate_bp, x.vat_recoverable)
+                   for x in body.lines],
+            actor=who.staff_id, now=settings.clock(), matches_document_id=body.matches_document_id)
+        return doc_out(d)
+
+    @app.post("/api/v1/inventory/documents/{document_id}/post")
+    def inv_post(document_id: str, who: Stockkeeper, s: Db):
+        return doc_out(inventory.post_document(s, who.tenant_id, document_id, actor=who.staff_id,
+                                               now=settings.clock()))
+
+    @app.post("/api/v1/inventory/documents/{document_id}/returns", status_code=201)
+    def inv_return(document_id: str, body: ReturnIn, who: Stockkeeper, s: Db):
+        m = inventory.return_to_supplier(s, who.tenant_id, document_id, item_id=body.item_id,
+                                         qty_micro=body.qty_micro, return_no=body.return_no, now=settings.clock())
+        return {"qty_micro": m.qty_micro, "value_cents": m.value_cents}
+
+    @app.post("/api/v1/inventory/recipes", status_code=201)
+    def inv_recipe(body: RecipeIn, who: Stockkeeper, s: Db):
+        r = inventory.set_recipe(s, who.tenant_id, product_id=body.product_id, output_item_id=body.output_item_id,
+                                 lines=[(x.item_id, x.qty_micro) for x in body.lines], yield_micro=body.yield_micro,
+                                 valid_from=body.valid_from, now=settings.clock())
+        return {"id": r.id, "version": r.version, "valid_from": r.valid_from.isoformat()}
+
+    @app.post("/api/v1/inventory/sell-item")
+    def inv_sell_item(body: SellItemIn, who: Stockkeeper, s: Db):
+        p = inventory.sell_item(s, who.tenant_id, product_id=body.product_id, item_id=body.item_id)
+        return {"product_id": p.id, "stock_mode": p.stock_mode, "stock_item_id": p.stock_item_id}
+
+    @app.post("/api/v1/inventory/production", status_code=201)
+    def inv_produce(body: ProduceIn, who: Stockkeeper, s: Db,
+                    idempotency_key: Annotated[str, Header(min_length=8, max_length=128)]):
+        b = inventory.produce(s, who.tenant_id, output_item_id=body.output_item_id, warehouse_id=body.warehouse_id,
+                              batches=body.batches, idempotency_key=idempotency_key, actor=who.staff_id,
+                              now=settings.clock())
+        return {"id": b.id, "output_qty_micro": b.output_qty_micro, "cost_cents": b.cost_cents}
+
+    @app.get("/api/v1/inventory/stock")
+    def inv_stock(who: Stockkeeper, s: Db):
+        return inventory.stock(s, who.tenant_id)
+
+    @app.get("/api/v1/inventory/items/{item_id}/card")
+    def inv_card(item_id: int, who: Stockkeeper, s: Db):
+        return inventory.stock_card(s, who.tenant_id, item_id)
+
+    @app.get("/api/v1/inventory/reconciliation")
+    def inv_recon(who: Stockkeeper, s: Db):
+        return inventory.reconcile(s, who.tenant_id)
+
+    @app.get("/api/v1/inventory/margin")
+    def inv_margin(who: Stockkeeper, s: Db, business_date: date | None = None):
+        bdate = business_date or services.business_date_for(settings.clock(), settings)
+        rep = services.daily_summary(s, who.tenant_id, bdate)
+        revenue = rep["net_total_cents"] - rep["net_vat_cents"]  # net of VAT, after refunds
+        cost = inventory.cogs(s, who.tenant_id, bdate)
+        return {"business_date": bdate.isoformat(), "net_revenue_cents": revenue, "cogs_cents": cost,
+                "gross_margin_cents": revenue - cost}
 
     return app
