@@ -175,3 +175,18 @@ def test_realtime_stream_updates_other_device_without_polling(device, server):
     freeze_polling(other)
     add(waiter, "Tee", 1)
     expect(other.locator("#basket-count")).to_have_text("2", timeout=5_000)
+
+
+def test_live_marker_survives_ordinary_api_calls(device):
+    """Regression: every successful API call refreshed the status pill and
+    dropped "· reaalajas" although the stream was still connected (seen as an
+    intermittent failure of the realtime test above)."""
+    kitchen = device()
+    kitchen.click('[data-mode="kitchen"]')
+    pill = kitchen.locator("#net-status")
+    expect(pill).to_contain_text("reaalajas")
+    expect(pill).to_have_attribute("data-live", "1")
+    with kitchen.expect_response(lambda r: "/api/v1/" in r.url and "/events/" not in r.url and r.ok):
+        kitchen.click('[data-mode="tables"]')                  # loads tables through the normal API
+    kitchen.wait_for_timeout(200)
+    expect(pill).to_contain_text("reaalajas")
