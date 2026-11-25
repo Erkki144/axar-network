@@ -333,6 +333,17 @@ function renderBasket() {
   renderTotals();
 }
 
+/** Phone: the basket sits below the menu, so a sticky bar keeps count, total
+ * and the pay action in view while adding products. */
+function renderMiniCart(lines, q) {
+  const bar = $('mini-cart');
+  if (!bar) return;
+  const n = lines.reduce((s, x) => s + x.quantity, 0);
+  bar.hidden = !n || !['express', 'tables'].includes(S.mode);
+  $('mini-count').textContent = `${n} ${n === 1 ? 'toode' : 'toodet'}`;
+  $('mini-total').textContent = q ? formatEuro(q.cash_due_cents) : '…';
+}
+
 function renderTotals() {
   const lines = cartLines();
   const ready = S.quote && S.quoteSig === cartSig(lines);
@@ -352,6 +363,7 @@ function renderTotals() {
   else if (lines.length && !ready) state.textContent = 'Arvutan serveris…';
   else if (ready) state.textContent = 'Summad arvutas server.';
   else state.textContent = '';
+  renderMiniCart(lines, q);
   const pay = $('pay-button');
   const resuming = S.payment?.state === 'unconfirmed' && S.payment.sig === cartSig(lines);
   const orderReady = S.mode !== 'tables' || (S.order && !S.orderBusy);
@@ -469,7 +481,7 @@ const identityNote = () => (AUTH.mode === 'server' ? '' : 'Ettevõte ja kassapid
 function renderTables() {
   const root = $('view-root'); root.replaceChildren();
   const section = el('section');
-  section.append(el('div', 'demo-banner', `Lauaarved ja köögipiletid on serveris: sama arvet näeb iga selle ettevõtte seade. ${identityNote()}`));
+  if (AUTH.mode === 'demo') section.append(el('div', 'demo-banner', identityNote()));
   const msg = el('div', 'order-message'); msg.id = 'order-message'; msg.setAttribute('role', 'status');
   const grid = el('div', 'table-grid'); grid.id = 'table-grid';
   section.append(msg, grid);
@@ -617,7 +629,7 @@ function mutateOrder(apply, okMsg = '') {
 
 function renderKitchen() {
   const root = $('view-root'); root.replaceChildren();
-  root.append(el('div', 'demo-banner', `Köögipiletid tulevad serverist ja uuenevad iga ${POLL_MS / 1000} sekundi järel. ${identityNote()}`));
+  if (AUTH.mode === 'demo') root.append(el('div', 'demo-banner', identityNote()));
   const grid = el('div', 'kds-grid'); grid.id = 'kds-grid';
   root.append(grid);
   renderTicketGrid();
@@ -641,11 +653,17 @@ function renderTicketGrid() {
   for (const tk of [...open, ...ready]) {
     const done = tk.status === 'ready';
     const card = el('article', `ticket${done ? ' done' : ''}`); card.dataset.ticket = String(tk.ticket_no);
-    const head = el('div', 'ticket-head'); head.append(el('strong', null, `${tk.table_name} · #${tk.ticket_no}`), el('small', null, done ? 'VALMIS' : 'VALMIB'));
+    const mins = Math.max(0, Math.floor((Date.now() - Date.parse(tk.created_at)) / 60000));
+    const age = el('small', `ticket-age${!done && mins >= 15 ? ' late' : ''}`, done ? 'VALMIS' : mins < 1 ? 'just nüüd' : `${mins} min`);
+    const head = el('div', 'ticket-head'); head.append(el('strong', null, `${tk.table_name} · #${tk.ticket_no}`), age);
     const list = el('ul', 'ticket-list');
     for (const it of tk.lines) list.append(el('li', null, `${it.quantity} × ${it.name}`));
     const b = el('button', `ticket-ready${done ? ' done' : ''}`, done ? 'Valmis ✓' : 'Märgi valmis'); b.type = 'button';
     b.disabled = done;
+    if (!done && !can('kitchen.update')) { // only kitchen staff / managers mark tickets ready
+      b.hidden = true;
+      card.append(el('small', 'muted', 'Valmis märgib köök.'));
+    }
     b.addEventListener('click', async () => {
       b.disabled = true;
       try {
@@ -770,6 +788,7 @@ async function renderManager() {
   // refunds) is loaded independently so a cashier can still request refunds.
   let bdate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Tallinn' }).format(new Date());
   try {
+    if (!can('reports')) throw new ApiError(403, 'forbidden', 'no report permission'); // do not even ask
     const { data: rep } = await api('/api/v1/reports/daily');
     if (S.mode !== 'manager') return;
     bdate = rep.business_date;
@@ -1466,7 +1485,20 @@ async function showPinLogin(note = '') {
     };
     ok.addEventListener('click', submit);
     pin.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
-    c.append(grid, pin, msg, ok);
+    pin.placeholder = 'PIN';
+    // Large on-screen keypad for shared touch tills (the field still accepts a keyboard).
+    const pad = el('div', 'pin-pad');
+    for (const k of ['1', '2', '3', '4', '5', '6', '7', '8', '9', '⌫', '0', '✓']) {
+      const kb = el('button', `pin-key${k === '✓' ? ' ok' : ''}`, k); kb.type = 'button';
+      kb.setAttribute('aria-label', k === '⌫' ? 'Kustuta' : k === '✓' ? 'Logi sisse' : k);
+      kb.addEventListener('click', () => {
+        if (k === '⌫') pin.value = pin.value.slice(0, -1);
+        else if (k === '✓') submit();
+        else if (pin.value.length < 8) pin.value += k;
+      });
+      pad.append(kb);
+    }
+    c.append(grid, pin, pad, msg, ok);
   });
 }
 
@@ -1484,12 +1516,17 @@ async function lockTill() {
   await showPinLogin();
 }
 
+const ROLE_ET = { cashier: 'kassapidaja', waiter: 'teenindaja', kitchen: 'köök', manager: 'juht', owner: 'omanik' };
+/** UI hint only; the server enforces every permission. */
+const can = (perm) => AUTH.mode === 'demo' || Boolean(AUTH.me?.permissions?.includes(perm));
+
 function renderIdentity() {
   const me = AUTH.me;
   const name = AUTH.mode === 'demo' ? 'DEMO kassapidaja' : me?.display_name || '';
   $('cashier-name').textContent = name;
   $('cashier-initials').textContent = name.split(/\s+/).map((x) => x[0] || '').join('').slice(0, 2).toUpperCase();
-  $('mode-pill').textContent = AUTH.mode === 'demo' ? '● DEMO' : `● ${(me?.roles || []).join(', ')}`;
+  $('mode-pill').textContent = AUTH.mode === 'demo' ? '● DEMO' : `● ${(me?.roles || []).map((r) => ROLE_ET[r] || r).join(', ')}`;
+  $('lock-top').hidden = AUTH.mode !== 'server';
   $('lock-button').hidden = AUTH.mode !== 'server';
   $('register-select').disabled = AUTH.mode === 'server' && Boolean(me?.register_id);
 }
@@ -1567,6 +1604,12 @@ document.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('clic
 $('register-select').addEventListener('change', (e) => selectRegister(Number(e.target.value)));
 $('pay-button').addEventListener('click', openPayment);
 $('lock-button').addEventListener('click', lockTill);
+$('lock-top').addEventListener('click', lockTill);
+$('mini-pay').addEventListener('click', () => {
+  if (!$('pay-button').disabled) openPayment();
+  else $('checkout-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+$('mini-view').addEventListener('click', () => $('checkout-panel').scrollIntoView({ behavior: 'smooth', block: 'start' }));
 $('send-button').addEventListener('click', sendToKitchen);
 $('close-modal').addEventListener('click', closeModal);
 $('modal').addEventListener('click', (e) => { if (e.target === $('modal')) closeModal(); });
