@@ -15,8 +15,9 @@ def sell_n(api, n, register="R1"):
     return [api.sell([("KOHV", 1)], 250, register=register).json() for _ in range(n)]
 
 
-def run(app, name, handler, clock, tenant="t-a", worker="w1"):
-    return events.run_consumer(app.state.request_factory, name, tenant, worker=worker, now=clock(), handler=handler)
+def run(app, name, handler, clock, tenant="t-a", worker="w1", on_poison=None):
+    return events.run_consumer(app.state.request_factory, name, tenant, worker=worker, now=clock(), handler=handler,
+                               on_poison=on_poison)
 
 
 class Recorder:
@@ -99,7 +100,7 @@ def test_failed_effect_is_rolled_back_and_retried_with_backoff(a, app, clock):
     assert res.failed and eff.seen == [1]
     with app.state.session_factory() as s:
         c = s.get(EventConsumer, ("stock", "t-a"))
-        assert (c.cursor, c.attempts, c.failing_seq) == (1, 1, 2) and "boom" in c.last_error
+        assert (c.cursor, c.attempts, c.failing_seq) == (1, 1, 2) and "RuntimeError" in c.last_error
         assert s.get(EventConsumer, ("marker-2", "t-a")) is None    # effect rolled back
         assert s.scalar(select(func.count()).select_from(InboxEntry).where(InboxEntry.recorded_seq == 2)) == 0
     assert not run(app, "stock", eff, clock).processed              # backoff not elapsed yet
@@ -113,7 +114,7 @@ def test_poison_event_goes_to_dead_letter_and_consumer_continues(a, app, clock):
     sell_n(a, 2)
     rec = Recorder(fail_on={2})
     for _ in range(events.MAX_ATTEMPTS):
-        run(app, "recon", rec, clock)
+        run(app, "recon", rec, clock, on_poison="skip")             # order-insensitive consumer
         clock.at += events.BACKOFF_MAX
     assert rec.seen == [1, 3]                                        # 3 processed after 2 was dead-lettered
     with app.state.session_factory() as s:
@@ -228,3 +229,159 @@ def test_events_queued_before_a_rollback_never_leak_into_a_later_commit(a, app, 
         types = list(s.scalars(select(OutboxEvent.type).order_by(OutboxEvent.recorded_seq)))
         assert s.scalar(select(func.count()).select_from(Sale)) == 0
     assert types == ["drawer.opened", "drawer.opened"]
+
+
+# ---------------------------------------------- AION review on #21 (regressions)
+
+
+def _emit(s, tag, settings):
+    events.emit(s, tenant_id="t-a", type="drawer.opened", payload={"drawer_id": 1, "register_id": 1,
+                "opening_float_cents": tag}, aggregate_type="drawer_session", aggregate_id=str(tag),
+                aggregate_version=1, now=settings.clock())
+
+
+def _written(app):
+    with app.state.session_factory() as s:
+        return sorted(int(e.aggregate_id) for e in s.scalars(select(OutboxEvent)))
+
+
+def test_event_emitted_in_rolled_back_savepoint_is_not_written(a, app, settings):
+    """Finding 3: outer event + event in a rolled-back nested savepoint."""
+    from axar_pos.db import bind_tenant
+
+    with app.state.request_factory() as s:
+        bind_tenant(s, "t-a")
+        _emit(s, 1, settings)
+        sp = s.begin_nested()
+        _emit(s, 2, settings)
+        sp.rollback()
+        sp2 = s.begin_nested()
+        _emit(s, 3, settings)
+        sp2.commit()
+        # Released savepoints must not write events yet: the event counter
+        # lock is the LAST lock of the transaction (lock ordering).
+        assert s.scalar(select(func.count()).select_from(OutboxEvent)) == 0
+        s.commit()
+    assert _written(app) == [1, 3]
+
+
+def test_released_savepoint_events_die_with_the_outer_rollback(a, app, settings):
+    from axar_pos.db import bind_tenant
+
+    with app.state.request_factory() as s:
+        bind_tenant(s, "t-a")
+        sp = s.begin_nested()
+        _emit(s, 4, settings)
+        sp.commit()                  # savepoint released, NOT a commit of the transaction
+        s.rollback()
+        s.commit()
+    assert _written(app) == []
+
+
+def test_block_policy_keeps_order_for_financial_consumers(a, app, clock):
+    """Finding 4: a consumer that must not apply events out of order stays
+    blocked at the poison event; nothing after it is applied until it is
+    resolved, then everything follows in order."""
+    a.open_drawer()
+    sell_n(a, 2)                                                    # seqs 1..3
+    rec = Recorder(fail_on={2})
+    for _ in range(events.MAX_ATTEMPTS + 2):
+        events.run_consumer(app.state.request_factory, "ledger", "t-a", worker="w", now=clock(),
+                            handler=rec, on_poison="block")
+        clock.at += events.BACKOFF_MAX
+    assert rec.seen == [1]                                          # 3 NOT applied out of order
+    with app.state.session_factory() as s:
+        dl = s.scalar(select(DeadLetter))
+        c = s.get(EventConsumer, ("ledger", "t-a"))
+        assert (c.cursor, dl.recorded_seq, c.blocked_at is not None) == (1, 2, True)
+    fixed = Recorder()
+    events.replay_dead_letter(app.state.request_factory, dl.id, tenant_id="t-a", now=clock(), handler=fixed)
+    res = events.run_consumer(app.state.request_factory, "ledger", "t-a", worker="w", now=clock(),
+                              handler=fixed, on_poison="block")
+    assert fixed.seen == [2, 3] and res.processed == 1
+
+
+def test_non_duplicate_integrity_error_is_a_failure_not_a_skip(a, app, clock, monkeypatch):
+    """Finding 5a: only an existing inbox row means 'already applied'."""
+    a.open_drawer()                                                 # seq 1
+    real = events.InboxEntry
+
+    def broken(**kw):
+        return real(**{**kw, "recorded_seq": None})                 # NOT NULL violation, not a duplicate
+    monkeypatch.setattr(events, "InboxEntry", broken)
+    res = run(app, "books", Recorder(), clock)
+    assert res.skipped_duplicates == 0 and res.failed
+    with app.state.session_factory() as s:
+        assert s.get(EventConsumer, ("books", "t-a")).cursor == 0   # event NOT silently skipped
+
+
+def test_errors_are_redacted_in_health_and_dead_letters(a, app, clock):
+    """Finding 5b: raw exception text (may contain secrets/SQL params) is not stored."""
+    a.open_drawer()
+    secret = "tok_SUPERSECRET_9f8e7d6c5b4a"
+
+    def leaky(_s, _ev):
+        raise ValueError(f"upstream said password={secret}")
+    for _ in range(events.MAX_ATTEMPTS):
+        run(app, "books", leaky, clock)
+        clock.at += events.BACKOFF_MAX
+    with app.state.session_factory() as s:
+        stored = [c.last_error or "" for c in s.scalars(select(EventConsumer))]
+        stored += [d.error for d in s.scalars(select(DeadLetter))]
+    assert stored and all(secret not in x and "password=" not in x for x in stored)
+    assert any("ValueError" in x for x in stored)
+
+
+def test_failed_run_releases_its_lease_so_another_worker_can_retry(a, app, clock):
+    """Finding 5c: a worker that stops on a failure must not keep the lease."""
+    a.open_drawer()
+    run(app, "books", Recorder(fail_on={1}, fail_times=1), clock, worker="w1")
+    clock.at += timedelta(seconds=3)                                # backoff (1-2 s) over; lease (30 s) not
+    res = run(app, "books", Recorder(), clock, worker="w2")
+    assert not res.not_leased and res.processed == 1
+
+
+# ------------------------------------------- finding 6: real consumer + worker
+
+
+def test_worker_stages_financial_events_for_books_exactly_once(a, b, app, settings):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from axar_pos import worker
+    from axar_pos.models import ExportQueue
+
+    a.open_drawer(); b.open_drawer()
+    sale = a.sell([("KOHV", 2)], 1000).json()
+    a.as_role("manager").refund(sale["id"], [(1, 1)])
+    b.sell([("B-SECRET", 1)], 1000)
+    with ThreadPoolExecutor(3) as pool:     # three workers at once
+        list(pool.map(lambda i: worker.run_once(app.state.request_factory, settings, f"w{i}"), range(3)))
+    worker.run_once(app.state.request_factory, settings, "w9")          # and again later
+    with app.state.session_factory() as s:
+        rows = list(s.scalars(select(ExportQueue).order_by(ExportQueue.tenant_id, ExportQueue.recorded_seq)))
+        lag = {(c.name, c.tenant_id): events.latest_seq(s, c.tenant_id) - c.cursor
+               for c in s.scalars(select(EventConsumer))}
+    assert [(r.tenant_id, r.event_type) for r in rows] == [
+        ("t-a", "pos.sale.completed"), ("t-a", "pos.refund.completed"), ("t-b", "pos.sale.completed")]
+    assert all(r.status == "pending" and len(r.payload_hash) == 64 for r in rows)
+    assert lag == {("books.export", "t-a"): 0, ("books.export", "t-b"): 0}
+
+
+def test_corrupt_financial_event_blocks_books_export_instead_of_skipping(a, app, settings, clock):
+    from axar_pos import worker
+    from axar_pos.models import ExportQueue
+
+    a.open_drawer()
+    a.sell([("KOHV", 1)], 250)                                          # seq 2 = sale
+    with app.state.session_factory() as s:                              # owner tampers with the payload
+        ev = s.scalar(select(OutboxEvent).where(OutboxEvent.type == "pos.sale.completed"))
+        s.execute(OutboxEvent.__table__.update().where(OutboxEvent.id == ev.id).values(payload="{}"))
+        s.commit()
+    a.sell([("KOHV", 1)], 250)                                          # seq 3, after the corrupt one
+    for _ in range(events.MAX_ATTEMPTS + 1):
+        worker.run_once(app.state.request_factory, settings, "w")
+        clock.at += events.BACKOFF_MAX
+    with app.state.session_factory() as s:
+        assert s.scalar(select(func.count()).select_from(ExportQueue)) == 0   # nothing out of order
+        c = s.get(EventConsumer, ("books.export", "t-a"))
+        assert c.blocked_at is not None and c.failing_seq == 2 and "CorruptEvent" in c.last_error

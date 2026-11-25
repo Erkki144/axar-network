@@ -278,6 +278,11 @@ def _drawer_out(d: DrawerSession) -> dict:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    # Fail closed BEFORE touching any database.
+    if settings.profile not in ("dev", "pilot"):
+        raise RuntimeError(f"unknown AXAR_POS_PROFILE {settings.profile!r}")
+    if settings.profile == "pilot" and settings.pilot_problems():
+        raise RuntimeError("refusing to start the pilot profile: " + "; ".join(settings.pilot_problems()))
     admin_engine = make_engine(settings.admin_database_url or settings.database_url)
     admin_factory: sessionmaker[Session] = init_db(admin_engine)
     if settings.seed_demo_data:
@@ -350,7 +355,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # are ignored entirely here (RFC-0002 threat: role spoofing).
             bearer = authorization[7:] if authorization and authorization.startswith("Bearer ") else None
             who = auth.resolve_session(s, bearer=bearer, device_token=x_device_token,
-                                       settings=settings, now=settings.clock())
+                                       settings=settings, now=settings.clock(),
+                                       touch=request.url.path != "/api/v1/events/stream")
             s.info["actor"] = {"kind": "staff", "staff_id": who.staff_id, "device_id": who.device_id,
                                "session_id": who.session_id}
             return who
@@ -745,19 +751,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     return events.latest_seq(s2, who.tenant_id), []
                 rows = events.events_after(s2, who.tenant_id, cur, 200)
                 head = rows[-1].recorded_seq if rows else cur  # also past events hidden by location
+                scope = who.visible_locations()  # current principal (refreshed on every re-check)
                 return head, [events.invalidation(e) for e in rows
-                              if who.location_id is None or e.location_id in (None, who.location_id)]
+                              if scope is None or e.location_id is None or e.location_id in scope]
 
         def still_valid() -> bool:
+            """Re-authorize with the CURRENT session state (revocation, idle,
+            roles); never extends the session. The scope used for the next
+            batches is the refreshed principal's."""
+            nonlocal who
             if who.demo:
                 return True
-            with factory() as s:
+            with factory() as s3:
                 try:
-                    auth.resolve_session(s, bearer=bearer, device_token=device_token, settings=settings,
-                                         now=settings.clock())
-                    return True
+                    fresh = auth.resolve_session(s3, bearer=bearer, device_token=device_token, settings=settings,
+                                                 now=settings.clock(), touch=False)
                 except auth.Unauthorized:
                     return False
+            if not fresh.roles:
+                return False
+            who = fresh
+            return True
 
         async def gen():
             nonlocal cursor

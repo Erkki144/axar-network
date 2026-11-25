@@ -383,6 +383,7 @@ class EventConsumer(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     next_attempt_at: Mapped[datetime | None] = mapped_column(nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    blocked_at: Mapped[datetime | None] = mapped_column(nullable=True)  # block policy: waits for operator
     updated_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
@@ -397,6 +398,32 @@ class InboxEntry(Base):
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
     recorded_seq: Mapped[int] = mapped_column(BigInteger)
     processed_at: Mapped[datetime]
+
+
+class ExportQueue(Base):
+    """Dedicated outbox for EXTERNAL delivery (e.g. accounting, AXAR CONNECT).
+
+    Filled by the ``books.export`` consumer inside its transaction (no network
+    call there). A separate delivery step sends a row, and it is marked
+    ``acknowledged`` only with the receiver's verified receipt id.
+    """
+
+    __tablename__ = "export_queue"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    destination: Mapped[str] = mapped_column(String(32))
+    event_id: Mapped[str] = mapped_column(String(36))
+    event_type: Mapped[str] = mapped_column(String(64))
+    event_version: Mapped[int] = mapped_column(Integer)
+    recorded_seq: Mapped[int] = mapped_column(BigInteger)
+    payload: Mapped[str] = mapped_column(Text)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|acknowledged|failed
+    receipt_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime]
+
+    __table_args__ = (UniqueConstraint("tenant_id", "destination", "event_id", name="uq_export_event"),)
 
 
 class DeadLetter(Base):
