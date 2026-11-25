@@ -192,10 +192,18 @@ export function createInventory({ api, el, stateBox, announce, ApiError }) {
 
   // ------------------------------------------------------------- stock & card
 
+  // The stock list and the stock card are redrawn by clicks AND by live
+  // "stock changed" events, so two renders can overlap. Each render fetches
+  // first and draws only if it is still the newest one (otherwise both would
+  // append their table to the same view).
+  let stockGen = 0;
+
   async function renderStock(body) {
+    const gen = ++stockGen;
+    const { data: rows } = await api('/api/v1/inventory/stock');
+    if (gen !== stockGen) return;
     body.replaceChildren(el('div', 'section-label', 'Laoseis'),
       el('p', 'muted', 'Väärtus on liikuva kaalutud keskmise omahinnaga (km-ta). Müügid kantakse laost maha automaatselt.'));
-    const { data: rows } = await api('/api/v1/inventory/stock');
     if (!rows.length) { body.append(el('p', 'muted-p', 'Laos pole veel midagi. Kinnita esimene ostuarve.')); return; }
     const table = el('table', 'sales-table inv-stock'); const th = el('thead'); const hr = el('tr');
     for (const h of ['Kaup', 'Kogus', 'Väärtus', 'Keskmine hind', '']) hr.append(el('th', null, h));
@@ -216,11 +224,13 @@ export function createInventory({ api, el, stateBox, announce, ApiError }) {
   }
 
   async function renderCard(body) {
+    const gen = ++stockGen;
     const r = st.card;
+    const { data: moves } = await api(`/api/v1/inventory/items/${r.item_id}/card`);
+    if (gen !== stockGen) return;
     body.replaceChildren();
     const back = el('button', 'secondary-btn', '← Laoseis'); back.type = 'button'; back.addEventListener('click', () => { st.card = null; renderStock(body); });
     body.append(back, el('div', 'section-label', `Laokaart: ${r.name}`));
-    const { data: moves } = await api(`/api/v1/inventory/items/${r.item_id}/card`);
     const table = el('table', 'sales-table inv-card'); const th = el('thead'); const hr = el('tr');
     for (const h of ['Kuupäev', 'Liik', 'Kogus', 'Väärtus', 'Omahinda (kulu)']) hr.append(el('th', null, h));
     th.append(hr); const tb = el('tbody');
