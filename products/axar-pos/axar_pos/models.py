@@ -883,6 +883,72 @@ class DeviceJournalEntry(Base):
     __table_args__ = (UniqueConstraint("tenant_id", "stream_id", "seq", name="uq_journal_stream_seq"),)
 
 
+class SyncOutbox(Base):
+    """EDGE side: one row per journal entry to push to the central server,
+    written in the same transaction as the sale (ADR-0012 §7). The payload is
+    portable (register code, SKUs) because local ids differ from central ids.
+    Rows are never deleted before the central server acknowledged them."""
+
+    __tablename__ = "sync_outbox"
+
+    entry_id: Mapped[str] = mapped_column(String(26), primary_key=True)   # = device_journal.id
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    device_id: Mapped[str] = mapped_column(String(64))
+    seq: Mapped[int] = mapped_column(Integer)
+    entry_type: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[str] = mapped_column(Text)                              # canonical JSON
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="pending")      # pending|acked|quarantined|rejected
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    server_result: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    created_at: Mapped[datetime]
+    acked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (UniqueConstraint("tenant_id", "device_id", "seq", name="uq_sync_outbox_seq"),)
+
+
+class DeviceCursor(Base):
+    """CENTRAL side: how far a device's journal has been ingested."""
+
+    __tablename__ = "device_cursors"
+
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_seq: Mapped[int] = mapped_column(Integer, default=0)
+    last_hash: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime]
+
+
+class DeviceInbox(Base):
+    """CENTRAL side: every ingested device journal entry exactly once
+    (unique device+seq). ``quarantined`` = received and acknowledged but NOT
+    applied; a manager retries or dismisses it (never silently dropped)."""
+
+    __tablename__ = "device_inbox"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    device_id: Mapped[str] = mapped_column(String(64))
+    seq: Mapped[int] = mapped_column(Integer)
+    entry_id: Mapped[str] = mapped_column(String(26))
+    entry_type: Mapped[str] = mapped_column(String(32))
+    entry_hash: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[str] = mapped_column(Text)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16))      # accepted | quarantined | resolved | dismissed
+    reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    sale_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    received_at: Mapped[datetime]
+    resolved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+    __table_args__ = (UniqueConstraint("tenant_id", "device_id", "seq", name="uq_device_inbox_seq"),
+                      UniqueConstraint("tenant_id", "entry_id", name="uq_device_inbox_entry"))
+
+
 APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent, KitchenTicketLine, AuthEvent, StockMovement,
                DeviceJournalEntry)
 
