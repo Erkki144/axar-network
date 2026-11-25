@@ -13,6 +13,9 @@ def utc_now() -> datetime:
 @dataclass
 class Settings:
     database_url: str = "sqlite:///./axar_pos.db"
+    # Owner connection for migrations and seeding. On PostgreSQL the app's own
+    # ``database_url`` should be the non-owner role ``axar_app`` (RLS applies).
+    admin_database_url: str | None = None
     business_timezone: str = "Europe/Tallinn"
     # Hour (local time) at which a business day starts. 0 = midnight. A bar
     # closing at 04:00 would use 5 so late sales count for the previous day.
@@ -30,6 +33,7 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             database_url=os.environ.get("AXAR_POS_DATABASE_URL", cls.database_url),
+            admin_database_url=os.environ.get("AXAR_POS_ADMIN_DATABASE_URL") or None,
             business_timezone=os.environ.get("AXAR_POS_TIMEZONE", cls.business_timezone),
             business_day_cutoff_hour=int(os.environ.get("AXAR_POS_DAY_CUTOFF_HOUR", "0")),
             cash_rounding_step_cents=int(os.environ.get("AXAR_POS_CASH_ROUNDING", "5")),

@@ -30,6 +30,39 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -p no:cacheprovider
 
+  test-postgres:
+    # Whole suite on PostgreSQL 16 as the non-owner, RLS-bound role axar_app,
+    # plus PostgreSQL-only tests (RLS, grants, drift, real lock interleavings).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: axar_owner
+          POSTGRES_PASSWORD: ci_only_owner_pw   # throwaway CI container, not a secret
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U axar_owner" --health-interval 2s
+          --health-timeout 5s --health-retries 30
+    env:
+      AXAR_TEST_PG: postgresql+psycopg://axar_owner:ci_only_owner_pw@127.0.0.1:5432
+    defaults:
+      run:
+        working-directory: products/axar-pos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: products/axar-pos/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -p no:cacheprovider -rs
+      - name: PostgreSQL-only tests must not be skipped
+        run: python -m pytest tests/test_postgres.py -p no:cacheprovider -rs | tee pg.txt && ! grep -q skipped pg.txt
+
   browser-e2e:
     # AXAR ONE cashier UI against a real local uvicorn (127.0.0.1 only).
     runs-on: ubuntu-24.04

@@ -24,6 +24,7 @@ from .models import (
     RefundLine,
     Register,
     Sale,
+    TenantCounter,
     SaleLine,
     SaleRefundState,
     TaxRate,
@@ -105,6 +106,24 @@ REFUND_ROLES = ("manager", "owner")
 def business_date_for(moment: datetime, settings: Settings) -> date:
     local = moment.astimezone(ZoneInfo(settings.business_timezone))
     return (local - timedelta(hours=settings.business_day_cutoff_hour)).date()
+
+
+def next_number(s: Session, tenant_id: str, name: str, model, column) -> int:
+    """Next per-tenant document number (see ``TenantCounter``).
+
+    The first use seeds the counter from the existing documents, so databases
+    created before counters existed continue their numbering.
+    """
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    ins = (postgresql.insert if s.get_bind().dialect.name == "postgresql" else sqlite.insert)(TenantCounter)
+    seed = (select(func.coalesce(func.max(column), 0) + 1).where(model.tenant_id == tenant_id)
+            .scalar_subquery())
+    stmt = ins.values(tenant_id=tenant_id, name=name, value=seed).on_conflict_do_update(
+        index_elements=[TenantCounter.tenant_id, TenantCounter.name],
+        set_={"value": TenantCounter.value + 1},
+    ).returning(TenantCounter.value)
+    return s.execute(stmt).scalar_one()
 
 
 def _canonical(obj) -> str:
@@ -492,18 +511,13 @@ def create_cash_sale(
             f"tendered {format_eur(tendered_cents)} < due {format_eur(cash_due)}"
         )
 
-    receipt_no = (
-        s.scalar(select(func.coalesce(func.max(Sale.receipt_no), 0)).where(
-            Sale.tenant_id == tenant_id
-        ))
-        + 1
-    )
-
     # The read above may be stale (another request may have closed the drawer
     # since). The conditional UPDATE is authoritative.
     if not _claim_drawer(s, tenant_id, drawer.id, cash_due):
         s.rollback()
         raise NoOpenDrawer("the cash drawer was closed; sale not recorded")
+    # Lock order everywhere: drawer row, then counter row (no deadlock cycle).
+    receipt_no = next_number(s, tenant_id, "receipt", Sale, Sale.receipt_no)
 
     sale = Sale(
         id=sale_id,
@@ -630,7 +644,7 @@ def refund_state(s: Session, tenant_id: str, sale_id: str) -> dict[int, RefundAl
     rows = s.scalars(
         select(RefundAllocation).where(
             RefundAllocation.tenant_id == tenant_id, RefundAllocation.sale_id == sale_id
-        )
+        ).execution_options(populate_existing=True)
     )
     return {r.sale_line_id: r for r in rows}
 
@@ -702,6 +716,16 @@ def _create_cash_refund(
         return _refund_replay_or_conflict(existing, req_hash)
 
     sale = get_sale(s, tenant_id, sale_id)  # 404 across tenants
+    # Serialize refunds of ONE sale: on PostgreSQL concurrent refunds would
+    # otherwise lose the compare-and-swap below (false "over_refund") or
+    # deadlock on line rows taken in different orders. Everything read after
+    # this lock is fresh (READ COMMITTED + populate_existing). SQLite already
+    # serializes writers, FOR UPDATE is a no-op there.
+    s.execute(select(SaleRefundState.sale_id).where(
+        SaleRefundState.sale_id == sale.id, SaleRefundState.tenant_id == tenant_id).with_for_update())
+    existing = _find_refund_by_key(s, tenant_id, idempotency_key)
+    if existing is not None:  # a concurrent same-key request committed first
+        return _refund_replay_or_conflict(existing, req_hash)
     get_register(s, tenant_id, register_id)
     drawer = get_open_drawer(s, tenant_id, register_id)
     if drawer is None:
@@ -787,7 +811,8 @@ def _create_cash_refund(
     # cash paid = round(Σ gross refunded after) − Σ cash already paid out.
     # After a full refund Σ cash paid == sale.cash_due for ANY split/order.
     state = s.scalar(select(SaleRefundState).where(
-        SaleRefundState.sale_id == sale.id, SaleRefundState.tenant_id == tenant_id))
+        SaleRefundState.sale_id == sale.id, SaleRefundState.tenant_id == tenant_id)
+        .execution_options(populate_existing=True))
     if state is None:
         raise LedgerMismatch(f"no refund state for sale {sale.id}")
     gross_before, cash_before = state.refunded_gross_cents, state.refunded_cash_cents
@@ -832,12 +857,7 @@ def _create_cash_refund(
             raise NoOpenDrawer("the cash drawer was closed; refund not recorded")
         raise InsufficientDrawerCash("not enough cash in this drawer for the refund")
 
-    refund_no = (
-        s.scalar(select(func.coalesce(func.max(Refund.refund_no), 0)).where(
-            Refund.tenant_id == tenant_id
-        ))
-        + 1
-    )
+    refund_no = next_number(s, tenant_id, "refund", Refund, Refund.refund_no)
     refund = Refund(
         id=refund_id,
         tenant_id=tenant_id,

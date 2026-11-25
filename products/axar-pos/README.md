@@ -42,7 +42,13 @@ cd products/axar-pos
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
 python -m pytest
+
+# Whole suite on PostgreSQL (each test gets its own database; the app runs as
+# the non-owner role axar_app so row-level security is exercised):
+AXAR_TEST_PG=postgresql+psycopg://postgres@127.0.0.1:5432 python -m pytest
 ```
+
+See [docs/SLICE_5_POSTGRES.md](docs/SLICE_5_POSTGRES.md) for migrations, RLS and roles.
 
 ## Run the local demo
 
@@ -56,7 +62,8 @@ AXAR_POS_DEMO_IDENTITY=1 AXAR_POS_SEED_DEMO=1 uvicorn axar_pos.main:app --host 1
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `AXAR_POS_DATABASE_URL` | `sqlite:///./axar_pos.db` | SQLAlchemy URL |
+| `AXAR_POS_DATABASE_URL` | `sqlite:///./axar_pos.db` | SQLAlchemy URL used by requests (PostgreSQL: role `axar_app`) |
+| `AXAR_POS_ADMIN_DATABASE_URL` | same as above | owner connection for migrations and seeding |
 | `AXAR_POS_TIMEZONE` | `Europe/Tallinn` | business-day timezone |
 | `AXAR_POS_DAY_CUTOFF_HOUR` | `0` | local hour a business day starts |
 | `AXAR_POS_CASH_ROUNDING` | `5` | cash rounding step in cents (`1` disables) |

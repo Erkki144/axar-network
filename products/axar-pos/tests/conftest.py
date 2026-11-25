@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
 
 from axar_pos.api import create_app
 from axar_pos.config import Settings
@@ -25,10 +27,49 @@ def clock() -> Clock:
     return Clock(datetime(2026, 3, 10, 10, 0, tzinfo=timezone.utc))
 
 
+# Set AXAR_TEST_PG=postgresql+psycopg://user@host:port to run the whole suite
+# on PostgreSQL: every test gets its own freshly created database.
+PG_BASE = os.environ.get("AXAR_TEST_PG")
+
+
+# Test-only credentials of the non-owner app role on a throwaway test server.
+APP_ROLE_PASSWORD = "axar_app_test_only"
+
+
+def app_role_url(admin_url: str) -> str:
+    """Same server/database, connecting as the RLS-bound role ``axar_app``."""
+    from sqlalchemy.engine import make_url
+
+    return make_url(admin_url).set(username="axar_app", password=APP_ROLE_PASSWORD) \
+        .render_as_string(hide_password=False)
+
+
 @pytest.fixture
-def settings(clock, tmp_path) -> Settings:
+def database_urls(tmp_path):
+    """(app_url, admin_url). On PostgreSQL: a fresh database per test."""
+    if not PG_BASE:
+        yield f"sqlite:///{tmp_path / 'pos.db'}", None
+        return
+    name = f"axar_t_{uuid.uuid4().hex[:12]}"
+    admin = create_engine(f"{PG_BASE}/postgres", isolation_level="AUTOCOMMIT")
+    with admin.connect() as c:
+        if c.scalar(text("SELECT 1 FROM pg_roles WHERE rolname = 'axar_app'")) is None:
+            c.execute(text(f"CREATE ROLE axar_app LOGIN PASSWORD '{APP_ROLE_PASSWORD}'"))
+        c.execute(text(f'CREATE DATABASE "{name}"'))
+    try:
+        yield app_role_url(f"{PG_BASE}/{name}"), f"{PG_BASE}/{name}"
+    finally:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+@pytest.fixture
+def settings(clock, database_urls) -> Settings:
+    app_url, admin_url = database_urls
     return Settings(
-        database_url=f"sqlite:///{tmp_path / 'pos.db'}",
+        database_url=app_url,
+        admin_database_url=admin_url,
         demo_identity=True,
         clock=clock,
     )
@@ -118,6 +159,8 @@ class Api:
 def client(app):
     with TestClient(app) as c:
         yield c
+    app.state.engine.dispose()
+    app.state.admin_engine.dispose()
 
 
 @pytest.fixture

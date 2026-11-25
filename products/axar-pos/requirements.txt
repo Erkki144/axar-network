@@ -2,3 +2,5 @@ fastapi==0.115.12
 sqlalchemy==2.0.40
 uvicorn==0.34.2
 tzdata==2025.2
+psycopg[binary]==3.2.3
+alembic==1.14.0

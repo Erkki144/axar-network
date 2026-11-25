@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
     Date,
     DateTime,
     ForeignKey,
@@ -36,17 +37,24 @@ class UTCDateTime(TypeDecorator):
     impl = DateTime
     cache_ok = True
 
+    def load_dialect_impl(self, dialect):
+        # PostgreSQL: real ``timestamptz``. SQLite: naive UTC text.
+        return dialect.type_descriptor(DateTime(timezone=dialect.name == "postgresql"))
+
     def process_bind_param(self, value, dialect):
         if value is None:
             return None
         if value.tzinfo is None:
             raise ValueError("naive datetime not allowed; pass an aware UTC datetime")
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
+        value = value.astimezone(timezone.utc)
+        return value if dialect.name == "postgresql" else value.replace(tzinfo=None)
 
     def process_result_value(self, value, dialect):
         if value is None:
             return None
-        return value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -58,6 +66,21 @@ class Tenant(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
+
+
+class TenantCounter(Base):
+    """Per-tenant document numbers (receipts, refunds, kitchen tickets).
+
+    Taken with one ``INSERT … ON CONFLICT DO UPDATE … RETURNING`` statement:
+    on PostgreSQL the row lock is held until commit, so numbers are unique and
+    gap-free (a failed transaction rolls its number back) without ``max()+1``.
+    """
+
+    __tablename__ = "tenant_counters"
+
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    value: Mapped[int] = mapped_column(Integer)
 
 
 class Location(Base):
@@ -109,7 +132,7 @@ class Product(Base):
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
     sku: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(200))
-    price_cents: Mapped[int] = mapped_column(Integer)  # VAT-inclusive
+    price_cents: Mapped[int] = mapped_column(BigInteger)  # VAT-inclusive
     tax_category: Mapped[str] = mapped_column(String(32), default="standard")
     # Menu grouping for the cashier UI only; no financial meaning.
     category: Mapped[str] = mapped_column(String(64), default="Muud")
@@ -127,18 +150,18 @@ class DrawerSession(Base):
     status: Mapped[str] = mapped_column(String(16), default="open")  # open|closed
     opened_by: Mapped[str] = mapped_column(String(64))
     opened_at: Mapped[datetime]
-    opening_float_cents: Mapped[int] = mapped_column(Integer)
+    opening_float_cents: Mapped[int] = mapped_column(BigInteger)
     # Running totals, changed ONLY by a conditional UPDATE ... WHERE
     # status='open' inside the sale transaction (see services._claim_drawer).
-    cash_sales_cents: Mapped[int] = mapped_column(Integer, default=0)
+    cash_sales_cents: Mapped[int] = mapped_column(BigInteger, default=0)
     sale_count: Mapped[int] = mapped_column(Integer, default=0)
-    cash_refunds_cents: Mapped[int] = mapped_column(Integer, default=0)
+    cash_refunds_cents: Mapped[int] = mapped_column(BigInteger, default=0)
     refund_count: Mapped[int] = mapped_column(Integer, default=0)
     closed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(nullable=True)
-    expected_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    counted_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    variance_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expected_cents: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    counted_cents: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    variance_cents: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     register: Mapped[Register] = relationship(lazy="joined")
@@ -170,13 +193,13 @@ class Sale(Base):
     created_at: Mapped[datetime]
     business_date: Mapped[date] = mapped_column(Date, index=True)
     payment_method: Mapped[str] = mapped_column(String(16), default="cash")
-    net_cents: Mapped[int] = mapped_column(Integer)
-    vat_cents: Mapped[int] = mapped_column(Integer)
-    total_cents: Mapped[int] = mapped_column(Integer)  # exact gross of all lines
-    cash_rounding_cents: Mapped[int] = mapped_column(Integer)  # cash_due - total
-    cash_due_cents: Mapped[int] = mapped_column(Integer)
-    tendered_cents: Mapped[int] = mapped_column(Integer)
-    change_cents: Mapped[int] = mapped_column(Integer)
+    net_cents: Mapped[int] = mapped_column(BigInteger)
+    vat_cents: Mapped[int] = mapped_column(BigInteger)
+    total_cents: Mapped[int] = mapped_column(BigInteger)  # exact gross of all lines
+    cash_rounding_cents: Mapped[int] = mapped_column(BigInteger)  # cash_due - total
+    cash_due_cents: Mapped[int] = mapped_column(BigInteger)
+    tendered_cents: Mapped[int] = mapped_column(BigInteger)
+    change_cents: Mapped[int] = mapped_column(BigInteger)
 
     lines: Mapped[list["SaleLine"]] = relationship(
         back_populates="sale", order_by="SaleLine.line_no", lazy="selectin"
@@ -201,13 +224,13 @@ class SaleLine(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     sku: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(200))
-    unit_price_cents: Mapped[int] = mapped_column(Integer)
+    unit_price_cents: Mapped[int] = mapped_column(BigInteger)
     quantity: Mapped[int] = mapped_column(Integer)
-    gross_cents: Mapped[int] = mapped_column(Integer)
+    gross_cents: Mapped[int] = mapped_column(BigInteger)
     tax_category: Mapped[str] = mapped_column(String(32))
     vat_rate_bp: Mapped[int] = mapped_column(Integer)
-    vat_cents: Mapped[int] = mapped_column(Integer)
-    net_cents: Mapped[int] = mapped_column(Integer)
+    vat_cents: Mapped[int] = mapped_column(BigInteger)
+    net_cents: Mapped[int] = mapped_column(BigInteger)
 
     sale: Mapped[Sale] = relationship(back_populates="lines")
 
@@ -224,8 +247,8 @@ class RefundAllocation(Base):
     sale_id: Mapped[str] = mapped_column(ForeignKey("sales.id"), index=True)
     original_quantity: Mapped[int] = mapped_column(Integer)
     refunded_quantity: Mapped[int] = mapped_column(Integer, default=0)
-    refunded_gross_cents: Mapped[int] = mapped_column(Integer, default=0)
-    refunded_vat_cents: Mapped[int] = mapped_column(Integer, default=0)
+    refunded_gross_cents: Mapped[int] = mapped_column(BigInteger, default=0)
+    refunded_vat_cents: Mapped[int] = mapped_column(BigInteger, default=0)
 
 
 class SaleRefundState(Base):
@@ -241,8 +264,8 @@ class SaleRefundState(Base):
 
     sale_id: Mapped[str] = mapped_column(ForeignKey("sales.id"), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
-    refunded_gross_cents: Mapped[int] = mapped_column(Integer, default=0)
-    refunded_cash_cents: Mapped[int] = mapped_column(Integer, default=0)
+    refunded_gross_cents: Mapped[int] = mapped_column(BigInteger, default=0)
+    refunded_cash_cents: Mapped[int] = mapped_column(BigInteger, default=0)
 
 
 class Refund(Base):
@@ -268,11 +291,11 @@ class Refund(Base):
     business_date: Mapped[date] = mapped_column(Date, index=True)
     payment_method: Mapped[str] = mapped_column(String(16), default="cash")
     # All amounts positive = money going back to the customer.
-    total_cents: Mapped[int] = mapped_column(Integer)
-    vat_cents: Mapped[int] = mapped_column(Integer)
-    net_cents: Mapped[int] = mapped_column(Integer)
-    cash_rounding_cents: Mapped[int] = mapped_column(Integer)
-    cash_paid_cents: Mapped[int] = mapped_column(Integer)
+    total_cents: Mapped[int] = mapped_column(BigInteger)
+    vat_cents: Mapped[int] = mapped_column(BigInteger)
+    net_cents: Mapped[int] = mapped_column(BigInteger)
+    cash_rounding_cents: Mapped[int] = mapped_column(BigInteger)
+    cash_paid_cents: Mapped[int] = mapped_column(BigInteger)
 
     lines: Mapped[list["RefundLine"]] = relationship(
         back_populates="refund", order_by="RefundLine.line_no", lazy="selectin"
@@ -296,12 +319,12 @@ class RefundLine(Base):
     sale_line_id: Mapped[int] = mapped_column(ForeignKey("sale_lines.id"), index=True)
     sku: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(200))
-    unit_price_cents: Mapped[int] = mapped_column(Integer)
+    unit_price_cents: Mapped[int] = mapped_column(BigInteger)
     quantity: Mapped[int] = mapped_column(Integer)
-    gross_cents: Mapped[int] = mapped_column(Integer)
+    gross_cents: Mapped[int] = mapped_column(BigInteger)
     vat_rate_bp: Mapped[int] = mapped_column(Integer)  # from the original line
-    vat_cents: Mapped[int] = mapped_column(Integer)
-    net_cents: Mapped[int] = mapped_column(Integer)
+    vat_cents: Mapped[int] = mapped_column(BigInteger)
+    net_cents: Mapped[int] = mapped_column(BigInteger)
 
     refund: Mapped[Refund] = relationship(back_populates="lines")
 
@@ -409,6 +432,7 @@ class KitchenTicketLine(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     ticket_id: Mapped[str] = mapped_column(ForeignKey("kitchen_tickets.id"), index=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"))
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     name: Mapped[str] = mapped_column(String(200))
     quantity: Mapped[int] = mapped_column(Integer)
