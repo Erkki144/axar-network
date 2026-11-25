@@ -536,6 +536,9 @@ def create_cash_sale(
     if existing is not None:
         return _replay_or_conflict(existing, req_hash)
 
+    from . import offline  # edge node: refuse NEW sales past the offline limit (replays above still work)
+    offline.guard(s, settings, tenant_id, now)
+
     register = get_register(s, tenant_id, register_id)
     drawer = get_open_drawer(s, tenant_id, register_id)
     if drawer is None:
@@ -596,9 +599,14 @@ def create_cash_sale(
     _sale_completed_event(s, sale, sale_lines, now, register.location_id)
     try:
         s.flush()  # assigns sale line ids; a concurrent same-key sale fails HERE (handled below)
-        journal.append(s, tenant_id=tenant_id, stream_id=journal.stream_for_register(register_id),
-                       entry_type="sale", entity_id=sale_id, summary=journal.sale_summary(sale, sale_lines),
-                       now=now)
+        journal.record(s, settings, tenant_id=tenant_id, register_id=register_id, entry_type="sale",
+                       entity_id=sale_id, summary=journal.sale_summary(sale, sale_lines), now=now,
+                       payload={"register_code": register.code, "cashier_id": cashier_id,
+                                "tendered_cents": tendered_cents, "local_time": now.isoformat(),
+                                "lines": [[ln.sku, ln.quantity] for ln in sale_lines],
+                                "expect": {"total_cents": total, "cash_due_cents": cash_due,
+                                           "register_receipt_no": register_receipt_no,
+                                           "receipt_label": receipt_label}})
         s.add_all(
             RefundAllocation(
                 sale_line_id=ln.id,
@@ -778,6 +786,8 @@ def _create_cash_refund(
     existing = _find_refund_by_key(s, tenant_id, idempotency_key)
     if existing is not None:  # a concurrent same-key request committed first
         return _refund_replay_or_conflict(existing, req_hash)
+    from . import offline
+    offline.guard(s, settings, tenant_id, now)
     get_register(s, tenant_id, register_id)
     drawer = get_open_drawer(s, tenant_id, register_id)
     if drawer is None:
@@ -944,9 +954,12 @@ def _create_cash_refund(
         before_commit(s, refund)  # a DomainError rolls back (create_cash_refund)
     try:
         s.flush()  # a concurrent same-key refund fails HERE (handled below), before the journal
-        journal.append(s, tenant_id=tenant_id, stream_id=journal.stream_for_register(register_id),
-                       entry_type="refund", entity_id=refund.id,
-                       summary=journal.refund_summary(refund, refund_lines), now=now)
+        journal.record(s, settings, tenant_id=tenant_id, register_id=register_id, entry_type="refund",
+                       entity_id=refund.id, summary=journal.refund_summary(refund, refund_lines), now=now,
+                       payload={"original_sale_id": sale.id, "cashier_id": cashier_id, "reason": reason,
+                                "local_time": now.isoformat(),
+                                "lines": [[ln.sku, ln.quantity, ln.gross_cents] for ln in refund_lines],
+                                "expect": {"total_cents": total, "cash_paid_cents": cash_paid}})
         s.commit()
     except IntegrityError:
         s.rollback()

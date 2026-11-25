@@ -651,3 +651,35 @@ def test_stream_of_location_manager_back_office_session_is_location_scoped(shop,
     assert locs == {loc1}, locs
     _, owner_frames = _stream(shop["adm"])
     assert {json.loads(f["data"]).get("location_id") for f in owner_frames if f.get("id")} == {loc1, loc2}
+
+
+# ------------------------------------------------------ offline sync (O1b)
+
+
+def test_sync_push_only_for_the_devices_own_journal_and_quarantine_needs_a_manager(shop):
+    me = shop["till"].get("/api/v1/auth/device").json()["device"]
+    entry = {"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "seq": 1, "stream": "device:x", "type": "sale", "entity": "e",
+             "summary": "0" * 64, "at": "2026-03-10T10:00:00+00:00", "prev_hash": "0" * 64, "hash": "0" * 64}
+    body = {"device_id": "someone-elses-device", "entries": [{"entry": entry, "payload": "{}",
+                                                               "payload_hash": "0" * 64}]}
+    r = shop["till"].post("/api/v1/sync/push", body)
+    assert r.status_code == 403 and "own journal" in r.json()["message"]
+    body["device_id"] = me["id"]
+    r = shop["till"].post("/api/v1/sync/push", body)                 # authorised; this entry is invalid
+    assert r.status_code == 200 and r.json()["results"][0]["status"] == "chain_broken"
+    assert shop["till"].get("/api/v1/sync/quarantine").status_code == 403        # cashier
+    assert shop["adm"].get("/api/v1/sync/quarantine").status_code == 200         # owner back office
+
+
+def test_offline_limit_setting_needs_an_owner_or_tenant_wide_manager(shop, world):
+    """POS settings apply to every location: a cashier till and a manager of one
+    location may read nothing / change nothing; the owner may (audited)."""
+    body = {"offline_limit_hours": 24}
+    assert shop["till"].put("/api/v1/admin/pos-settings", body).status_code in (401, 403)
+    secret = shop["adm"].put(f"/api/v1/admin/staff/{shop['manager']}/credentials",
+                             {"login": "mart", "password": MGR_PW}).json()["totp_secret"]
+    mgr = world.admin(login="mart", password=MGR_PW, secret=secret)   # manager of L1 only
+    assert mgr.put("/api/v1/admin/pos-settings", body).status_code == 403
+    r = shop["adm"].put("/api/v1/admin/pos-settings", body)
+    assert r.status_code == 200 and r.json()["offline_limit_hours"] == 24
+    assert shop["adm"].get("/api/v1/admin/pos-settings").json()["offline_limit_hours"] == 24

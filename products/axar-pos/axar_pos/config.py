@@ -36,6 +36,10 @@ class Settings:
     # Run the event consumers inside the API process (single-process setups
     # and demos). Several processes are safe: consumers are lease-based.
     inprocess_worker: bool = False
+    # Offline-first edge node (ADR-0012 O1b): when set, this process is a till's
+    # local node - money operations journal to stream ``device:<id>`` and also
+    # write a sync outbox row (same transaction) that the sync agent pushes.
+    edge_device_id: str | None = None
     till_idle_minutes: int = 15
     session_absolute_hours: int = 12
     admin_idle_minutes: int = 15
@@ -71,5 +75,6 @@ class Settings:
             secret_key=os.environ.get("AXAR_POS_SECRET_KEY") or None,
             profile=os.environ.get("AXAR_POS_PROFILE", "dev"),
             inprocess_worker=os.environ.get("AXAR_POS_INPROCESS_WORKER") == "1",
+            edge_device_id=os.environ.get("AXAR_POS_EDGE_DEVICE_ID") or None,
             till_idle_minutes=int(os.environ.get("AXAR_POS_TILL_IDLE_MINUTES", "15")),
         )

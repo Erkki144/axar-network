@@ -27,7 +27,7 @@ from datetime import datetime
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from .models import DeviceJournalEntry, Refund, Register, Sale, TenantCounter
+from .models import DeviceJournalEntry, Refund, Register, Sale, SyncOutbox, TenantCounter
 from .services import DomainError
 
 
@@ -132,6 +132,36 @@ def append(s: Session, *, tenant_id: str, stream_id: str, entry_type: str, entit
     e.hash = _sha(prev + _canonical(_entry_body(e)))
     s.add(e)
     return e
+
+
+def stream_for(settings, register_id: int) -> str:
+    """Central server: one stream per register. Edge node: one per device."""
+    return f"device:{settings.edge_device_id}" if settings.edge_device_id else stream_for_register(register_id)
+
+
+def record(s: Session, settings, *, tenant_id: str, register_id: int, entry_type: str, entity_id: str,
+           summary: dict, payload: dict, now: datetime) -> DeviceJournalEntry:
+    """Journal a money operation; on an edge node ALSO queue it for sync, in
+    the same transaction (ADR-0012 §2: business row + journal + outbox commit
+    together or not at all)."""
+    e = append(s, tenant_id=tenant_id, stream_id=stream_for(settings, register_id), entry_type=entry_type,
+               entity_id=entity_id, summary=summary, now=now)
+    if settings.edge_device_id:
+        body = _canonical(payload)
+        s.add(SyncOutbox(entry_id=e.id, tenant_id=tenant_id, device_id=settings.edge_device_id, seq=e.seq,
+                         entry_type=entry_type, payload=body, payload_hash=_sha(body), status="pending",
+                         attempts=0, created_at=now))
+    return e
+
+
+def entry_wire(e: DeviceJournalEntry) -> dict:
+    """What the server needs to re-verify the chain link of one entry."""
+    return {**_entry_body(e), "prev_hash": e.prev_hash, "hash": e.hash}
+
+
+def wire_hash_ok(w: dict) -> bool:
+    body = {k: w[k] for k in ("id", "stream", "seq", "type", "entity", "summary", "at")}
+    return _sha(w["prev_hash"] + _canonical(body)) == w["hash"]
 
 
 # ------------------------------------------------------------------ verifying

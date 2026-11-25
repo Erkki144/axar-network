@@ -38,7 +38,7 @@ class NoCacheStatic(StaticFiles):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-from . import __version__, auth, events, inventory, orders, payments, services
+from . import __version__, auth, events, inventory, offline, orders, payments, services, sync
 from .config import Settings
 from .db import bind_tenant, init_db, make_engine, request_factory, seed_demo
 from .models import DrawerSession, Refund, Register, Sale, Tenant
@@ -118,6 +118,28 @@ class CashSaleIn(Strict):
     register_id: Id
     lines: Annotated[list[SaleLineIn], Field(min_length=1, max_length=200)]
     tendered_cents: Cents
+
+
+class SyncEntryIn(Strict):
+    entry: dict
+    payload: Annotated[str, Field(max_length=20_000)]
+    payload_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+class SyncPushIn(Strict):
+    device_id: Annotated[str, Field(min_length=1, max_length=64)]
+    # empty = heartbeat: confirms contact and fetches the current policy
+    entries: Annotated[list[SyncEntryIn], Field(min_length=0, max_length=500)]
+
+
+class PosSettingsIn(Strict):
+    """POS settings a manager edits (owner decision 2026-11-25: limits are set
+    in the POS settings screen). Offline limit: 1-72 h."""
+    offline_limit_hours: Annotated[int, Field(ge=1, le=offline.MAX_OFFLINE_HOURS)]
+
+
+class DismissIn(Strict):
+    note: Annotated[str, Field(min_length=5, max_length=300)]
 
 
 class ReceiptSeriesIn(Strict):
@@ -1206,6 +1228,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         reg = services.get_register(s, who.tenant_id, register_id)
         auth.require_admin(who, reg.location_id)
         return journal.verify(s, who.tenant_id, journal.stream_for_register(reg.id))
+
+    # ------------------------------------------------- offline sync (O1b)
+
+    @app.post("/api/v1/sync/push")
+    def sync_push(body: SyncPushIn, who: Seller, s: Db):
+        """A till pushes its journal (ADR-0012 §7). A device may only push its
+        OWN stream; demo identity (tests/dev) may name the device."""
+        if not who.demo and who.device_id != body.device_id:
+            raise services.Forbidden("a device may only push its own journal")
+        for e in body.entries:
+            if not isinstance(e.entry.get("seq"), int) or not isinstance(e.entry.get("id"), str):
+                raise services.DomainError("each entry needs an integer seq and an id")
+        out = sync.ingest(s, tenant_id=who.tenant_id, device_id=body.device_id,
+                          items=[sync.Item(e.entry, e.payload, e.payload_hash) for e in body.entries],
+                          settings=settings, now=settings.clock())
+        out["policy"] = {"offline_limit_hours": offline.offline_limit_hours(s, who.tenant_id)}
+        return out
+
+    @app.get("/api/v1/sync/status")
+    def sync_status(who: Seller, s: Db):
+        """EDGE: may this till sell, and for how long without contact."""
+        if not settings.edge_device_id:
+            raise services.NotFound("not an edge node")
+        return offline.status(s, tenant_id=who.tenant_id, device_id=settings.edge_device_id, now=settings.clock())
+
+    @app.get("/api/v1/admin/pos-settings")
+    def pos_settings_get(who: Who, s: Db):
+        auth.require_admin(who)
+        return {"offline_limit_hours": offline.offline_limit_hours(s, who.tenant_id),
+                "offline_limit_max_hours": offline.MAX_OFFLINE_HOURS}
+
+    @app.put("/api/v1/admin/pos-settings")
+    def pos_settings_put(body: PosSettingsIn, who: Who, s: Db):
+        auth.require_admin(who)   # no location given: owner or tenant-wide manager only (applies everywhere)
+        hours = offline.set_offline_limit(s, tenant_id=who.tenant_id, hours=body.offline_limit_hours,
+                                          actor=who.staff_id or who.cashier_id, now=settings.clock())
+        return {"offline_limit_hours": hours, "offline_limit_max_hours": offline.MAX_OFFLINE_HOURS}
+
+    def inbox_out(r) -> dict:
+        return {"id": r.id, "device_id": r.device_id, "seq": r.seq, "entry_id": r.entry_id,
+                "entry_type": r.entry_type, "status": r.status, "reason": r.reason, "sale_id": r.sale_id,
+                "payload": json.loads(r.payload), "received_at": r.received_at.isoformat(),
+                "resolved_by": r.resolved_by, "resolution_note": r.resolution_note}
+
+    @app.get("/api/v1/sync/quarantine")
+    def sync_quarantine(who: Reporter, s: Db):
+        return [inbox_out(r) for r in sync.quarantine(s, who.tenant_id)]
+
+    @app.post("/api/v1/sync/quarantine/{row_id}/retry")
+    def sync_retry(row_id: int, who: Reporter, s: Db):
+        return inbox_out(sync.retry(s, tenant_id=who.tenant_id, row_id=row_id, actor=who.cashier_id,
+                                    settings=settings, now=settings.clock()))
+
+    @app.post("/api/v1/sync/quarantine/{row_id}/dismiss")
+    def sync_dismiss(row_id: int, body: DismissIn, who: Reporter, s: Db):
+        return inbox_out(sync.dismiss(s, tenant_id=who.tenant_id, row_id=row_id, actor=who.cashier_id,
+                                      note=body.note, now=settings.clock()))
 
     @app.get("/api/v1/admin/auth-events")
     def admin_events(who: Who, s: Db, limit: Annotated[int, Query(ge=1, le=500)] = 100):

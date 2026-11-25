@@ -188,6 +188,8 @@ def _common(s: Session, tenant_id: str, order_id: str, expected_total_cents: int
     if (p := _existing(s, tenant_id, key, req_hash)) is not None:
         s.rollback()
         return order, None, p
+    from . import offline  # edge node: no NEW bill payments past the offline limit (replays above still work)
+    offline.guard(s, settings, tenant_id, now)
     if order.status not in OPEN_STATES:
         raise BillClosed(f"bill is {order.status}")
     if not order.lines:
@@ -401,8 +403,18 @@ def _issue_sale(s: Session, tenant_id: str, order: Order, st: BillState, registe
     s.add(sale)
     s.add_all(lines)
     s.flush()
-    journal.append(s, tenant_id=tenant_id, stream_id=journal.stream_for_register(register_id), entry_type="sale",
-                   entity_id=sale_id, summary=journal.sale_summary(sale, lines), now=now)
+    # Same path as cash sales (O1b): on an edge node this also queues the entry
+    # for sync. Central ingest does not re-create bill sales (split tenders,
+    # card, transfer) automatically yet: they go to the manager's review queue.
+    journal.record(s, settings, tenant_id=tenant_id, register_id=register_id, entry_type="sale",
+                   entity_id=sale_id, summary=journal.sale_summary(sale, lines), now=now,
+                   payload={"kind": "bill", "register_code": services.get_register(s, tenant_id, register_id).code,
+                            "cashier_id": actor, "order_id": order.id, "local_time": now.isoformat(),
+                            "lines": [[ln.sku, ln.quantity] for ln in lines],
+                            "tenders": [[p.method, p.amount_cents] for p in st.payments
+                                        if p.status in ("captured", "pending")],
+                            "expect": {"total_cents": total, "register_receipt_no": register_receipt_no,
+                                       "receipt_label": receipt_label}})
     from .models import RefundAllocation, SaleRefundState
 
     s.add_all(RefundAllocation(sale_line_id=ln.id, tenant_id=tenant_id, sale_id=sale_id, original_quantity=ln.quantity,
