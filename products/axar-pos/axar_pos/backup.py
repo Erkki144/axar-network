@@ -25,7 +25,8 @@ import argparse
 import hashlib
 import json
 import os
-import subprocess
+import re
+import subprocess  # nosec B404 - fixed pg_dump/pg_restore argv, no shell
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +35,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 APP_ROLE = "axar_app"
+_IDENT = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 
 
 class BackupError(RuntimeError):
@@ -70,7 +72,11 @@ def fingerprint(admin_url: str) -> dict:
                 "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")))
             out = {}
             for t in tables:
-                n, digest = c.execute(text(
+                # Names come from the pg_tables catalog, not from users; still
+                # refuse anything that is not a plain identifier before quoting.
+                if not _IDENT.fullmatch(t):
+                    raise BackupError(f"unexpected table name {t!r}")
+                n, digest = c.execute(text(  # nosec B608 - identifier validated above
                     f'SELECT count(*), md5(coalesce(string_agg(x::text, E\'\\n\' ORDER BY x::text), \'\')) '
                     f'FROM public."{t}" x')).one()
                 out[t] = {"rows": int(n), "md5": digest}
