@@ -221,7 +221,10 @@ function clearPending(key) {
 function setOnline(on) {
   S.online = on;
   const pill = $('net-status');
-  pill.textContent = on ? '● Server ühendatud' : '● Ühendus puudub';
+  // Keep the realtime marker: any successful API call also lands here, and must
+  // not hide that the live stream is connected (state lives on the pill itself).
+  const live = on && pill.dataset.live === '1';
+  pill.textContent = on ? (live ? '● Server ühendatud · reaalajas' : '● Server ühendatud') : '● Ühendus puudub';
   pill.classList.toggle('offline', !on);
   pill.classList.toggle('online', on);
 }
