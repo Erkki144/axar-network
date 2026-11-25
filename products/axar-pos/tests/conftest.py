@@ -130,6 +130,9 @@ class Api:
     def post(self, path, json=None, headers=None):
         return self.c.post(path, json=json, headers={**self.h, **(headers or {})})
 
+    def put(self, path, json=None, headers=None):
+        return self.c.put(path, json=json, headers={**self.h, **(headers or {})})
+
     def product_id(self, sku: str) -> int:
         return next(p["id"] for p in self.get("/api/v1/products").json() if p["sku"] == sku)
 

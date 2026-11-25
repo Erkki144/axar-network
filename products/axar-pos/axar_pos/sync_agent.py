@@ -30,15 +30,16 @@ from typing import Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from . import offline
 from .journal import entry_wire
-from .models import DeviceJournalEntry, SyncOutbox
+from .models import DeviceJournalEntry, EdgeSyncState, SyncOutbox
 
 Send = Callable[[dict], "tuple[int, dict | None]"]
 
 
 @dataclass
 class RoundResult:
-    state: str                  # idle | waiting | sent | retry | blocked
+    state: str                  # idle | waiting | sent | retry | blocked | offline
     sent: int = 0
     acked: int = 0
     quarantined: int = 0
@@ -55,6 +56,7 @@ class SyncAgent:
     batch_size: int = 50
     base_delay: timedelta = timedelta(seconds=2)
     max_delay: timedelta = timedelta(minutes=5)
+    heartbeat_every: timedelta = timedelta(minutes=5)   # contact check-in when nothing is pending
     rng: random.Random = field(default_factory=random.Random)
 
     def _backoff(self, attempts: int) -> timedelta:
@@ -84,7 +86,13 @@ class SyncAgent:
                 SyncOutbox.tenant_id == self.tenant_id, SyncOutbox.device_id == self.device_id,
                 SyncOutbox.status == "pending").order_by(SyncOutbox.seq).limit(self.batch_size)))
             if not rows:
-                return RoundResult("idle")
+                st = s.get(EdgeSyncState, (self.tenant_id, self.device_id))
+                due = st is None or now - st.last_contact_at >= self.heartbeat_every
+                if not due:
+                    return RoundResult("idle")
+        if not rows:                       # outside the session: the contact is its own transaction
+            return self._heartbeat(now)
+        with self.factory() as s:          # rows are read above; values stay loaded after close
             head = rows[0]
             if head.next_attempt_at is not None and head.next_attempt_at > now:
                 return RoundResult("waiting", detail=f"next attempt at {head.next_attempt_at.isoformat()}")
@@ -99,7 +107,25 @@ class SyncAgent:
             return self._failed(rows, f"{type(e).__name__}: {e}"[:300], now)
         if status != 200 or not isinstance(data, dict):
             return self._failed(rows, f"HTTP {status}", now)
+        self._contact(data, now)
         return self._apply_answer(rows, data, now)
+
+    def _contact(self, data: dict, now: datetime) -> None:
+        """The central server answered: renew the offline window with its policy."""
+        hours = (data.get("policy") or {}).get("offline_limit_hours", offline.DEFAULT_OFFLINE_HOURS)
+        with self.factory() as s:
+            offline.record_contact(s, tenant_id=self.tenant_id, device_id=self.device_id, now=now,
+                                   limit_hours=hours)
+
+    def _heartbeat(self, now: datetime) -> RoundResult:
+        try:
+            status, data = self.send({"device_id": self.device_id, "entries": []})
+        except Exception as e:  # still offline: nothing to retry, the window keeps running
+            return RoundResult("offline", detail=f"{type(e).__name__}: {e}"[:300])
+        if status != 200 or not isinstance(data, dict):
+            return RoundResult("offline", detail=f"HTTP {status}")
+        self._contact(data, now)
+        return RoundResult("idle", detail="heartbeat")
 
     def _failed(self, rows, error: str, now: datetime) -> RoundResult:
         with self.factory() as s:
@@ -137,6 +163,6 @@ class SyncAgent:
         for _ in range(max_rounds):
             r = self.run_once()
             out.append(r)
-            if r.state in ("idle", "waiting", "retry", "blocked"):
+            if r.state in ("idle", "waiting", "retry", "blocked", "offline"):
                 break
         return out

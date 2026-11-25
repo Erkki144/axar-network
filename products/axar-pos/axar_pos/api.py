@@ -38,7 +38,7 @@ class NoCacheStatic(StaticFiles):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-from . import __version__, auth, events, inventory, orders, services, sync
+from . import __version__, auth, events, inventory, offline, orders, services, sync
 from .config import Settings
 from .db import bind_tenant, init_db, make_engine, request_factory, seed_demo
 from .models import DrawerSession, Refund, Register, Sale, Tenant
@@ -102,7 +102,14 @@ class SyncEntryIn(Strict):
 
 class SyncPushIn(Strict):
     device_id: Annotated[str, Field(min_length=1, max_length=64)]
-    entries: Annotated[list[SyncEntryIn], Field(min_length=1, max_length=500)]
+    # empty = heartbeat: confirms contact and fetches the current policy
+    entries: Annotated[list[SyncEntryIn], Field(min_length=0, max_length=500)]
+
+
+class PosSettingsIn(Strict):
+    """POS settings a manager edits (owner decision 2026-11-25: limits are set
+    in the POS settings screen). Offline limit: 1-72 h."""
+    offline_limit_hours: Annotated[int, Field(ge=1, le=offline.MAX_OFFLINE_HOURS)]
 
 
 class DismissIn(Strict):
@@ -1147,9 +1154,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for e in body.entries:
             if not isinstance(e.entry.get("seq"), int) or not isinstance(e.entry.get("id"), str):
                 raise services.DomainError("each entry needs an integer seq and an id")
-        return sync.ingest(s, tenant_id=who.tenant_id, device_id=body.device_id,
-                           items=[sync.Item(e.entry, e.payload, e.payload_hash) for e in body.entries],
-                           settings=settings, now=settings.clock())
+        out = sync.ingest(s, tenant_id=who.tenant_id, device_id=body.device_id,
+                          items=[sync.Item(e.entry, e.payload, e.payload_hash) for e in body.entries],
+                          settings=settings, now=settings.clock())
+        out["policy"] = {"offline_limit_hours": offline.offline_limit_hours(s, who.tenant_id)}
+        return out
+
+    @app.get("/api/v1/sync/status")
+    def sync_status(who: Seller, s: Db):
+        """EDGE: may this till sell, and for how long without contact."""
+        if not settings.edge_device_id:
+            raise services.NotFound("not an edge node")
+        return offline.status(s, tenant_id=who.tenant_id, device_id=settings.edge_device_id, now=settings.clock())
+
+    @app.get("/api/v1/admin/pos-settings")
+    def pos_settings_get(who: Who, s: Db):
+        auth.require_admin(who)
+        return {"offline_limit_hours": offline.offline_limit_hours(s, who.tenant_id),
+                "offline_limit_max_hours": offline.MAX_OFFLINE_HOURS}
+
+    @app.put("/api/v1/admin/pos-settings")
+    def pos_settings_put(body: PosSettingsIn, who: Who, s: Db):
+        auth.require_admin(who)   # no location given: owner or tenant-wide manager only (applies everywhere)
+        hours = offline.set_offline_limit(s, tenant_id=who.tenant_id, hours=body.offline_limit_hours,
+                                          actor=who.staff_id or who.cashier_id, now=settings.clock())
+        return {"offline_limit_hours": hours, "offline_limit_max_hours": offline.MAX_OFFLINE_HOURS}
 
     def inbox_out(r) -> dict:
         return {"id": r.id, "device_id": r.device_id, "seq": r.seq, "entry_id": r.entry_id,

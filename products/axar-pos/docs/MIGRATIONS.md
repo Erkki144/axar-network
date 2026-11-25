@@ -16,7 +16,7 @@ number, so the history is one straight line.
 4. Every migration supports `upgrade` and `downgrade`; CI runs
    up → down → up plus `alembic check` on an empty PostgreSQL database.
 
-## Register (2026-11-25)
+## Register (2026-11-25, updated with O1c)
 
 | Number | Migration | Where | State |
 | --- | --- | --- | --- |
@@ -24,8 +24,9 @@ number, so the history is one straight line.
 | 0002 | `server_identity` | `main` | released |
 | 0003 | `outbox_v2_consumers` | `main` | released |
 | 0004 | `inventory_and_costing` | `main` | released |
-| 0005 | `device_journal_register_series` | PR #49 (O1a) | released when #49 merges |
-| 0006 | `offline_sync` | PR #53 (O1b, stacked on #49) | open |
-| 0007 | `payments_c3` | PR #26 | open; currently numbered 0006 and must become 0007 (parent 0006) if it merges after #53 |
+| 0005 | `device_journal_register_series` | `main` (PR #49) | released |
+| 0006 | `offline_sync` | PR #53 (O1b) | open |
+| 0007 | `offline_limit` | PR O1c (stacked on #53) | open |
+| 0008 | `payments_c3` | PR #26 | open; currently numbered 0006 and must become 0008 (parent 0007) if it merges after #53 and O1c |
 
 When a PR merges, update this table in the same PR.

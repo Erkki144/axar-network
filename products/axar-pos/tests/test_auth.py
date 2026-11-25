@@ -667,3 +667,17 @@ def test_sync_push_only_for_the_devices_own_journal_and_quarantine_needs_a_manag
     assert r.status_code == 200 and r.json()["results"][0]["status"] == "chain_broken"
     assert shop["till"].get("/api/v1/sync/quarantine").status_code == 403        # cashier
     assert shop["adm"].get("/api/v1/sync/quarantine").status_code == 200         # owner back office
+
+
+def test_offline_limit_setting_needs_an_owner_or_tenant_wide_manager(shop, world):
+    """POS settings apply to every location: a cashier till and a manager of one
+    location may read nothing / change nothing; the owner may (audited)."""
+    body = {"offline_limit_hours": 24}
+    assert shop["till"].put("/api/v1/admin/pos-settings", body).status_code in (401, 403)
+    secret = shop["adm"].put(f"/api/v1/admin/staff/{shop['manager']}/credentials",
+                             {"login": "mart", "password": MGR_PW}).json()["totp_secret"]
+    mgr = world.admin(login="mart", password=MGR_PW, secret=secret)   # manager of L1 only
+    assert mgr.put("/api/v1/admin/pos-settings", body).status_code == 403
+    r = shop["adm"].put("/api/v1/admin/pos-settings", body)
+    assert r.status_code == 200 and r.json()["offline_limit_hours"] == 24
+    assert shop["adm"].get("/api/v1/admin/pos-settings").json()["offline_limit_hours"] == 24

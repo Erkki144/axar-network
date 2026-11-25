@@ -521,6 +521,9 @@ def create_cash_sale(
     if existing is not None:
         return _replay_or_conflict(existing, req_hash)
 
+    from . import offline  # edge node: refuse NEW sales past the offline limit (replays above still work)
+    offline.guard(s, settings, tenant_id, now)
+
     register = get_register(s, tenant_id, register_id)
     drawer = get_open_drawer(s, tenant_id, register_id)
     if drawer is None:
@@ -766,6 +769,8 @@ def _create_cash_refund(
     existing = _find_refund_by_key(s, tenant_id, idempotency_key)
     if existing is not None:  # a concurrent same-key request committed first
         return _refund_replay_or_conflict(existing, req_hash)
+    from . import offline
+    offline.guard(s, settings, tenant_id, now)
     get_register(s, tenant_id, register_id)
     drawer = get_open_drawer(s, tenant_id, register_id)
     if drawer is None:

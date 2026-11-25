@@ -81,8 +81,7 @@ UPDATE` (no `DELETE`) for the application role.
 3. **Cash drawer** is per register on the central side; the till's drawer must
    be open centrally, otherwise the sale is quarantined and can be retried after
    the drawer is opened.
-4. **72 h limit** is an owner decision; enforcement on the till (blocking sales
-   after 72 h without a successful sync) is a separate setting slice.
+4. **72 h limit** — done in O1c, see below.
 5. The agent's HTTP transport is injected (`send(body)`); the production
    client for Windows/Android tills is part of the edge packaging work.
 
@@ -101,3 +100,20 @@ missed. Already-applied migrations 0001–0005 are not changed.
 - Mutation check (each change must make a test fail): duplicate check ignoring the
   hash, no gap check, a lost response treated as acked, no payload-hash check,
   retry with a fresh idempotency key - all 5 caught.
+
+## O1c: offline limit (owner decision: at most 72 h, set in the POS settings)
+
+| Rule | How | Test (`tests/test_offline_limit.py`) |
+|---|---|---|
+| A till may sell without the central server for at most `offline_limit_hours` | every NEW sale/refund on an edge node runs `offline.guard`; past the limit it is refused with `423 offline_limit_exceeded` | `test_sales_stop_after_72h_without_contact_and_restart_when_the_connection_returns` |
+| Nothing already sold is affected | the guard runs after the idempotency check: a retry of an existing sale still returns it; the outbox keeps syncing | same |
+| Contact = any 200 answer from the central server | the sync agent records it (`edge_sync_state.last_contact_at`) with the server's current limit; with nothing pending it sends a heartbeat (empty push) every 5 min | `test_a_heartbeat_renews_the_window_when_nothing_is_pending`, `test_failed_contact_does_not_extend_the_window` |
+| Limit set by a manager in the POS settings | `GET/PUT /api/v1/admin/pos-settings` `{offline_limit_hours: 1..72}`; owner or tenant-wide manager with MFA; audited (`pos_settings.changed`, before/after) | `test_manager_sets_the_limit_and_the_till_gets_it_on_the_next_contact`, `tests/test_auth.py::test_offline_limit_setting_needs_an_owner_or_tenant_wide_manager` |
+| The till never accepts more than 72 h | values from the server are clamped to 1..72 | `test_a_server_cannot_raise_the_limit_above_72h` |
+| The clock cannot be set back to dodge the limit | the till keeps the latest time it used (`max_seen_at`); a clock more than 5 min behind it blocks selling (`clock_moved_back`) until fixed | `test_setting_the_clock_back_blocks_selling` |
+| A till must have been online once | no contact record → selling refused | `test_a_till_that_never_connected_cannot_sell` |
+| The central server is never limited | the guard is a no-op without `AXAR_POS_EDGE_DEVICE_ID` | `test_the_central_server_is_never_limited` |
+
+`GET /api/v1/sync/status` (edge only) tells the till UI whether it may sell, the deadline and the remaining seconds, for a warning banner (the banner itself is the next UI step).
+
+Migration `0007_offline_limit`: `pos_settings` (central) and `edge_sync_state` (edge), RLS + grants without DELETE.
