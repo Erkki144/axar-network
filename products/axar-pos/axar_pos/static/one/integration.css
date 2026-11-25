@@ -43,3 +43,25 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 .approval-box{border:1px dashed #f1cf8a;background:#fffaf0;border-radius:12px;padding:12px;margin:10px 0}
 .approval-box select,.approval-box input{width:100%;margin-top:6px;padding:8px;border-radius:8px;border:1px solid #c9d3d6}
 .auth-screen[hidden]{display:none}
+/* ---- usability pass (real-browser walkthrough, 390px / 1024px) ---- */
+@media(max-width:1350px){.headline{display:none}.workspace-body{padding-top:20px}}
+.cart-row{align-items:center;padding:10px 0}
+.cart-body{display:grid;grid-template-columns:1fr auto;grid-template-areas:"name ctr" "detail ctr";column-gap:8px;align-items:center}
+.cart-name{grid-area:name}.cart-detail{grid-area:detail;margin:2px 0 0}.cart-controls{grid-area:ctr}
+.qty-btn{width:40px;height:40px;font-size:20px}
+@media(max-width:1350px){.cart-icon{display:none}}
+.ticket-age.late{color:#a53030;font-weight:800}
+.pin-pad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}
+.pin-key{min-height:56px;border-radius:12px;border:1px solid #d8e1e4;background:#f6f9fa;font-size:22px;font-weight:700}
+.pin-key.ok{background:#185c55;color:#fff;border-color:#185c55}
+.lock-top{display:none;border:0;background:#eef3f1;border-radius:10px;min-width:40px;min-height:36px;font-size:16px}
+.mini-cart{display:none}
+@media(max-width:640px){
+  .lock-top:not([hidden]){display:inline-block}
+  .mini-cart:not([hidden]){display:flex;position:fixed;left:8px;right:8px;bottom:80px;z-index:8;gap:8px;
+    background:#112c37;border-radius:16px;padding:8px;box-shadow:0 10px 30px #0b232c66}
+  .mini-view{flex:1;display:flex;justify-content:space-between;align-items:center;background:transparent;border:0;color:#cfe4e0;font-size:14px;padding:0 10px;min-height:48px}
+  .mini-view strong{color:#fff;font-size:18px}
+  .mini-pay{min-height:48px;min-width:110px;border:0;border-radius:12px;background:#95e7cc;color:#0f3a35;font-weight:800;font-size:15px}
+  .app-shell{padding-bottom:150px}
+}

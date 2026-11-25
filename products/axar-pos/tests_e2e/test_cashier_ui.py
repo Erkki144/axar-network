@@ -297,7 +297,7 @@ def test_close_drawer_requires_confirmation_and_shows_variance(phone, server):
 def test_table_bill_survives_reload_and_is_paid_via_api(phone, server):
     open_drawer(phone)
     phone.click('[data-mode="tables"]')
-    expect(phone.locator(".demo-banner")).to_contain_text("serveris")
+    expect(phone.locator(".demo-banner")).to_contain_text("DEMO päised")   # demo mode says so; server mode shows nothing
     phone.locator("#table-grid .table-card", has_text="Laud 02").click()
     add(phone, "Päevasupp", 2)
     phone.click("#send-button")

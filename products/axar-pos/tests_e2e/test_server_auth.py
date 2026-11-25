@@ -132,3 +132,47 @@ def test_lock_and_session_loss_return_to_pin_screen(till, auth_server):
     till.evaluate("sessionStorage.setItem('axar.one.session.v1', 'revoked-token')")
     till.reload()
     expect(till.locator("#auth-title")).to_have_text("Sisselogimine")
+
+
+def test_phone_mini_cart_keeps_total_and_pay_in_view(browser, auth_server):
+    """Usability: on a 390 px phone the basket is below the menu; a sticky
+    bar shows count + server total and pays without scrolling."""
+    ctx = browser.new_context(viewport={"width": 390, "height": 844})
+    page = ctx.new_page()
+    page.goto(f"{auth_server.base}/one/")
+    page.fill("#enroll-code", auth_server.enroll_code())
+    page.click("#enroll-submit")
+    page.locator(".staff-btn", has_text="Kati").click()
+    for k in "4829":
+        page.click(f'.pin-key[aria-label="{k}"]')
+    page.click('.pin-key[aria-label="Logi sisse"]')
+    expect(page.locator("#mode-pill")).to_contain_text("kassapidaja")
+    expect(page.locator("#mini-cart")).to_be_hidden()
+    open_drawer(page)
+    add(page, "Kohv", 2)
+    bar = page.locator("#mini-cart")
+    expect(bar).to_be_visible()
+    expect(page.locator("#mini-total")).to_have_text("5,00 €")
+    assert bar.bounding_box()["y"] + bar.bounding_box()["height"] <= 844   # inside the viewport
+    page.click("#mini-pay")
+    page.fill("#tender-input", "5,00")
+    page.click("#confirm-payment")
+    expect(page.locator("#change-due")).to_have_text("Tagasi 0,00 €")
+    page.click("#next-customer")
+    expect(bar).to_be_hidden()
+    ctx.close()
+
+
+def test_kitchen_view_respects_permissions(till, auth_server):
+    login(till, "Kati", "4829")       # cashier: may see tickets, may not mark them ready
+    till.click('[data-mode="tables"]')
+    till.locator("#table-grid .table-card", has_text="Laud 01").click()
+    add(till, "Päevasupp")
+    expect(till.locator("#basket-count")).to_have_text("1")
+    till.click("#send-button")
+    till.click('[data-mode="kitchen"]')
+    ticket = till.locator(".ticket", has_text="Laud 01")
+    expect(ticket).to_contain_text("Valmis märgib köök")
+    expect(ticket.locator("button.ticket-ready")).to_be_hidden()
+    till.click('[data-mode="manager"]')
+    expect(till.locator("#report")).to_contain_text("ainult juht")
