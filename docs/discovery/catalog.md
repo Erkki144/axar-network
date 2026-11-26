@@ -149,6 +149,16 @@ salvestamata väärtust, vajutasin „Katkesta“ ja kontrollisin, et midagi ei 
 4. **Allergeenid:** kas need peavad olema menüüs ja tšekil kohe piloodis?
 5. **Hinnamuudatuste kinnitamine:** kas hinnamuudatus vajab teise inimese kinnitust või piisab juhi õigusest?
 
+### 6.1 Omaniku vastused (26.11.2026) ja nende tagajärg
+
+| # | Vastus | Tagajärg disainile |
+|---|---|---|
+| 1 | Igal söögikohal võivad olla oma hinnad. Toode võib olla sama ja hind erinev, või võivad tooted olla erinevad. | **Mitu hinnakirja on vaja juba P1-1-s**, mitte alles P1-5-s. Hinnakiri on seotud müügipunktiga. Toode on ettevõtte ühine. Toode, millel müügipunkti hinnakirjas hinda pole, selles müügipunktis ei müüda. Seega saab ka „erinevad tooted eri kohtades“ lahendada ilma eraldi tooteta. |
+| 2 | Kinkekaart võib tulla. | Kinkekaart → **P2** (uus samm P2-9), mitte P3. Tootetüüp `gift_card` on andmemudelis kohe olemas, aga müük ja lunastus tulevad P2-s. |
+| 3 | Kaalukaupa müüakse. | **Komakohaga kogus müügi- ja tellimusreal on P1-1-s** (`qty_micro`, ühik kg). Kaaluga vöötkood ja kaaluühendus tulevad P2-s. |
+| 4 | Allergeenid ei pea piloodis olema. | Allergeenide väli on valikuline ja selle kuvamine menüüs ja tšekil on **P2**. |
+| 5 | Hinnamuudatus vajab teise inimese kinnitust. | **Neli silma:** hinna mustandi loob üks inimene, avaldab teine (õigus „kinnita hinnamuudatus“). Looja ei saa enda mustandit kinnitada. Mõlemad on hinnaversioonil kirjas. Erand: omanik, kui ta on ettevõttes ainuke kinnitaja, ja see märgitakse versioonile. |
+
 ## 7. Lisandused tootja juhendist (26.11.2026)
 
 ### 7.1 Tooterühm on rohkem kui kaust
@@ -256,11 +266,35 @@ salvestamata väärtust, vajutasin „Katkesta“ ja kontrollisin, et midagi ei 
 - **AXAR (#40, #18):** üks menüü-register, kus **kanal** on omadus (kassa, QR, veeb, kuller X). Saadavus ja paus on reaalajas sündmused
   (`catalog.availability.changed`), mitte iga kanali eraldi seadistus.
 
-## 8. Mis läheb P1-1 alla (ettepanek)
+## 8. P1-1 ulatus — LUKUS (omaniku vastuste järel, 26.11.2026)
 
-1. Tooterühmade puu ja tootekaart (§2: nimi, lühend, rühm, tüüp `standard` / `system`, number, vöötkoodid, maksukategooria, `stock_mode`, aktiivne, peidetud, kanalid, kirjeldus, allergeenid).
-2. Üks hinnakiri + hinnaversioonid `valid_from`-iga, mõju eelvaade, sündmus `pricing.price.published`, reegel R14.
-3. Retsepti laiendus: sisestusühik, kadu, hoiatused, avaldamise sündmus.
-4. Kassa saab muudatused ilma taaskäivituseta. Võrguühenduseta kassa saab need järgmisel ühendusel (J2).
-5. Komakohaga kogus müügireal, kui omanik vastab küsimusele 3 „jah“.
-6. Brauseritest: kontor loob toote „Seljanka 6.50“ ja retsepti → kassa näitab seda → müük kannab retsepti järgi maha → vana müük jääb vana hinnaga (DELIVERY_ROADMAP P1-1).
+P1-1 jaguneb kolmeks väikeseks PR-iks (reegel: üks väike PR sammu kohta).
+
+**P1-1a — tooted, rühmad, hinnakirjad, neli silma**
+1. Tooterühmade puu (rühma vaikeväärtused: maksukategooria, müügipunktid).
+2. Tootekaart (§2): nimi, lühend, rühm, tüüp (`standard`, `system`, `gift_card` mudelis), number, vöötkoodid, maksukategooria, `stock_mode`, aktiivne, peidetud kassas, kirjeldus.
+3. **Hinnakirjad müügipunktide kaupa** + hinnaversioonid (`valid_from`). Hinda pole = selles müügipunktis ei müüda.
+4. **Mustand → eelvaade → kinnitus teise inimese poolt → avaldamine**. Sündmus `pricing.price.published`, kooskõlareegel R14.
+5. Toote deaktiveerimine ei muuda laoseisu (README L2). Eelvaade näitab avatud tellimusi.
+6. Kassa saab muudatused ilma taaskäivituseta. Võrguühenduseta kassa saab need järgmisel ühendusel (J2).
+
+**P1-1b — kaalukaup**
+1. Kogus müügi-, tellimus- ja tagastusreal on komakohaga (`qty_micro`). Ühik on tootel (tk / kg).
+2. Kassas saab sisestada kaalu käsitsi. Summa ümardatakse sendini rea tasandil.
+3. Migratsioon ja vanade ridade teisendus (täisarv → mikroühik), kooskõlareeglid R1–R13 jäävad roheliseks.
+
+**P1-1c — retsepti laiendus**
+1. Sisestusühik ja teisendus (g → kg), kadu %, tellimuse tüüp reale.
+2. Hoiatused: ühikud ei sobi, omahind 0, toidu omahinna % üle piiri.
+3. Sündmus `recipe.version.published`.
+
+**Brauseritest (kogu P1-1):**
+1. Kontor loob toote „Seljanka“, hinnaga 6,50 müügipunktis A ja 6,90 müügipunktis B.
+2. Teine juht kinnitab hinna.
+3. Mõlema müügipunkti kassad näitavad õiget hinda.
+4. Salatibaarist müüakse 0,352 kg.
+5. Müük kannab retsepti järgi laost maha.
+6. Vana müük jääb vana hinnaga.
+7. Looja ei saa enda hinnamustandit kinnitada.
+
+**P1-1-st välja:** allergeenid (P2), kinkekaardi müük ja lunastus (P2-9), kaaluga vöötkood ja kaalu ühendus (P2), lisandid ja erisoovid (P1-5 / P2), kassanuppude redaktor (P2-5).
