@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/drawer.cash.moved/1",
+  "title": "drawer.cash.moved v1 payload",
+  "description": "Physical cash added to or removed from a till drawer outside sales (#68: safe drop, float top-up, bank deposit, correction). Cash custody only: never revenue or VAT. Reconciled by R1 against drawer_cash_movements. Not yet consumed by books.export (P1-3) and not produced by offline edge tills (P2-1).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["movement_id", "drawer_id", "register_id", "direction", "amount_cents", "reason_code", "actor", "approval_id"],
+  "properties": {
+    "movement_id": {"type": "string", "minLength": 36, "maxLength": 36},
+    "drawer_id": {"type": "integer", "minimum": 1},
+    "register_id": {"type": "integer", "minimum": 1},
+    "direction": {"enum": ["in", "out"]},
+    "amount_cents": {"type": "integer", "minimum": 1, "maximum": 100000000},
+    "reason_code": {"enum": ["SAFE_DROP", "FLOAT_TOPUP", "CASH_CORRECTION", "BANK_DEPOSIT", "OTHER"]},
+    "actor": {"type": "string", "minLength": 1, "maxLength": 64},
+    "approval_id": {"type": ["string", "null"], "maxLength": 36}
+  }
+}

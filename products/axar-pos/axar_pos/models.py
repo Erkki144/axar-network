@@ -242,6 +242,8 @@ class DrawerSession(Base):
     cash_sales_cents: Mapped[int] = mapped_column(BigInteger, default=0)
     sale_count: Mapped[int] = mapped_column(Integer, default=0)
     cash_refunds_cents: Mapped[int] = mapped_column(BigInteger, default=0)
+    cash_in_cents: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    cash_out_cents: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     refund_count: Mapped[int] = mapped_column(Integer, default=0)
     closed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(nullable=True)
@@ -261,6 +263,35 @@ class DrawerSession(Base):
             sqlite_where=text("status = 'open'"),
             postgresql_where=text("status = 'open'"),
         ),
+    )
+
+
+class DrawerCashMovement(Base):
+    """Immutable physical cash custody movement, separate from sales/VAT.
+
+    The row plus drawer running total are inserted/updated atomically. A
+    correction is a new movement, never a destructive edit of this row.
+    """
+    __tablename__ = "drawer_cash_movements"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    register_id: Mapped[int] = mapped_column(ForeignKey("registers.id"), index=True)
+    drawer_session_id: Mapped[int] = mapped_column(ForeignKey("drawer_sessions.id"), index=True)
+    sequence_no: Mapped[int] = mapped_column(Integer)  # monotonic per tenant; same-time moves order correctly
+    direction: Mapped[str] = mapped_column(String(3))  # in | out
+    amount_cents: Mapped[int] = mapped_column(BigInteger)
+    reason_code: Mapped[str] = mapped_column(String(32))
+    reason_text: Mapped[str] = mapped_column(String(300))
+    actor: Mapped[str] = mapped_column(String(64))
+    approval_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime]
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_drawer_cash_move_key"),
+        UniqueConstraint("tenant_id", "sequence_no", name="uq_drawer_cash_move_seq"),
     )
 
 
@@ -1149,6 +1180,7 @@ class EdgeSyncState(Base):
 
 
 APPEND_ONLY = (Sale, SaleLine, Refund, RefundLine, OutboxEvent, KitchenTicketLine, AuthEvent, StockMovement,
+               DrawerCashMovement,
                BankTransaction, DeviceJournalEntry)
 
 

@@ -18,6 +18,7 @@ from . import events
 from .config import Settings
 from .models import (
     DrawerSession,
+    DrawerCashMovement,
     OutboxEvent,
     Product,
     Refund,
@@ -283,7 +284,96 @@ def _expected_cash_expr():
         DrawerSession.opening_float_cents
         + DrawerSession.cash_sales_cents
         - DrawerSession.cash_refunds_cents
+        + DrawerSession.cash_in_cents
+        - DrawerSession.cash_out_cents
     )
+
+
+def cash_movement_hash(drawer_id: int, direction: str, amount_cents: int,
+                       reason_code: str, reason_text: str) -> str:
+    """Server-bound step-up proof and idempotency payload fingerprint."""
+    return _sha256(_canonical({"drawer_id": drawer_id, "direction": direction,
+                               "amount_cents": amount_cents, "reason_code": reason_code,
+                               "reason_text": reason_text.strip()}))
+
+
+def list_cash_movements(s: Session, tenant_id: str, drawer_id: int) -> list[DrawerCashMovement]:
+    get_drawer(s, tenant_id, drawer_id)
+    return list(s.scalars(select(DrawerCashMovement)
+                          .where(DrawerCashMovement.tenant_id == tenant_id,
+                                 DrawerCashMovement.drawer_session_id == drawer_id)
+                          .order_by(DrawerCashMovement.sequence_no).limit(1000)))
+
+
+def record_cash_movement(s: Session, tenant_id: str, drawer_id: int, *,
+                         direction: str, amount_cents: int, reason_code: str,
+                         reason_text: str, actor: str, idempotency_key: str,
+                         now: datetime, approval_id: str | None = None) -> DrawerCashMovement:
+    """Append a physical cash-custody movement, never revenue.
+
+    Insertion and the guarded drawer counter update share one transaction.
+    A repeated command key returns the same movement. Concurrent duplicate
+    inserts arbitrate on the database unique index (not a SELECT race).
+    """
+    reason_text = reason_text.strip()
+    if direction not in ("in", "out") or amount_cents <= 0:
+        raise DomainError("cash movement needs an in/out direction and positive amount")
+    if not reason_text:
+        raise DomainError("cash movement reason is required")
+    req_hash = cash_movement_hash(drawer_id, direction, amount_cents, reason_code, reason_text)
+    old = s.scalar(select(DrawerCashMovement).where(
+        DrawerCashMovement.tenant_id == tenant_id, DrawerCashMovement.idempotency_key == idempotency_key))
+    if old is not None:
+        if old.request_hash != req_hash:
+            raise IdempotencyConflict("the movement key was already used for a different operation")
+        return old
+
+    d = get_drawer(s, tenant_id, drawer_id)
+    from sqlalchemy.dialects import postgresql, sqlite
+    ins = (postgresql.insert if s.get_bind().dialect.name == "postgresql" else sqlite.insert)(DrawerCashMovement)
+    mid = str(uuid.uuid4())
+    seq = next_number(s, tenant_id, "drawer_cash", DrawerCashMovement, DrawerCashMovement.sequence_no)
+    stmt = ins.values(id=mid, tenant_id=tenant_id, register_id=d.register_id, sequence_no=seq,
+                      drawer_session_id=drawer_id, direction=direction, amount_cents=amount_cents,
+                      reason_code=reason_code, reason_text=reason_text, actor=actor,
+                      approval_id=approval_id, idempotency_key=idempotency_key,
+                      request_hash=req_hash, created_at=now).on_conflict_do_nothing(
+                          index_elements=[DrawerCashMovement.tenant_id, DrawerCashMovement.idempotency_key]
+                      ).returning(DrawerCashMovement.id)
+    inserted = s.execute(stmt).scalar_one_or_none()
+    if inserted is None:
+        old = s.scalar(select(DrawerCashMovement).where(
+            DrawerCashMovement.tenant_id == tenant_id, DrawerCashMovement.idempotency_key == idempotency_key))
+        if old is None or old.request_hash != req_hash:
+            raise IdempotencyConflict("the movement key was already used for a different operation")
+        return old
+
+    conditions = [DrawerSession.id == drawer_id,
+                  DrawerSession.tenant_id == tenant_id,
+                  DrawerSession.status == "open"]
+    if direction == "out":
+        conditions.append(_expected_cash_expr() >= amount_cents)
+    values = ({"cash_in_cents": DrawerSession.cash_in_cents + amount_cents}
+              if direction == "in" else
+              {"cash_out_cents": DrawerSession.cash_out_cents + amount_cents})
+    count = s.execute(update(DrawerSession).where(*conditions).values(**values)
+                      .execution_options(synchronize_session=False)).rowcount
+    if count != 1:
+        s.rollback()
+        if direction == "out" and d.status == "open":
+            raise InsufficientDrawerCash("not enough physical cash in the drawer")
+        raise NoOpenDrawer("the drawer is closed or unavailable")
+
+    # Reconcile the cached physical movement totals against the immutable ledger.
+    # These are physical cash custody events, NOT pos.sale.completed or VAT.
+    events.emit(s, tenant_id=tenant_id, type="drawer.cash.moved", payload={
+        "movement_id": mid, "drawer_id": drawer_id, "register_id": d.register_id,
+        "direction": direction, "amount_cents": amount_cents, "reason_code": reason_code,
+        "actor": actor, "approval_id": approval_id
+    }, aggregate_type="drawer_cash_movement", aggregate_id=mid, aggregate_version=1, now=now,
+       location_id=d.register.location_id)
+    s.commit()
+    return s.get(DrawerCashMovement, mid)
 
 
 def get_drawer(s: Session, tenant_id: str, drawer_id: int) -> DrawerSession:
@@ -381,6 +471,17 @@ def close_drawer(
             f"drawer refund total {d.cash_refunds_cents}/{d.refund_count} != "
             f"ledger {ref_total}/{ref_n}"
         )
+    # Physical cash IN/OUT is a distinct immutable ledger; do not close if
+    # somebody altered the cached drawer counters or dropped a movement.
+    for direction, expected in (("in", d.cash_in_cents), ("out", d.cash_out_cents)):
+        posted = s.scalar(select(func.coalesce(func.sum(DrawerCashMovement.amount_cents), 0))
+                          .where(DrawerCashMovement.tenant_id == tenant_id,
+                                 DrawerCashMovement.drawer_session_id == drawer_id,
+                                 DrawerCashMovement.direction == direction)) or 0
+        if int(posted) != int(expected):
+            s.rollback()
+            raise LedgerMismatch("physical cash custody movements disagree with drawer counters")
+
     variance = d.variance_cents
     if variance and variance_allowed is not None and not variance_allowed(s, d):
         s.rollback()

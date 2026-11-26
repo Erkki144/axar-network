@@ -52,6 +52,7 @@ Märgid tabelites: ✅ olemas koodis ja testitud · ◐ osaliselt · ☐ puudu (
 | Refund / credit + lines (+ stock disposition) | POS | till with approval | `pos.refund.completed` | R4, R5, R6 | ◐ (cash only; disposition #48) |
 | Tender / payment | PAYMENTS | till, terminal, bank import | `payment.*` | R3, R12 | ◐ (simulated) |
 | Drawer session | POS | till open / close | `drawer.opened`, `drawer.closed` | R1 | ✅ |
+| Drawer cash movement (safe drop, float top-up, deposit) | POS | till / office, manager step-up for OUT | `drawer.cash.moved` | R1 (running in/out = ledger; closing expected includes them) | ✅ #68 (online tills only; not in books export yet → P1-3; offline tills → P2-1) |
 | Order + kitchen ticket | ORDERS / KDS | till, guest | `order.*`, `kitchen.ticket.*` | R11 | ✅ |
 | Stock movement (receipt, consumption, production, write-off, count, transfer) | INVENTORY | office doc, sale consumer | `stock.changed` → `stock.movement.posted` | R9, R10 | ◐ (no count / write-off / transfer) |
 | Purchase document (delivery note / invoice / order / credit) | INVENTORY | office, EDI | `inventory.document.accepted` | R10 | ◐ (no event name yet) |
