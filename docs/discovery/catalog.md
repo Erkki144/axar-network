@@ -149,7 +149,114 @@ salvestamata väärtust, vajutasin „Katkesta“ ja kontrollisin, et midagi ei 
 4. **Allergeenid:** kas need peavad olema menüüs ja tšekil kohe piloodis?
 5. **Hinnamuudatuste kinnitamine:** kas hinnamuudatus vajab teise inimese kinnitust või piisab juhi õigusest?
 
-## 7. Mis läheb P1-1 alla (ettepanek)
+## 7. Lisandused tootja juhendist (26.11.2026)
+
+### 7.1 Tooterühm on rohkem kui kaust
+- **Rühma seaded:** nimi, alamrühmad, **köögi- ja baariprinterid** (tellimuse suunamine käib rühma järgi), **müügipunktid, kus rühma tooteid müüakse**,
+  automaatne kassanupp (ei lisa / lisab rühma nupu / lisab rühma iga uue toote valitud paneelidele).
+- Rühma ei saa kustutada, kui selles on tooteid. Enne tuleb tooted ümber tõsta.
+- **AXAR:** rühm annab vaikeväärtused (maksukategooria, köögijaam, müügipunktid, kassanupu reegel, raamatupidamise konto). Toode võib neid üle kirjutada.
+  Köögijaama saab määrata ka **tootele** (turul ainult rühmale: üks erand nõuab uut rühma).
+
+### 7.2 Komponendid ja ühikud
+- Turul on komponent tavaline toode, millel on „peida kassast“ märge. Iga komponent vajab ostuühikut ja retsepti mõõtühikut koos suhtega. Neli tüüpilist juhtu:
+  - ostetakse kg, retseptis g;
+  - ostetakse l, retseptis ml;
+  - ostetakse tükk, retseptis g (purk 300 g);
+  - ostetakse pakk, retseptis tk (munad karbis).
+- Alkoholi soovitus: laos liitrites, retseptis sentiliitrites. Siis ei sõltu arvestus pudeli suurusest.
+- **AXAR:** see on meil juba **laokaup** (`Item`) põhiühikuga. Lisame **ühikuteisendused** laokaubale (ostuühik → põhiühik → retsepti ühik) ja
+  **tarnija pakendi suhte** tarnija seosesse (500 g pakk → 0,5 kg). Komponenti ei pea tegema müügitooteks.
+
+### 7.3 Lisandid ja erisoovid (puuduvad AXAR-is)
+- Kaks grupi liiki:
+  - **lisandid** (nt garneering), millel võib olla hind;
+  - **erisoovid** (nt küpsetusaste), kus on valikud või vaba tekst.
+- Grupi seaded:
+  - aken avaneb toote lisamisel automaatselt;
+  - mitu valikut ja maksimumarv;
+  - piirang müügipunktide kaupa;
+  - hind hinnakirjast (kui hind puudub, on lisand tasuta);
+  - vaba teksti lubamine.
+- Valikute järjekord on sama, mis kassas.
+- **Oht:** grupp, mis pole ühegi tootega seotud, kehtib **kõigile toodetele**.
+- Veebimenüüd vajavad lisandigrupis vaikimisi valikut.
+- **AXAR (P1-5 / P2):** `modifier_group` (liik, min / max valikuid, vaikimisi valik, vaba tekst, müügipunktid) → `modifier` (nimi, hinnamuutus, laokulu retseptina).
+  **Seos peab alati olema selgesõnaline**, „kehtib kõigile“ vaikimisi ei ole. Valitud lisand on tellimuse- ja müügireal alamreana koos hinna ja laokuluga.
+  Köök näeb lisandeid ja erisoove piletil.
+
+### 7.4 Variatsioonid
+- Omadused (värv, suurus) ja nende väärtused. Variatsioonidega tootel on tüüp „varieeruv toode“. Salvestamisel luuakse kõik kombinatsioonid eraldi toodetena,
+  mis pärivad põhitoote numbri ja hinna. Hulgitegevused: lähtesta põhitoote järgi, nimi valemist, vöötkoodid, hind, deaktiveerimine.
+- **Oht:** lähtestamine kirjutab üle variandi käsitsi muudetud hinna.
+- **AXAR (P3, jaekaubandus):** sama mudel. Lähtestamise eelvaade näitab, mida see üle kirjutab.
+
+### 7.5 Kinkekaardid
+- Kinkekaart on toode tüübiga „kinkekaart“ ja reegel:
+  - kasutuskordade arv (0 = piiramatu);
+  - vaikeväärtus (tühi = müügihind);
+  - kehtivus päevades või kindel kuupäev;
+  - osaline kasutus;
+  - korduvkasutus;
+  - number genereeritakse või loetakse müügil;
+  - trükk kassas.
+- Numbreid saab ette genereerida trükikojale. Number aktiveerub alles müügil.
+- Lunastamine käib makseviisina: kaart ilmub arvele negatiivse reana. Aruanne näitab väljastatud, kasutatud ja aegunud kaarte.
+- Digitaalne kinkekaart (Apple / Google Wallet) näitab jääki reaalajas. Kaarte saab ka ajastatult klientidele saata (0 € arvega).
+- **AXAR (P3):**
+  - kinkekaardi müük **ei ole tulu**, vaid kohustus (ettemaks);
+  - lunastamine on makseviis;
+  - müük läheb raamatupidamisse ettemaksu kontole;
+  - turu juhend ei kirjelda raamatupidamise poolt üldse.
+
+### 7.6 Hinnakirjade tegevused (täpsustab §3)
+- **Hinnakirja väljad:** nimi, **ümardus**, käibemaks % (vt L1), müügipunktid koos **kehtivusvahemikuga**.
+- **„Arvuta“:** uued hinnad = keskmine laohind × (1 + kate %), kus keskmine laohind on keskmine üle ladude. Ulatus: kõik tooted / ainult hinnaga tooted / ainult hinnata tooted.
+  Hind muudetakse ainult siis, kui muutus ületab künnise.
+- **„Kopeeri“:** teisest hinnakirjast protsendi või koefitsiendiga.
+- **„Kustuta“:** kustutab filtri ulatuses.
+- **Taastamine:** logis on kuupäev, hinnakiri, kasutaja ja tegevus. Hinnad saab taastada tegevuse eelsesse seisu.
+- **Vastuseta jääb:** mis juhtub, kui kaks hinnakirja kattuvad samas müügipunktis.
+- **AXAR:**
+  - hulgitegevused (arvuta, kopeeri, % muutus, ümardus) loovad **ühe mustandi**, millele järgneb eelvaade ja avaldamine kehtivuskuupäevaga;
+  - „taastamine“ on uus versioon, mitte ajaloo ülekirjutus;
+  - hinnakirjade kattumise reegel on selgesõnaline: prioriteet + tellimuse tüüp, kattumine on keelatud.
+
+### 7.7 Toodete import
+- CSV-faili veergude järjekord on vaba. Kohustuslikud on vöötkood või tootenumber ning nimi. Soovituslikud on hind KM-ga ja rühm (rühm luuakse, kui seda pole).
+- Valikud:
+  - identifikaator;
+  - hinnakiri;
+  - kas importida uusi tooteid;
+  - kas uued tooted on aktiivsed;
+  - kas uuendada olemasolevaid;
+  - **kas kirjutada tühjaga üle**;
+  - kas uuendada hindu;
+  - kas aktiveerida deaktiveeritud tooted;
+  - kas nõuda hinda;
+  - tarnija info;
+  - kas jätta päis vahele.
+- Seadistuse saab salvestada profiilina (privaatne või vaikimisi). Vigased read jäetakse vahele.
+- **AXAR (P2-8):** sama paindlikkus, aga:
+  - proovikäivitus ja erinevuste aruanne;
+  - tühi lahter ei kustuta;
+  - kogu import on üks tehing, mida saab tagasi võtta;
+  - impordiprofiilid on olemas ka teiste kassasüsteemide formaatide jaoks.
+
+### 7.8 Veebimenüüd ja kanalid
+- **Kullerimenüü (Bolt / Wolt):**
+  - eraldi menüü oma rühmadega (pole seotud tooterühmadega);
+  - hind kullerihinnakirjast;
+  - ajaline saadavus;
+  - saadavus platvormi kaupa;
+  - paus (nt kui toode on otsas);
+  - **automaatne paus, kui laos otsas**.
+- Kui menüüd hallatakse kassasüsteemist, on platvormi menüü lukus.
+- **QR- ja veebitellimus:** nähtavad rühmad ja tooted, müügi tüüp (eeltellimus / lauast), keskmine valmistamisaeg, QR-tellimise paus kuni kellaajani.
+- **AXAR (#40, #18):** üks menüü-register, kus **kanal** on omadus (kassa, QR, veeb, kuller X). Saadavus ja paus on reaalajas sündmused
+  (`catalog.availability.changed`), mitte iga kanali eraldi seadistus.
+
+## 8. Mis läheb P1-1 alla (ettepanek)
 
 1. Tooterühmade puu ja tootekaart (§2: nimi, lühend, rühm, tüüp `standard` / `system`, number, vöötkoodid, maksukategooria, `stock_mode`, aktiivne, peidetud, kanalid, kirjeldus, allergeenid).
 2. Üks hinnakiri + hinnaversioonid `valid_from`-iga, mõju eelvaade, sündmus `pricing.price.published`, reegel R14.
