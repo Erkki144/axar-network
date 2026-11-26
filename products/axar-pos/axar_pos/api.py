@@ -1198,8 +1198,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             r = DrawerCashMoveApprovalRequest.model_validate(body.request)
             if r.direction != "out" or not who.can("drawer"):
                 raise services.Forbidden("only drawer cash-out requests can be approved")
-            d = services.get_drawer(s, who.tenant_id, r.drawer_id)
-            till_register(who, d.register_id)
+            drawer = services.get_drawer(s, who.tenant_id, r.drawer_id)
+            till_register(who, drawer.register_id)
             req_hash = services.cash_movement_hash(r.drawer_id, r.direction, r.amount_cents,
                                                    r.reason_code, r.reason_text)
         a = auth.create_approval(s, who, device=d, action=body.action, request_hash=req_hash,
