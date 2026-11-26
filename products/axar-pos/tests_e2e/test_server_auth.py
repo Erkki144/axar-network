@@ -176,3 +176,37 @@ def test_kitchen_view_respects_permissions(till, auth_server):
     expect(ticket.locator("button.ticket-ready")).to_be_hidden()
     till.click('[data-mode="manager"]')
     expect(till.locator("#report")).to_contain_text("ainult juht")
+
+
+def test_office_needs_a_back_office_login_and_keeps_the_till_session(till, auth_server):
+    """#60 P0-2: tenant-wide office actions need password + TOTP even for a
+    PIN-logged manager; a failed or expired office login never locks the till."""
+    login(till, "Kati", "4829")
+    expect(till.locator('[data-mode="office"]')).to_be_hidden()      # cashier: no office
+    till.click("#lock-button")
+    login(till, "Mart", "7351")
+    expect(till.locator('[data-mode="office"]')).to_be_visible()
+    till.click('[data-mode="office"]')
+    expect(till.locator("#office-login")).to_be_visible()
+    till.fill("#office-login", "owner")
+    till.fill("#office-password", OWNER_PW)
+    till.fill("#office-totp", "000000")
+    till.click("#office-login-submit")
+    expect(till.locator("#office-body .dialog-error")).not_to_be_empty()
+    expect(till.locator("#auth-screen")).to_be_hidden()               # the till session is still there
+    step = int(time.time()) // 30 + 1                                 # newer than the fixture's login step
+    till.fill("#office-login", "owner")
+    till.fill("#office-password", OWNER_PW)
+    till.fill("#office-totp", auth.totp_at(auth_server.env["_TOTP"], step))
+    till.click("#office-login-submit")
+    till.click("#recon-run")
+    expect(till.locator("#recon-list .recon-row")).to_have_count(13)
+    expect(till.locator("#recon-list .recon-row.fail")).to_have_count(0)
+    till.click("#office-tab-settings")
+    expect(till.locator("#offline-limit")).to_have_value("72")
+    expect(till.locator("#cashier-name")).to_have_text("Mart")
+    # Locking the till ends the office session too: the next person must log in again.
+    till.click("#lock-button")
+    login(till, "Mart", "7351")
+    till.click('[data-mode="office"]')
+    expect(till.locator("#office-login")).to_be_visible()

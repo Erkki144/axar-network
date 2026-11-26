@@ -83,7 +83,7 @@ def test_ui_has_no_client_side_money_authority():
     assert src.count("await runMoneyOperation(") == 4
     # Every other write is a NON-money endpoint; money paths are only ever sent
     # as rec.path from the journal (sale, table bill payment, refund).
-    writes = re.findall(r"api\((`[^`]*`|'[^']*'|[\w.]+), \{ method: '(POST|PUT)'", src)
+    writes = re.findall(r"(?:api|call)\((`[^`]*`|'[^']*'|[\w.]+), \{ method: '(POST|PUT)'", src)
     paths = sorted(p for p, _ in writes)
     assert paths == sorted([
         "rec.path",
@@ -99,6 +99,9 @@ def test_ui_has_no_client_side_money_authority():
         "'/api/v1/inventory/recipes'",
         # C3: ask the (mock) provider about a lost card answer; creates no money
         "`/api/v1/payments/${paymentId}/reconcile`",
+        # office (#60 P0-2): back-office login / logout, POS settings, offline review queue
+        "'/api/v1/auth/login'", "'/api/v1/auth/logout'", "'/api/v1/admin/pos-settings'",
+        "`/api/v1/sync/quarantine/${r.id}/retry`", "`/api/v1/sync/quarantine/${r.id}/dismiss`",
     ]), paths
     assert src.count("method: 'POST'") + src.count("method: 'PUT'") == len(writes)
     for money in ("/api/v1/sales/cash'", "/pay-cash`", "/refunds`", "/payments`"):

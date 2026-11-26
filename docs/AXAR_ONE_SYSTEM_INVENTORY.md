@@ -158,14 +158,14 @@ The till/office UI (`static/one/*.mjs`) calls the routes below. The following ro
 
 | Route group | Used by UI | Consequence |
 | --- | --- | --- |
-| `/api/v1/admin/pos-settings` (offline limit) | no | owner decision "limit set in the POS settings screen" is **not met in the UI** |
-| `/api/v1/sync/quarantine` (+ retry / dismiss) | no | a manager cannot review offline entries without a tool |
+| `/api/v1/admin/pos-settings` (offline limit) | **yes since P0-2** (office → Kassa seaded) | owner decision met in the UI |
+| `/api/v1/sync/quarantine` (+ retry / dismiss) | **yes since P0-2** (office → Võrguühenduseta kirjed) | — |
 | `/api/v1/receivables/*` (invoices, bank import) | no | bank matching is API-only |
 | `/api/v1/payments/{id}/reconcile` (unknown card result) | yes (bill screen) | — |
 | `/api/v1/admin/staff`, `/devices`, `/enrollment-codes` | no | staff and devices are set up through the API |
 | `/api/v1/admin/registers/{id}/receipt-series`, `/journal/verify` | no | — |
 | `/api/v1/admin/event-health`, `/admin/auth-events` | no | no health screen (NERVE) |
-| `/api/v1/admin/reconciliation`, `/admin/trace/sales/{id}` (this PR) | no | next UI step (roadmap P1-3) |
+| `/api/v1/admin/reconciliation`, `/admin/trace/sales/{id}` | **yes since P0-2** (office → Kooskõla) | — |
 | `/api/v1/inventory/production`, `/returns`, `/margin`, `/reconciliation` | partly | — |
 
 ## 5. Pull requests and issues
