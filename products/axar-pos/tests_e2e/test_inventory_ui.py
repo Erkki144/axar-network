@@ -71,7 +71,14 @@ def test_invoice_to_stock_to_recipe_to_sale(page):
     page.locator("button.inv-offer[data-offer='Päevasupp']").click()
     rl = page.locator(".recipe-line").first
     rl.locator("select").select_option(label="Kartul (kg)")
+    rl.locator("input").fill("0..2")                                  # typo: the row is named and marked
+    expect(page.locator("#recipe-cost")).to_contain_text("Kartul: „0..2“ ei ole kogus")
+    expect(rl.locator("input")).to_have_attribute("aria-invalid", "true")
+    page.click("#recipe-save")
+    expect(page.locator("#recipe-editor")).to_contain_text("Salvestamata: Kartul: „0..2“ ei ole kogus")
+    expect(page.locator("#recipe-editor")).not_to_contain_text("Kehtiv versioon")
     rl.locator("input").fill("0,2")
+    expect(rl.locator("input")).not_to_have_attribute("aria-invalid", "true")
     expect(page.locator("#cost-per-portion")).to_have_text("1,00 €")
     expect(page.locator("#price-net")).to_have_text("4,76 €")          # 5,90 incl. 24 % VAT
     expect(page.locator("#margin")).to_have_text("3,76 €")

@@ -268,8 +268,9 @@ export function createInventory({ api, el, stateBox, announce, ApiError }) {
     const result = el('div', 'inv-cost'); result.id = 'recipe-cost'; result.setAttribute('role', 'status');
     let timer = null;
     const preview = () => { clearTimeout(timer); timer = setTimeout(async () => {
-      const lines = readRecipeLines(rows);
-      if (lines === null) { result.replaceChildren(el('p', 'dialog-error', 'Kontrolli kogused (nt 0,2).')); return; }
+      const { lines, problems } = readRecipeLines(rows);
+      if (problems.length) { result.replaceChildren(...problems.map((x) => el('p', 'dialog-error', x))); return; }
+      if (!lines.length) { result.replaceChildren(); return; }
       try {
         const { data } = await api('/api/v1/inventory/recipes/preview', { method: 'POST', body: { product_id: offer.id, lines } });
         renderCost(result, data);
@@ -293,8 +294,10 @@ export function createInventory({ api, el, stateBox, announce, ApiError }) {
     const msg = el('div', 'dialog-error'); msg.setAttribute('role', 'alert');
     const save = el('button', 'primary-btn', 'Salvesta uus versioon'); save.type = 'button'; save.id = 'recipe-save';
     save.addEventListener('click', async () => {
-      const lines = readRecipeLines(rows);
-      if (!lines || !lines.length) { msg.textContent = 'Lisa vähemalt üks koostisosa koos kogusega.'; return; }
+      const { lines, problems } = readRecipeLines(rows);
+      if (problems.length) { msg.textContent = `Salvestamata: ${problems.join(' ')}`; return; }
+      if (!lines.length) { msg.textContent = 'Lisa vähemalt üks koostisosa koos kogusega.'; return; }
+      msg.textContent = '';
       save.disabled = true;
       try {
         await api('/api/v1/inventory/recipes', { method: 'POST', body: { product_id: offer.id, lines, valid_from: today() } });
@@ -305,15 +308,26 @@ export function createInventory({ api, el, stateBox, announce, ApiError }) {
     preview();
   }
 
+  /** Recipe rows -> {lines, problems}. Every problem names its ingredient and
+   * marks its field, so the user sees exactly which row to fix. */
   function readRecipeLines(rows) {
-    const out = [];
+    const lines = []; const problems = [];
     for (const row of rows.querySelectorAll('.recipe-line')) {
-      const id = Number(row.querySelector('select').value); const raw = row.querySelector('input').value;
-      if (!id && !raw.trim()) continue;
-      const q = parseQty(raw); if (!id || q === null) return null;
-      out.push({ item_id: id, qty_micro: q });
+      const sel = row.querySelector('select'); const input = row.querySelector('input');
+      const id = Number(sel.value); const raw = input.value.trim();
+      input.classList.remove('invalid'); input.removeAttribute('aria-invalid');
+      sel.classList.remove('invalid'); sel.removeAttribute('aria-invalid');
+      if (!id && !raw) continue;
+      const name = id ? (item(id)?.name || 'Koostisosa') : 'Koostisosa';
+      if (!id) { problems.push(`Vali koostisosa kogusele „${raw}“.`); sel.classList.add('invalid'); sel.setAttribute('aria-invalid', 'true'); continue; }
+      const q = parseQty(raw);
+      if (q === null) {
+        problems.push(raw ? `${name}: „${raw}“ ei ole kogus. Kirjuta näiteks 0,5.` : `${name}: kogus puudub.`);
+        input.classList.add('invalid'); input.setAttribute('aria-invalid', 'true'); continue;
+      }
+      lines.push({ item_id: id, qty_micro: q });
     }
-    return out;
+    return { lines, problems };
   }
 
   function renderCost(box, d) {

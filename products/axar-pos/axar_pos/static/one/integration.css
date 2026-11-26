@@ -110,3 +110,6 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 .offline-banner.warn{background:#fff4dc;color:#7a4b06;border:1px solid #f0d49a}
 .offline-banner.blocked{background:#fde8e8;color:#8f1d1d;border:1px solid #f1b8b8}
 @media(max-width:640px){.offline-banner{margin:10px 17px 0}}
+
+/* A field the user must fix (recipe quantities etc.) */
+.inv-line input.invalid,.inv-line select.invalid{border-color:#b42318;box-shadow:0 0 0 2px #fdecec}
