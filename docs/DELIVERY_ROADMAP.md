@@ -33,6 +33,9 @@
 
 Piloot (P3-3) ootab nüüd ka sammude P1-6, P1-7 ja P1-8 valmimist.
 
+**Kuidas iga samm sünnib** (rollid, etapid, väravad, tööriistad): `products/axar-one/architecture/13-delivery-journey.md`.
+**Registrite kaart ja muudatuste teekonnad:** `products/axar-one/architecture/12-register-map-and-journeys.md` ja ADR-0015.
+
 **Järgmine PR (P0-2):** kontoriekraan kolmele funktsioonile, millel praegu on ainult API:
 - **kassa seaded** — offline-piirang, omaniku otsus;
 - **võrguühenduseta kirjete läbivaatus** — kordamine või tagasilükkamine;

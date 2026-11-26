@@ -20,6 +20,9 @@ This is deliverable (1): the actual gap audit, ADRs, contracts and dependency DA
 | [06-trust-and-permissions.md](06-trust-and-permissions.md) | trust boundaries, secrets, PII |
 | [07-failure-and-recovery.md](07-failure-and-recovery.md) | failure → today's evidence → target |
 | [08-requirements-to-tests.md](08-requirements-to-tests.md) | issue requirements → tests; proposed measurable targets |
+| [11-surfaces-and-realms.md](11-surfaces-and-realms.md) | **four surfaces** (platform, office, till, screens) on one core; three identity realms |
+| [12-register-map-and-journeys.md](12-register-map-and-journeys.md) | **register map** (master data, transactions, derived) and change journeys J1–J10 |
+| [13-delivery-journey.md](13-delivery-journey.md) | **how work is delivered**: roles, 7 stages with gates, tools, naming, discovery template |
 | [10-threat-model-sec0.md](10-threat-model-sec0.md) | **SEC-0** threat model (STRIDE), controls with tests, security risk register (#34) |
 | [adr/](adr/) | ADR-0002 … ADR-0011 (ADR-0001 = `products/axar-pos/docs/ARCHITECTURE.md`) |
 | [contracts/events/](contracts/events/) | JSON Schemas: v1 payloads (enforced by `products/axar-pos/tests/test_event_contracts.py`), v2 envelope (proposed) |
