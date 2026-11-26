@@ -623,7 +623,10 @@
       "existing_api_main": null,
       "permission_candidate": "drawer.cash.in",
       "degraded_mode": "APPROVAL",
-      "work_note": "issue #68 source"
+      "work_note": "issue #68 source",
+      "draft_pr": 71,
+      "implemented_permission": "drawer",
+      "draft_feature": "cash IN/OUT backend + cashier dialog + manager-step-up; CI pending"
     },
     {
       "action_id": "C03",
@@ -633,7 +636,10 @@
       "existing_api_main": null,
       "permission_candidate": "drawer.cash.out",
       "degraded_mode": "APPROVAL",
-      "work_note": "issue #68 source"
+      "work_note": "issue #68 source",
+      "draft_pr": 71,
+      "implemented_permission": "drawer",
+      "draft_feature": "cash IN/OUT backend + cashier dialog + manager-step-up; CI pending"
     },
     {
       "action_id": "C04",
