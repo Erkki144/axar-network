@@ -1,0 +1,809 @@
+{
+  "schema_version": 1,
+  "created": "2026-11-26",
+  "issue": 68,
+  "source": "Ektaco CC5 cashier official 7 articles + screenshots, and AXAR main backend/static/one routes as of 2026-11-26",
+  "status_note": "Conservative research classification; MAIN_UI means component exists, not real hardware or 10-outlet production ready. Draft PR #63-#66 may add functions and must be rechecked; no action marked implemented based on Ektaco alone.",
+  "actions": [
+    {
+      "action_id": "S01",
+      "group": "nav",
+      "label": "Kiirmüük",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "GET /api/v1/products",
+      "permission_candidate": "sale",
+      "degraded_mode": "EDGE_ONLY",
+      "work_note": "tooteotsing ja kassakorv"
+    },
+    {
+      "action_id": "S02",
+      "group": "nav",
+      "label": "Avatud arved",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "GET /api/v1/tables; GET /api/v1/orders/{id}",
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "praegu laudade põhine, mitte üldine jagatavate arvete register"
+    },
+    {
+      "action_id": "S03",
+      "group": "nav",
+      "label": "Lauad ja saaliplaan",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "GET /api/v1/tables",
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "nimekiri olemas; mitmekorruseline graafiline plaan puudub"
+    },
+    {
+      "action_id": "S04",
+      "group": "nav",
+      "label": "Veebitellimused",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "orders",
+      "degraded_mode": "DISABLED",
+      "work_note": "Wolt/Bolt/QR vastuvõtu inbox"
+    },
+    {
+      "action_id": "S05",
+      "group": "nav",
+      "label": "Köök / KDS",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "GET /api/v1/kitchen/tickets",
+      "permission_candidate": "kitchen.read",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "KDS demo andmeid kontrollida; päris seade tõendamata"
+    },
+    {
+      "action_id": "S06",
+      "group": "nav",
+      "label": "Kliendi järjekord / QDS",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "kitchen.read",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "avalik pickup ekraan eraldi KDS-ist"
+    },
+    {
+      "action_id": "S07",
+      "group": "nav",
+      "label": "Tegevused",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "POST /api/v1/drawer/open; POST /api/v1/drawer/{id}/close",
+      "permission_candidate": "drawer",
+      "degraded_mode": "MANAGER_RESTRICTED",
+      "work_note": "kassa tööriistad ja rahaliikumised"
+    },
+    {
+      "action_id": "S08",
+      "group": "nav",
+      "label": "Arvete ajalugu",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "GET /api/v1/sales",
+      "permission_candidate": "sales.read",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "juhi vaade olemas, teenindaja kiire arveregister puudulik"
+    },
+    {
+      "action_id": "S09",
+      "group": "nav",
+      "label": "Juhi töölaud",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "GET /api/v1/reports/daily",
+      "permission_candidate": "reports",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "õigustega piiratud raport"
+    },
+    {
+      "action_id": "S10",
+      "group": "nav",
+      "label": "Ladu",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "GET /api/v1/inventory/stock",
+      "permission_candidate": "inventory",
+      "degraded_mode": "DISABLED",
+      "work_note": "eraldi lao töölaud"
+    },
+    {
+      "action_id": "S11",
+      "group": "nav",
+      "label": "Logi välja / lukusta",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "POST /api/v1/auth/logout",
+      "permission_candidate": "auth",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "kasutaja ja seadme lahus hoidmine"
+    },
+    {
+      "action_id": "T01",
+      "group": "topbar",
+      "label": "Objekt/müügikoht/kassa",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "GET /api/v1/registers",
+      "permission_candidate": "catalog.read",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "kuvatud nimi ja aktiivne kassa"
+    },
+    {
+      "action_id": "T02",
+      "group": "topbar",
+      "label": "Teenindaja/roll",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "GET /api/v1/auth/me",
+      "permission_candidate": "auth",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "õigused serverist"
+    },
+    {
+      "action_id": "T03",
+      "group": "topbar",
+      "label": "Võrk/offline ja sync järjekord",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "GET /api/v1/sync/status",
+      "permission_candidate": "auth",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "erista server, LAN, printer, terminal"
+    },
+    {
+      "action_id": "T04",
+      "group": "topbar",
+      "label": "Köögiseadme olek",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "kitchen.read",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "printer/KDS heartbeat ja teevaru"
+    },
+    {
+      "action_id": "T05",
+      "group": "topbar",
+      "label": "Terminali olek",
+      "code_baseline": "PROVIDER_DEPENDENT",
+      "existing_api_main": null,
+      "permission_candidate": "payments",
+      "degraded_mode": "DISABLED",
+      "work_note": "tegelik provider ID, approved/unknown"
+    },
+    {
+      "action_id": "T06",
+      "group": "topbar",
+      "label": "Kassa avatud/rahaline olek",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "GET /api/v1/registers/{id}/drawer",
+      "permission_candidate": "drawer",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "pimekassa ei näita summasid"
+    },
+    {
+      "action_id": "T07",
+      "group": "topbar",
+      "label": "Häirete loendur",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "audit",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "karantiin, mittesaadetud, ebaõnnestunud printer"
+    },
+    {
+      "action_id": "P01",
+      "group": "product",
+      "label": "Toote kategooriad/paneelid",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "GET /api/v1/products",
+      "permission_candidate": "catalog.read",
+      "degraded_mode": "LAST_APPROVED",
+      "work_note": "kontorist avaldatud paigutus veel puudu"
+    },
+    {
+      "action_id": "P02",
+      "group": "product",
+      "label": "Kiirtoote nupp",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "POST /api/v1/sales/quote",
+      "permission_candidate": "sale",
+      "degraded_mode": "LAST_APPROVED",
+      "work_note": "püsiv product ID ja server price"
+    },
+    {
+      "action_id": "P03",
+      "group": "product",
+      "label": "Otsi SKU/nime järgi",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "GET /api/v1/products",
+      "permission_candidate": "catalog.read",
+      "degraded_mode": "LAST_APPROVED",
+      "work_note": "ribakoodi tugi eraldi"
+    },
+    {
+      "action_id": "P04",
+      "group": "product",
+      "label": "Triipkood / kaalutoode",
+      "code_baseline": "PROVIDER_DEPENDENT",
+      "existing_api_main": null,
+      "permission_candidate": "sale",
+      "degraded_mode": "DEVICE_CAPABILITY",
+      "work_note": "scannerdraiver ja legal scale"
+    },
+    {
+      "action_id": "P05",
+      "group": "product",
+      "label": "Toote saadavus",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "catalog.read",
+      "degraded_mode": "LAST_APPROVED",
+      "work_note": "sold out vs paused vs scheduled"
+    },
+    {
+      "action_id": "P06",
+      "group": "product",
+      "label": "Suurus / variant",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "sale",
+      "degraded_mode": "LAST_APPROVED",
+      "work_note": "variant SKU / price / stock"
+    },
+    {
+      "action_id": "P07",
+      "group": "product",
+      "label": "Lisandid",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "sale",
+      "degraded_mode": "LAST_APPROVED",
+      "work_note": "server-side min-max validation and ingredient delta"
+    },
+    {
+      "action_id": "P08",
+      "group": "product",
+      "label": "Erisoov",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "kitchen instructions, allergen caution"
+    },
+    {
+      "action_id": "P09",
+      "group": "product",
+      "label": "Lemmikud / viimati valitud",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "sale",
+      "degraded_mode": "LAST_APPROVED",
+      "work_note": "kiirendus; mitte dünaamiline hind"
+    },
+    {
+      "action_id": "P10",
+      "group": "product",
+      "label": "Tühjenda ostukorv",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": null,
+      "permission_candidate": "sale",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "ainult kinnitamata korv"
+    },
+    {
+      "action_id": "B01",
+      "group": "bill",
+      "label": "Uus arve",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "POST /api/v1/tables/{id}/order",
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "tühja ja laua arve erinevad"
+    },
+    {
+      "action_id": "B02",
+      "group": "bill",
+      "label": "Arve number / tunnus / laud",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "GET /api/v1/orders/{id}",
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "tunnus ja käigud vajavad eraldi mudelit"
+    },
+    {
+      "action_id": "B03",
+      "group": "bill",
+      "label": "Muuda kogust +/-",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "PUT /api/v1/orders/{id}/lines",
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "arve olekuversiooni kontroll"
+    },
+    {
+      "action_id": "B04",
+      "group": "bill",
+      "label": "Kustuta rida",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "PUT /api/v1/orders/{id}/lines",
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "pärast kööki saatmist kompensatsioon"
+    },
+    {
+      "action_id": "B05",
+      "group": "bill",
+      "label": "Muuda külastajat",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "guest attribution"
+    },
+    {
+      "action_id": "B06",
+      "group": "bill",
+      "label": "Muuda käik",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "meal course / station routing"
+    },
+    {
+      "action_id": "B07",
+      "group": "bill",
+      "label": "Jaga arverida",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "üks köögitöö, mitu maksja osa"
+    },
+    {
+      "action_id": "B08",
+      "group": "bill",
+      "label": "Jaga arve",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "POST /api/v1/orders/{id}/payments",
+      "permission_candidate": "orders",
+      "degraded_mode": "DISABLED",
+      "work_note": "split tenders olemas; eraldi mitme arve split vajab mudelit"
+    },
+    {
+      "action_id": "B09",
+      "group": "bill",
+      "label": "Liida arved / anna üle",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "orders",
+      "degraded_mode": "DISABLED",
+      "work_note": "audit + optimistic locking"
+    },
+    {
+      "action_id": "B10",
+      "group": "bill",
+      "label": "Ühekordne erihind",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "pricing.override",
+      "degraded_mode": "DISABLED",
+      "work_note": "manager approval, immutable price snapshot"
+    },
+    {
+      "action_id": "B11",
+      "group": "bill",
+      "label": "Soodustus",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "discount.apply",
+      "degraded_mode": "DISABLED",
+      "work_note": "discount rule/scope + conflict"
+    },
+    {
+      "action_id": "B12",
+      "group": "bill",
+      "label": "Sooduskood",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "coupon.redeem",
+      "degraded_mode": "DISABLED",
+      "work_note": "server issued and validated"
+    },
+    {
+      "action_id": "B13",
+      "group": "bill",
+      "label": "Kliendikaart",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "loyalty",
+      "degraded_mode": "DISABLED",
+      "work_note": "online balance"
+    },
+    {
+      "action_id": "B14",
+      "group": "bill",
+      "label": "Käigud kööki / saada",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "POST /api/v1/orders/{id}/kitchen",
+      "permission_candidate": "orders",
+      "degraded_mode": "DEPENDENT_ON_KDS",
+      "work_note": "idempotent kitchen ticket"
+    },
+    {
+      "action_id": "B15",
+      "group": "bill",
+      "label": "Vahearve",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "orders",
+      "degraded_mode": "DEVICE_CAPABILITY",
+      "work_note": "non-fiscal preview does not post sale"
+    },
+    {
+      "action_id": "B16",
+      "group": "bill",
+      "label": "Muuda laud",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "GET /api/v1/tables",
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "table reassignment missing"
+    },
+    {
+      "action_id": "B17",
+      "group": "bill",
+      "label": "Tühista avatud arve",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "ordered vs prepared stock disposition"
+    },
+    {
+      "action_id": "B18",
+      "group": "bill",
+      "label": "Tühista osamakse",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "payments",
+      "degraded_mode": "DISABLED",
+      "work_note": "provider reversal vs accounting correction"
+    },
+    {
+      "action_id": "B19",
+      "group": "bill",
+      "label": "Lauateenindus -> kaasa",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "orders",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "service mode affects price/KDS/tax not historic"
+    },
+    {
+      "action_id": "M01",
+      "group": "payment",
+      "label": "Sularaha",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "POST /api/v1/sales/cash",
+      "permission_candidate": "sale",
+      "degraded_mode": "EDGE_ONLY",
+      "work_note": "drawer settled cash"
+    },
+    {
+      "action_id": "M02",
+      "group": "payment",
+      "label": "Sularahas saadud / tagasiraha",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "POST /api/v1/sales/quote; POST /api/v1/sales/cash",
+      "permission_candidate": "sale",
+      "degraded_mode": "EDGE_ONLY",
+      "work_note": "server authority rounding"
+    },
+    {
+      "action_id": "M03",
+      "group": "payment",
+      "label": "Kaardimakse",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "POST /api/v1/orders/{id}/payments",
+      "permission_candidate": "payments",
+      "degraded_mode": "PROVIDER_ONLY",
+      "work_note": "simulated; terminal adapter in draft PR #65"
+    },
+    {
+      "action_id": "M04",
+      "group": "payment",
+      "label": "Makse teadmata olek",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "POST /api/v1/payments/{id}/reconcile",
+      "permission_candidate": "payments",
+      "degraded_mode": "PROVIDER_ONLY",
+      "work_note": "no blind retry"
+    },
+    {
+      "action_id": "M05",
+      "group": "payment",
+      "label": "Pangaülekanne",
+      "code_baseline": "MAIN_API",
+      "existing_api_main": "POST /api/v1/orders/{id}/payments",
+      "permission_candidate": "orders",
+      "degraded_mode": "DISABLED",
+      "work_note": "customer receivable, not cash"
+    },
+    {
+      "action_id": "M06",
+      "group": "payment",
+      "label": "Wolt/Bolt custompay",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "orders",
+      "degraded_mode": "DISABLED",
+      "work_note": "channel holds funds, settlement separately"
+    },
+    {
+      "action_id": "M07",
+      "group": "payment",
+      "label": "Kinkekaart",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "storedvalue.redeem",
+      "degraded_mode": "DISABLED",
+      "work_note": "issue #70"
+    },
+    {
+      "action_id": "M08",
+      "group": "payment",
+      "label": "Kliendikrediit / boonus",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "loyalty.redeem",
+      "degraded_mode": "DISABLED",
+      "work_note": "authorization ledger"
+    },
+    {
+      "action_id": "M09",
+      "group": "payment",
+      "label": "Jootraha",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "tip.capture",
+      "degraded_mode": "DISABLED",
+      "work_note": "separate liability"
+    },
+    {
+      "action_id": "M10",
+      "group": "payment",
+      "label": "Prindi tšekk / koopia",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "GET /api/v1/sales/{id}/receipt.txt",
+      "permission_candidate": "sales.read",
+      "degraded_mode": "DEVICE_CAPABILITY",
+      "work_note": "text only, printer missing"
+    },
+    {
+      "action_id": "M11",
+      "group": "payment",
+      "label": "Saada arve e-postile",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "receipt.email",
+      "degraded_mode": "DISABLED",
+      "work_note": "delivery queue, not second invoice"
+    },
+    {
+      "action_id": "M12",
+      "group": "payment",
+      "label": "Tagastus",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "POST /api/v1/sales/{id}/refunds",
+      "permission_candidate": "refund.request",
+      "degraded_mode": "DISABLED",
+      "work_note": "only cash; restock/writeoff missing"
+    },
+    {
+      "action_id": "M13",
+      "group": "payment",
+      "label": "Kreedit/tühistus",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "invoice.void",
+      "degraded_mode": "DISABLED",
+      "work_note": "issue #48"
+    },
+    {
+      "action_id": "C01",
+      "group": "drawer",
+      "label": "Ava kassavahetus",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "POST /api/v1/drawer/open",
+      "permission_candidate": "drawer",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "opening float"
+    },
+    {
+      "action_id": "C02",
+      "group": "drawer",
+      "label": "Sularaha sisse",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "drawer.cash.in",
+      "degraded_mode": "APPROVAL",
+      "work_note": "issue #68 source"
+    },
+    {
+      "action_id": "C03",
+      "group": "drawer",
+      "label": "Sularaha välja / seifi",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "drawer.cash.out",
+      "degraded_mode": "APPROVAL",
+      "work_note": "issue #68 source"
+    },
+    {
+      "action_id": "C04",
+      "group": "drawer",
+      "label": "Vahe loenda/vaata",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "GET /api/v1/drawer/{id}",
+      "permission_candidate": "drawer",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "pimekassa needs redaction"
+    },
+    {
+      "action_id": "C05",
+      "group": "drawer",
+      "label": "Lõpeta teenindaja vahetus",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "staff.shift.close",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "employee shift distinct from drawer"
+    },
+    {
+      "action_id": "C06",
+      "group": "drawer",
+      "label": "Lõpeta kassavahetus",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "POST /api/v1/drawer/{id}/close",
+      "permission_candidate": "drawer",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "race safe closing"
+    },
+    {
+      "action_id": "C07",
+      "group": "drawer",
+      "label": "Seifi ülekande vastuvõtt",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "custody.accept",
+      "degraded_mode": "DISABLED",
+      "work_note": "two-sided confirmation"
+    },
+    {
+      "action_id": "C08",
+      "group": "drawer",
+      "label": "Rahahäire / puudu/üle",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "POST /api/v1/drawer/{id}/close",
+      "permission_candidate": "drawer",
+      "degraded_mode": "MANAGER_RESTRICTED",
+      "work_note": "manager variance approval"
+    },
+    {
+      "action_id": "D01",
+      "group": "device",
+      "label": "Terminal: kontrolli",
+      "code_baseline": "PROVIDER_DEPENDENT",
+      "existing_api_main": null,
+      "permission_candidate": "devices",
+      "degraded_mode": "DEVICE_CAPABILITY",
+      "work_note": "provider terminal handshake"
+    },
+    {
+      "action_id": "D02",
+      "group": "device",
+      "label": "Terminal: eelnevad tehingud",
+      "code_baseline": "PROVIDER_DEPENDENT",
+      "existing_api_main": null,
+      "permission_candidate": "payments",
+      "degraded_mode": "DEVICE_CAPABILITY",
+      "work_note": "provider retrieval"
+    },
+    {
+      "action_id": "D03",
+      "group": "device",
+      "label": "Terminal: korduskviitung",
+      "code_baseline": "PROVIDER_DEPENDENT",
+      "existing_api_main": null,
+      "permission_candidate": "devices",
+      "degraded_mode": "DEVICE_CAPABILITY",
+      "work_note": "not new charge"
+    },
+    {
+      "action_id": "D04",
+      "group": "device",
+      "label": "Terminal: tühista / tagasta",
+      "code_baseline": "PROVIDER_DEPENDENT",
+      "existing_api_main": null,
+      "permission_candidate": "refund.request",
+      "degraded_mode": "PROVIDER_ONLY",
+      "work_note": "reverse vs refund"
+    },
+    {
+      "action_id": "D05",
+      "group": "device",
+      "label": "Terminal: saada tehingud",
+      "code_baseline": "PROVIDER_DEPENDENT",
+      "existing_api_main": null,
+      "permission_candidate": "devices",
+      "degraded_mode": "PROVIDER_ONLY",
+      "work_note": "provider batch support may differ"
+    },
+    {
+      "action_id": "D06",
+      "group": "device",
+      "label": "Printeri test / järjekord",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "devices",
+      "degraded_mode": "DEVICE_CAPABILITY",
+      "work_note": "outbox+ack, ESC/POS bridge"
+    },
+    {
+      "action_id": "D07",
+      "group": "device",
+      "label": "Andmete värskendamine",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "GET /api/v1/products",
+      "permission_candidate": "catalog.read",
+      "degraded_mode": "LAST_APPROVED",
+      "work_note": "missing safe versioned publish/ACK"
+    },
+    {
+      "action_id": "D08",
+      "group": "device",
+      "label": "Andmete taastamine",
+      "code_baseline": "MISSING_MAIN",
+      "existing_api_main": null,
+      "permission_candidate": "devices.recover",
+      "degraded_mode": "MANAGER_RESTRICTED",
+      "work_note": "never silently erase unsynced journal"
+    },
+    {
+      "action_id": "D09",
+      "group": "device",
+      "label": "Offline tehingute järjekord",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "GET /api/v1/sync/status",
+      "permission_candidate": "drawer",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "quarantine screens in open PR #64"
+    },
+    {
+      "action_id": "D10",
+      "group": "device",
+      "label": "Seadme lukustus / välja logimine",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "POST /api/v1/auth/logout",
+      "permission_candidate": "auth",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "secrets protected"
+    },
+    {
+      "action_id": "D11",
+      "group": "device",
+      "label": "Müügi päeva / vahetuse aruanne",
+      "code_baseline": "MAIN_UI",
+      "existing_api_main": "GET /api/v1/reports/daily",
+      "permission_candidate": "reports",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "role bound"
+    },
+    {
+      "action_id": "D12",
+      "group": "device",
+      "label": "Arve otsing ja tagastuse ajalugu",
+      "code_baseline": "PARTIAL_MAIN",
+      "existing_api_main": "GET /api/v1/sales",
+      "permission_candidate": "sales.read",
+      "degraded_mode": "LOCAL_ONLY",
+      "work_note": "refund and receipt audit"
+    }
+  ]
+}

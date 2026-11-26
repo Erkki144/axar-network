@@ -78,11 +78,11 @@ def test_ui_has_no_client_side_money_authority():
     for forbidden in ("vatIncluded", "cashRounded", "cartSummary", "rateBp", "vat_from_gross"):
         assert forbidden not in src, forbidden
     # Every money POST goes through one function that always sends the
-    # journaled Idempotency-Key: sale, bill tender (C3), refund and recovery.
+    # journaled Idempotency-Key: sale, bill tender (C3), refund, cash move and recovery.
     assert "'Idempotency-Key': rec.key" in src
-    assert src.count("await runMoneyOperation(") == 4
+    assert src.count("await runMoneyOperation(") == 5  # #68 physical cash move uses the same durable journal
     # Every other write is a NON-money endpoint; money paths are only ever sent
-    # as rec.path from the journal (sale, table bill payment, refund).
+    # as rec.path from the journal (sale, bill payment, refund, cash movement).
     writes = re.findall(r"api\((`[^`]*`|'[^']*'|[\w.]+), \{ method: '(POST|PUT)'", src)
     paths = sorted(p for p, _ in writes)
     assert paths == sorted([

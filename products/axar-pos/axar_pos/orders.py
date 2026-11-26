@@ -277,7 +277,12 @@ def operation_status(s: Session, tenant_id: str, idempotency_key: str) -> dict:
     refund = s.scalar(select(Refund).where(Refund.tenant_id == tenant_id, Refund.idempotency_key == idempotency_key))
     if refund is not None:
         return {"status": "recorded", "kind": "refund", "id": refund.id}
-    from .models import Payment
+    from .models import DrawerCashMovement, Payment
+
+    cash = s.scalar(select(DrawerCashMovement).where(DrawerCashMovement.tenant_id == tenant_id,
+                                                     DrawerCashMovement.idempotency_key == idempotency_key))
+    if cash is not None:
+        return {"status": "recorded", "kind": "cash_movement", "id": cash.id}
 
     pay = s.scalar(select(Payment).where(Payment.tenant_id == tenant_id, Payment.idempotency_key == idempotency_key))
     if pay is not None:

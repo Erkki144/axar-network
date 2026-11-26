@@ -489,6 +489,44 @@ def test_drawer_variance_needs_approval_for_cashier(shop):
     assert r.status_code == 200 and r.json()["variance_cents"] == -100
 
 
+def test_cash_out_requires_another_managers_bound_one_use_approval(shop):
+    till = shop["till"]
+    d = open_drawer(till, shop["reg"], 10000)
+    body = {"direction": "out", "amount_cents": 3000, "reason_code": "SAFE_DROP",
+            "reason_text": "Seifi üleandmine"}
+    path = f"/api/v1/drawer/{d['id']}/movements"
+    key = str(uuid.uuid4())
+    denied = till.post(path, body, {"Idempotency-Key": key})
+    assert denied.status_code == 403
+    assert denied.json()["error"] == "approval_required"
+    bad = till.post("/api/v1/auth/approvals", {
+        "action": "drawer_cash_out", "approver_id": shop["cashier"], "pin": "4829",
+        "request": {"drawer_id": d["id"], **body}})
+    assert bad.status_code == 403
+
+    approved = till.post("/api/v1/auth/approvals", {
+        "action": "drawer_cash_out", "approver_id": shop["manager"], "pin": "7351",
+        "request": {"drawer_id": d["id"], **body}})
+    assert approved.status_code == 201, approved.text
+    approval_id = approved.json()["approval_id"]
+    # Approval is bound to the exact physical amount and purpose.
+    wrong = till.post(path, {**body, "amount_cents": 4000},
+                      {"Idempotency-Key": key, "X-Approval-Id": approval_id})
+    assert wrong.status_code == 403
+    captured = till.post(path, body, {"Idempotency-Key": key, "X-Approval-Id": approval_id})
+    assert captured.status_code == 201, captured.text
+    assert captured.json()["approval_id"] == approval_id
+    replay = till.post(path, body, {"Idempotency-Key": key, "X-Approval-Id": approval_id})
+    assert replay.status_code == 201 and replay.json()["id"] == captured.json()["id"]
+    # Approval has been consumed; another cash move needs another manager proof.
+    again = till.post(path, body, {"Idempotency-Key": str(uuid.uuid4()),
+                                   "X-Approval-Id": approval_id})
+    assert again.status_code == 403
+    current = till.get(f"/api/v1/registers/{shop['reg']}/drawer").json()["drawer"]
+    assert current["cash_out_cents"] == 3000
+    assert current["expected_cents"] == 7000
+
+
 def test_cashier_closes_without_approval_when_count_matches(shop):
     d = open_drawer(shop["till"], shop["reg"])
     assert shop["till"].post(f"/api/v1/drawer/{d['id']}/close", {"counted_cents": 5000}).status_code == 200
