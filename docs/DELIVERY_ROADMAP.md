@@ -24,6 +24,15 @@
    - koormustest 10 müügikohaga.
 4. **P3:** ülejäänud moodulid ja ühe müügikoha piloot.
 
+**Lisatud kontori vaheanalüüsi põhjal** (`docs/BACKOFFICE_REQUIREMENTS_ET.md` §11):
+- **P1-5** hinnakirjad, soodustused, makseviisid ja tellimuse tüübid;
+- **P1-6** kontori müügivaated (arved, koondaruanne, vahetuste ajalugu);
+- **P1-7** inventuur, mahakandmine, ladudevaheline liikumine;
+- **P1-8** kasutajad, seadmed ja õiguste grupid kontoris;
+- **P2-6** kliendid ja lojaalsus, **P2-7** taastellimine, **P2-8** import teistest kassasüsteemidest.
+
+Piloot (P3-3) ootab nüüd ka sammude P1-6, P1-7 ja P1-8 valmimist.
+
 **Järgmine PR (P0-2):** kontoriekraan kolmele funktsioonile, millel praegu on ainult API:
 - **kassa seaded** — offline-piirang, omaniku otsus;
 - **võrguühenduseta kirjete läbivaatus** — kordamine või tagasilükkamine;
@@ -54,11 +63,18 @@
 | **P1-2** | #48 | cancel / correct / credit / refund with per-line disposition: restock (sealed goods only), write-off with waste reason, no movement; never restock prepared food as raw ingredients; append-only reversal documents; approvals | P1-1, P0-3 | the #48 test list: duplicate cancel once, 2-of-3 lines, sealed drink restocked + burger written off, card refund timeout → unknown not doubled, offline replay, reports + stock + export reconcile (R1–R13 green) | `pytest tests/test_cancellations.py` | Claude (code), owner's accountant (legal review) | high (legal / VAT) |
 | **P1-3** | #4, PR #8 | accounting delivery: export_queue → adapter (AXAR CONNECT v2 or an accountant-approved file export) with acknowledgement; R8 becomes "ok" | P1-2 | every queued row acknowledged exactly once with a receipt id; retry never double-posts; journal preview balances (debits = credits) | `pytest tests/test_books_delivery.py` | Claude + AION; owner's accountant (format) | medium |
 | **P1-4** | #29 | offline table bills (split / card / transfer) applied centrally instead of quarantined | P0-3 | O1b soak extended with bills: every bill on central exactly once, tenders equal | `pytest tests/test_payments_offline.py` | Claude | medium |
+| **P1-5** | new (G02, G13–G15) | price lists (per outlet / order type), discounts (manual + automatic, %, amount, validity window, outlet / group scope, combinable flag, role limit), payment-method register (type, tip allowed, archived), order types (dine-in / takeaway / delivery → price list, service charge) | P1-1 | browser test: a 10 % staff discount limited to the manager role is refused for a cashier and applied for a manager; a takeaway order uses the takeaway price list; discount + payment totals reconcile (R1–R13 green); old sales keep historic discount and price | `pytest tests_e2e/test_pricing_discounts.py` | Claude | medium (VAT on discounted lines) |
+| **P1-6** | new (G08–G11, G28) | office sales screens on existing APIs: invoice list + filters, B2B invoice + bank matching UI, summary report (order type / payment / discount / group breakdowns), shift (Z) history with expected vs counted cash; business-day start setting | P0-2, P1-5 | browser test: a day with 2 registers shows summary totals equal to `daily_summary` and reconciliation; a bank line is matched to an invoice in the UI; a night sale after midnight lands in the right business day | `pytest tests_e2e/test_office_sales.py` | Claude | low |
+| **P1-7** | #14 (G18, G19, G21) | stock count (inventory with quantity and money difference, close = approval), write-off with reason, transfer between warehouses, stock as of a past date, document numbering per type | P1-1 | count of 3 items posts exactly the differences once; transfer keeps total value; stock-as-of-date equals replayed movements; new R-rule + tamper test | `pytest tests/test_stock_count_transfer.py` | Claude | medium |
+| **P1-8** | new (G24–G27) | staff, device and enrollment-code office UI on the existing API; permission groups as data (fine-grained till + office permissions, default groups = today's 5 roles); company data fields; till action log view | P0-2 | browser test: owner creates group "Teenindaja" without "delete line after interim bill"; that user is refused at the till, a manager approves; log shows both actions; existing role tests unchanged | `pytest tests_e2e/test_office_staff.py tests/test_auth.py` | Claude | medium (auth path) |
 | **P2-1** | #29 O5 | sync agent HTTP transport (TLS, device token), Windows packaging (installer, SQLCipher, auto-start), Android spike | P1-4 | a Windows VM till sells 72 h offline, reconnects, R13 green; installer reproducible from CI | packaging CI job + `pytest tests/test_offline_sync.py` | Claude; owner: target hardware | high |
 | **P2-2** | #42 | crash / power-loss (VM hard reset during writes), 10-outlet load (10 tills × 2 h simulated trading), chaos on the worker | P2-1 | 0 lost or doubled sales; R1–R13 green after every scenario; p95 sale latency reported | `pytest tests_load/` (new) | Claude | medium |
 | **P2-3** | #25 | receipt + kitchen printing: print queue, local bridge, ESC/POS, templates, printer-offline fallback | P2-1 | hardware-in-the-loop on the chosen printer; offline printer → job queued, never lost, never printed twice | HIL checklist + unit tests | Claude; owner: printer purchase | medium |
 | **P2-4** | #25 | real terminal in the provider's **sandbox** (after the owner's provider choice and sandbox access) | P0-3, owner decision §4 | sandbox run: approve, decline, timeout → unknown → reconcile, refund / reversal | provider sandbox suite | Claude; owner: contract | high (provider onboarding time) |
 | **P2-5** | #40 | menu publish to POS and TV boards (versioned, scheduled) | P1-1 | a published menu version reaches tills and a TV page; the sales history keeps old names and prices | `pytest tests_e2e/test_menu_publish.py` | Claude | medium |
+| **P2-6** | new (G07, G22, G23) | customer register + CSV import, B2B payment terms, customer card, birthday and tier discounts (on top of P1-5), sale restrictions by time / age per outlet | P1-5 | customer imported from CSV gets their tier discount at the till; an age-restricted product asks for confirmation; GDPR export / delete of one customer | `pytest tests/test_customers.py` | Claude; owner: privacy notice | medium (personal data) |
+| **P2-7** | new (G20) | reorder levels, reorder proposal → purchase order, stale-stock report | P1-7 | items below the level produce one purchase-order draft per supplier; stale report matches a seeded scenario | `pytest tests/test_reorder.py` | Claude | low |
+| **P2-8** | new (G32) | importer for other POS systems' export files (products, groups, prices, recipes, customers, suppliers, opening stock) with preview, field-mapping profile and dry run | P1-1, P1-5, P2-6 | a sample export of 2 500 products imports with a dry-run report, then for real; re-import is idempotent; reconciliation green | `pytest tests/test_import_foreign.py` | Claude; owner: anonymised sample files | medium |
 | **P3-1** | #27 | hierarchy: legal entity → site → outlet → register + warehouse (ADR-0013, additive migration + backfill) | P1-3 | migration up / down / up on a copy of pilot data; RLS tests per entity; reports per outlet | `pytest tests/test_hierarchy.py` | Claude; owner: real outlet list | medium |
 | **P3-2** | #38, #39, #18, #33, #32, #31 | chef workspace, guest QR, people / HACCP, CONTROL dashboard, extensions, in dependency order after the pilot path | P1–P2 | per issue | per issue | Claude | scope |
 | **P3-3** | #44 | 1-outlet shadow pilot (2 weeks, daily reconciliation report), then step-by-step expansion | P0–P2 complete | 14 days, every day R1–R13 green or explained; accountant sign-off | daily `/admin/reconciliation` export | owner + Claude | operational |
@@ -84,6 +100,17 @@ flowchart LR
   P23 --> P33
   P24 --> P33
   P31 --> P33
+  P11 --> P15[P1-5 prices + discounts + order types]
+  P15 --> P16[P1-6 office sales screens]
+  P02 --> P16
+  P11 --> P17[P1-7 stock count / write-off / transfer]
+  P02 --> P18[P1-8 staff + permission groups UI]
+  P15 --> P26[P2-6 customers + loyalty]
+  P17 --> P27[P2-7 reorder]
+  P26 --> P28[P2-8 foreign POS import]
+  P16 --> P33
+  P17 --> P33
+  P18 --> P33
   P05[P0-5 owner settings] --> P33
 ```
 

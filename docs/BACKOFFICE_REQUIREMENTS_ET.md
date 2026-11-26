@@ -214,3 +214,57 @@ aktiveerimistasu 58–116 €.
 5. **Kate reaalajas:** hoiatus, kui retsepti omahind tõstab toidu omahinna % üle piiri.
 6. Pettuste ennetuse koondaruanne koos teavitustega (nt e-kiri, kui teenindaja kustutab ridu pärast vahearvet üle X%).
 7. AI-trendid kohe põhipaketis.
+
+---
+
+## 11. Vaheanalüüs: nõuded vs AXAR ONE praegune seis
+
+Alus: `docs/AXAR_ONE_SYSTEM_INVENTORY.md` (võimekused C01–C35) ja kood harus `claude/card-terminal-flow-p03-0r9ip8`
+(`axar_pos/models.py`, `auth.py`, `inventory.py`, `payments.py`). Siin on ainult **P1 ja P2** nõuded. P3 on lõpus loendina.
+
+Olek: **OLEMAS** = koodis ja testitud · **OSALINE** = osa on olemas, nõue pole täidetud · **PUUDU** = koodis pole.
+
+| # | Nõue (peatükk) | Prio | AXAR ONE olek | Tõend | Tegevuskava samm |
+|---|---|---|---|---|---|
+| G01 | Tooteregister, rühmade puu, tootekaart (2.1–2.2 Üldine) | P1 | **PUUDU**: tooted tulevad ainult demoandmetest | C15 | **P1-1** (#61) |
+| G02 | Hinnad hinnakirja kaupa, ümberarvutus KM/kate (2.2 Hinnad) | P1 | **PUUDU**: üks hind tootel, hinnakirju pole | `models.py` | **P1-1** (üks hinnakiri) + **P1-5** (mitu hinnakirja) |
+| G03 | Retsept, kadu, omahind (2.2 Retsept) | P1 | **OLEMAS** (versioonitud retsept, liikuv keskmine omahind) | C14 | — (P1-1 seob toote retseptiga) |
+| G04 | Toote laoseis ja tarnijad tootekaardil (2.2 Ladu) | P1 | **OSALINE**: laoseis ja tarnijad on olemas, tootekaardi vaade puudub | C13 | **P1-1** |
+| G05 | Kassapaneeli nupud (2.3) | P1 | **PUUDU**: nupud tulevad demoandmetest | C15, C28 | **P1-1** (automaatne paigutus rühmade järgi); redaktor **P2-5** (#40) |
+| G06 | Süsteemitooted (ettemaks, tundmatu import) (2.3) | P1 | **PUUDU** | — | **P1-3** (tundmatu importrida) |
+| G07 | Müügipunkti piirangud: aeg, vanus (2.2) | P2 | **PUUDU** | — | **P2-6** (uus) |
+| G08 | Arvete loend ja filtrid (3.1) | P1 | **OSALINE**: müük ja arved on API-s, kontori loendit pole | C01, C07 | **P1-6** (uus) |
+| G09 | Hulgiarve / B2B arve, makse ülekandega (3.1) | P1 | **OSALINE**: arve viitenumbriga ja panga sidumine on olemas, kasutajaliidest pole | C07, §4 `receivables` | **P1-6** |
+| G10 | Müügi koondaruanne jaotustega (3.2) | P1 | **OSALINE**: päeva- ja marginaaliaruanne on olemas, jaotusi pole | C17 | **P1-6** |
+| G11 | Vahetuse / Z-aruanne: sularaha peaks olema, sisestatud, vahe (3.2) | P1 | **OLEMAS** (kassasahtli sulgemine, vahe ja juhi kinnitus) | C02 | **P1-6** (kontori vaade ja ajalugu) |
+| G12 | Menüü optimeerimise aruanne (3.2) | P2 | **OSALINE**: marginaal on olemas, klassifikatsioon puudub | C14, C17 | **P3-2** (#38/#39) |
+| G13 | Soodustused (3.3) | P1 | **PUUDU**: real on ainult välja `net_cents` | `models.py:734` | **P1-5** (uus) |
+| G14 | Makseviisid kui seadistatav register (3.3) | P1 | **OSALINE**: sularaha, kaart ja ülekanne on koodis fikseeritud, jootraha osaliselt | C07 | **P1-5** |
+| G15 | Tellimuse tüübid (kohapeal, kaasa, tarne) ja hinnakiri tüübi järgi (7) | P1 | **PUUDU**: on laud ja kiirmüük, aga tüüpi kui andmeid pole | C06 | **P1-5** |
+| G16 | Arvete ja tellimuste seaded: numeratsioon, jaluse tekstid (3.3) | P2 | **OSALINE**: tšekiseeria kassa kaupa on olemas | C05 | **P2-3** (prindipõhjad) |
+| G17 | Laodokumendid: sisseost, tootmine (4.1) | P1 | **OLEMAS** | C13, C14 | — |
+| G18 | Inventuur, mahakandmine, ladudevaheline liikumine (4.1) | P1 | **PUUDU** | C13 „missing“ | **P1-7** (uus, #14) |
+| G19 | Laoseis valitud hetke seisuga, laoaruanded (4.2) | P1 | **OSALINE**: laoseis ja kooskõla on olemas, ajaloolist seisu pole | C13 | **P1-7** |
+| G20 | Seisma jäänud tooted, taastellimine (4.2–4.3) | P2 | **PUUDU** | — | **P2-7** (uus) |
+| G21 | Dokumentide seaded: numeratsioon, ostuhinna allikas (4.3) | P1 | **OSALINE** | C13 | **P1-7** |
+| G22 | Kliendiregister ja import (5) | P2 | **OSALINE**: arvetel on ainult kliendi nimi ja kood, registrit pole | `models.py:591` | **P2-6** |
+| G23 | Lojaalsus, kliendikaart, sünnipäev, tasemed (5) | P2 | **PUUDU** | — | **P2-6** |
+| G24 | Kasutajad ja seadmed kontoris (6) | P1 | **OSALINE**: API on olemas, kasutajaliidest pole | C10, §4 | **P1-8** (uus) |
+| G25 | Õiguste grupid peente õigustega (6) | P1 | **OSALINE**: 5 fikseeritud rolli ja jämedad õigused; juhi kinnitus on olemas | `auth.py:56–73` | **P1-8** |
+| G26 | Kassa tegevuste logi ja pettuste koondaruanne (6) | P2 | **OSALINE**: räsiahelaga seadmepäevik ja auditisündmused on olemas, aruannet pole | C05, C10 | **P1-8** (logi vaade), **P3-2** (koondaruanne, #32) |
+| G27 | Ettevõtte andmed, müügipunktid ja kassad (7) | P1 | **OSALINE**: asukoht → kassa/ladu on olemas, juriidilist isikut pole | C26 | **P3-1** (#27); andmeväljad **P1-8** |
+| G28 | Üldseaded: päeva algus, KM, komakohad (7) | P1 | **OSALINE**: KM on koodis, päeva algust pole | `money.py`, C17 | **P1-6** (päeva algus aruannetele) |
+| G29 | KDS ja köögiprinterid (7) | P2 | **OSALINE**: köögipiletid ja SSE on olemas, printerit pole | C06, C09 | **P2-3** |
+| G30 | Raamatupidamisliides (8) | P1 | **OSALINE**: järjekord on olemas, edastajat pole | C16 | **P1-3** |
+| G31 | Kullerid, e-pood, EDI (8) | P2 | **PUUDU** | — | **P3** (pärast piloti teed) |
+| G32 | Import konkurendi ekspordist (soovitus 1) | P2 | **PUUDU** | — | **P2-8** (uus) |
+
+**P3, praegu tegevuskavast väljas:** kinkekaardid, variatsioonid, valuuta, ladustamisalad, kaalutaarad, kohandatav statistika,
+kliendiekraan, meililistid, AI-trendid, mobiilne kliendikaart, moodulite iseteeninduslik litsentsileht.
+
+### Kokkuvõte
+- **Olemas ja tugevam kui turul:** kooskõlakontroll (13 reeglit), võrguühenduseta kassa 72 h, räsiahelaga seadmepäevik,
+  firmade andmete eraldus, juhi kinnitus koos TOTP-ga.
+- **Suurim auk piloodi jaoks:** toodete ja hinnakirjade haldus (G01, G02, G05), soodustused ja tellimuse tüübid
+  (G13–G15) ning inventuur ja mahakandmine (G18).
+- **API on olemas, kasutajaliides puudub:** kasutajad ja seadmed, arved ja pank, aruanded (G08–G10, G24).
