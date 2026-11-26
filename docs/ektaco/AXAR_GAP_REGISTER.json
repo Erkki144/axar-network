@@ -1,0 +1,477 @@
+{
+  "schema_version": 1,
+  "review_date": "2026-11-26",
+  "source_manifest": "docs/ektaco/CC5_SOURCE_COVERAGE.json",
+  "record_count": 52,
+  "status_warning": "This matrix is a research acceptance checklist, not proof of implementation; compare each edge with PR #63 and latest main/other PRs.",
+  "edges": [
+    {
+      "edge_id": "E1",
+      "requirement": "Catalog → till button",
+      "primary_issue": "#61",
+      "priority": "P1",
+      "acceptance_evidence_required": "office-created SKU visibly reaches till",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E2",
+      "requirement": "Effective price → immutable sale line",
+      "primary_issue": "#61",
+      "priority": "P1",
+      "acceptance_evidence_required": "old sale price unchanged after new version",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E3",
+      "requirement": "Recipe → stock consumption",
+      "primary_issue": "#14",
+      "priority": "P1",
+      "acceptance_evidence_required": "one consumed recipe and one COGS posting",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E4",
+      "requirement": "Published menu → POS/TV",
+      "primary_issue": "#40",
+      "priority": "P2",
+      "acceptance_evidence_required": "per-target ACK and rollback",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E5",
+      "requirement": "Cash POS → sale register",
+      "primary_issue": "#7",
+      "priority": "P0",
+      "acceptance_evidence_required": "idempotent receipt and cash",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E6",
+      "requirement": "Order → kitchen ticket",
+      "primary_issue": "#25",
+      "priority": "P0",
+      "acceptance_evidence_required": "lost ACK cannot produce second kitchen task",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E7",
+      "requirement": "Bill → split tender → sale",
+      "primary_issue": "#26",
+      "priority": "P0",
+      "acceptance_evidence_required": "one sale, sum tenders equals obligation",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E8",
+      "requirement": "Card terminal → payment",
+      "primary_issue": "#25",
+      "priority": "P0",
+      "acceptance_evidence_required": "real provider and unknown-state reconciliation gate",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E9",
+      "requirement": "Transfer → receivable → bank",
+      "primary_issue": "#4",
+      "priority": "P1",
+      "acceptance_evidence_required": "open receivable until matched bank line",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E10",
+      "requirement": "Sale → cash refund",
+      "primary_issue": "#48",
+      "priority": "P1",
+      "acceptance_evidence_required": "partial refund never more than captured",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E11",
+      "requirement": "Refund → physical stock",
+      "primary_issue": "#48",
+      "priority": "P1",
+      "acceptance_evidence_required": "sealed return restocked, cooked product written off",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E12",
+      "requirement": "Sale/refund → books queue",
+      "primary_issue": "#8",
+      "priority": "P1",
+      "acceptance_evidence_required": "each event queued once with full tax values",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E13",
+      "requirement": "Export queue → accounting ACK",
+      "primary_issue": "#8",
+      "priority": "P1",
+      "acceptance_evidence_required": "receiver acknowledges exactly once",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E14",
+      "requirement": "Drawer → expected cash",
+      "primary_issue": "#68",
+      "priority": "P0",
+      "acceptance_evidence_required": "drawer expected equals actual custody movements",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E15",
+      "requirement": "Sales ledger → reports",
+      "primary_issue": "#32",
+      "priority": "P1",
+      "acceptance_evidence_required": "business date and tax totals tie",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E16",
+      "requirement": "Offline till → central replay",
+      "primary_issue": "#29",
+      "priority": "P0",
+      "acceptance_evidence_required": "device journal no loss and no double sale",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E17",
+      "requirement": "Events → live screen",
+      "primary_issue": "#42",
+      "priority": "P1",
+      "acceptance_evidence_required": "gap reconnect resumes cursor",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E18",
+      "requirement": "Supplier invoice → posted stock",
+      "primary_issue": "#14",
+      "priority": "P1",
+      "acceptance_evidence_required": "draft cannot post without verified mapping",
+      "baseline": "cross_check_PR63_matrix",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E19",
+      "requirement": "Per-product stock-source warehouse",
+      "primary_issue": "#69",
+      "priority": "P0",
+      "acceptance_evidence_required": "water from bar and burger from kitchen on same till",
+      "baseline": "confirmed_missing_main_in_inspected_function",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E20",
+      "requirement": "Bulk import preview/approval",
+      "primary_issue": "#61",
+      "priority": "P1",
+      "acceptance_evidence_required": "blank vs missing distinct and no implicit activation",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E21",
+      "requirement": "Availability-adjusted deadstock estimate",
+      "primary_issue": "#39",
+      "priority": "P2",
+      "acceptance_evidence_required": "days-in-stock denominator and human approval",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E22",
+      "requirement": "Tax rollover → pricing + accounting",
+      "primary_issue": "#4",
+      "priority": "P1",
+      "acceptance_evidence_required": "time-effective tax mappings verified per outlet",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E23",
+      "requirement": "E-invoice provider → delivery ACK",
+      "primary_issue": "#4",
+      "priority": "P2",
+      "acceptance_evidence_required": "submitted differs from delivered",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E24",
+      "requirement": "Seasonal till suspension → sync safeguard",
+      "primary_issue": "#29",
+      "priority": "P1",
+      "acceptance_evidence_required": "zero offline sales lost on suspend",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E25",
+      "requirement": "Cash/stock/discount/shift semantic analytics",
+      "primary_issue": "#32",
+      "priority": "P1",
+      "acceptance_evidence_required": "split tender does not double sale totals",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E26",
+      "requirement": "CRM mass update → consent/permissions",
+      "primary_issue": "#33",
+      "priority": "P2",
+      "acceptance_evidence_required": "no implicit marketing opt-in",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E27",
+      "requirement": "Cash IN/OUT → drawer reconciliation",
+      "primary_issue": "#68",
+      "priority": "P0",
+      "acceptance_evidence_required": "safe drop separate from revenue with idempotency",
+      "baseline": "confirmed_missing_main_in_inspected_function",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E28",
+      "requirement": "Device recovery → journal integrity",
+      "primary_issue": "#29",
+      "priority": "P0",
+      "acceptance_evidence_required": "reset never loses open bill or unsynced transaction",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E29",
+      "requirement": "Terminal approved → settlement / fees",
+      "primary_issue": "#25",
+      "priority": "P1",
+      "acceptance_evidence_required": "captured, sent, settled and chargeback distinct",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E30",
+      "requirement": "Variants/modifiers/special notes → recipe",
+      "primary_issue": "#61",
+      "priority": "P1",
+      "acceptance_evidence_required": "no unintended global modifiers or double ingredients",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E31",
+      "requirement": "Role permission template → effective policy",
+      "primary_issue": "#34",
+      "priority": "P1",
+      "acceptance_evidence_required": "read-only is enforced by API",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E32",
+      "requirement": "Outlet readiness → first sale",
+      "primary_issue": "#27",
+      "priority": "P1",
+      "acceptance_evidence_required": "cannot start if default stock source or tax missing",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E33",
+      "requirement": "Receipt → immutable email delivery",
+      "primary_issue": "#25",
+      "priority": "P2",
+      "acceptance_evidence_required": "resend copy doesn't create second invoice",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E34",
+      "requirement": "External platform ID → exact channel",
+      "primary_issue": "#18",
+      "priority": "P2",
+      "acceptance_evidence_required": "Wolt ID cannot alter Bolt order",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E35",
+      "requirement": "QR pause → guest order ingress",
+      "primary_issue": "#18",
+      "priority": "P1",
+      "acceptance_evidence_required": "existing orders live; new orders blocked clearly",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E36",
+      "requirement": "Gift token funding → redemption liability",
+      "primary_issue": "#70",
+      "priority": "P1",
+      "acceptance_evidence_required": "preprinted token cannot spend before activation",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E37",
+      "requirement": "Promotion rule → valid discount snapshot",
+      "primary_issue": "#40",
+      "priority": "P1",
+      "acceptance_evidence_required": "coupon only, no unintended global markdown",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E38",
+      "requirement": "Price bulk job → publish/undo",
+      "primary_issue": "#61",
+      "priority": "P1",
+      "acceptance_evidence_required": "rollback is new version, not rewriting history",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E39",
+      "requirement": "Vendor AI draft → stock POST",
+      "primary_issue": "#14",
+      "priority": "P1",
+      "acceptance_evidence_required": "supplier pack size change forces review",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E40",
+      "requirement": "Inventory count cutoff → adjustment",
+      "primary_issue": "#14",
+      "priority": "P1",
+      "acceptance_evidence_required": "one-item count cannot erase parallel full count",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E41",
+      "requirement": "Blind cashier policy → redacted API",
+      "primary_issue": "#34",
+      "priority": "P1",
+      "acceptance_evidence_required": "unauthorized till cannot fetch shift amounts",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E42",
+      "requirement": "Device pairing → one-use credentials",
+      "primary_issue": "#34",
+      "priority": "P1",
+      "acceptance_evidence_required": "cross-outlet pairing rejected",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E43",
+      "requirement": "Recipe component bulk change → future versions",
+      "primary_issue": "#38",
+      "priority": "P1",
+      "acceptance_evidence_required": "old COGS and ingredient refs unchanged",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E44",
+      "requirement": "QR out-of-stock vs paused vs closed",
+      "primary_issue": "#18",
+      "priority": "P1",
+      "acceptance_evidence_required": "distinct customer states and payment outcomes",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E45",
+      "requirement": "Self-service kiosk → paid sale",
+      "primary_issue": "#18",
+      "priority": "P2",
+      "acceptance_evidence_required": "power-loss single capture and receipt recovery",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E46",
+      "requirement": "Ticket → access/visitor event",
+      "primary_issue": "#31",
+      "priority": "P3 optional",
+      "acceptance_evidence_required": "two gates one valid one-use entry",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E47",
+      "requirement": "Tip allocation → payroll/custody",
+      "primary_issue": "#32",
+      "priority": "P2",
+      "acceptance_evidence_required": "tip not booked as food sale",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E48",
+      "requirement": "Returnable packaging deposit → refund",
+      "primary_issue": "#32",
+      "priority": "P3 optional",
+      "acceptance_evidence_required": "separate financial liability reviewed by accountant",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E49",
+      "requirement": "Scale barcode → weighted sale",
+      "primary_issue": "#25",
+      "priority": "P3 optional",
+      "acceptance_evidence_required": "exact quantity rounding and stock consistency",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E50",
+      "requirement": "SmartPOS embedded device → payment/receipt",
+      "primary_issue": "#25",
+      "priority": "P2",
+      "acceptance_evidence_required": "provider sandbox/HIL and compliant device",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E51",
+      "requirement": "Visitor forecast → suggested procurement",
+      "primary_issue": "#39",
+      "priority": "P2",
+      "acceptance_evidence_required": "explained proposal, no unapproved purchase",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    },
+    {
+      "edge_id": "E52",
+      "requirement": "Mobile manager action → scoped control",
+      "primary_issue": "#32",
+      "priority": "P2",
+      "acceptance_evidence_required": "role+MFA and event audit",
+      "baseline": "research_requirement_not_implementation_claim",
+      "ownership": "Claude engineering; owner approves business/provider/production decisions"
+    }
+  ]
+}

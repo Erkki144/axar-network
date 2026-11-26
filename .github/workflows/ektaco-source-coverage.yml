@@ -1,0 +1,22 @@
+name: Ektaco CC5 research source coverage
+on:
+  pull_request:
+    paths:
+      - 'docs/ektaco/CC5_SOURCE_COVERAGE.json'
+      - 'docs/ektaco/AXAR_GAP_REGISTER.json'
+      - 'docs/REFERENCE_EKTACO_DEEP_DIVE_*.md'
+      - 'scripts/validate_ektaco_coverage.py'
+      - '.github/workflows/ektaco-source-coverage.yml'
+  workflow_dispatch:
+jobs:
+  source-coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify indexed CC5 corpus structure
+        run: python scripts/validate_ektaco_coverage.py

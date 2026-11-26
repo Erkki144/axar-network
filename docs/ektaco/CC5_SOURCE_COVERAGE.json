@@ -1,0 +1,511 @@
+{
+  "schema_version": 1,
+  "review_date": "2026-11-26",
+  "official_index_office": "https://ektaco.ee/helpcenter/compucash5/",
+  "official_index_till": "https://ektaco.ee/helpcenter/kassa/cc5-kassa/",
+  "expected_office": 64,
+  "expected_till": 7,
+  "exclusions": "CC4000/CC Retail articles and hardware help pages are a separate corpus. This manifest lists each link in the two official CC5 indices. Opened article does not mean every embedded screenshot or video was fully reviewed; see research docs for specific screenshot proof.",
+  "review_levels": {
+    "article_opened": "The public article was opened during 2026-11-26 review; source details may still require further verification and hardware testing."
+  },
+  "items": [
+    {
+      "section": "kliendihaldus",
+      "title": "Walleti kliendikaardid",
+      "url": "https://ektaco.ee/helpcenter/compucash5/kliendihaldus/compucash-walleti-seadistused/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "kliendihaldus",
+      "title": "CRM import",
+      "url": "https://ektaco.ee/helpcenter/compucash5/kliendihaldus/crm-import/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "kliendihaldus",
+      "title": "Kliendiregister",
+      "url": "https://ektaco.ee/helpcenter/compucash5/kliendihaldus/kliendid/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "kaibemaksu-muudatus",
+      "title": "Standard-KM muutus",
+      "url": "https://ektaco.ee/helpcenter/compucash5/kaibemaksu-muudatus/kaibemaksu-standardmaara-muutmine-compucashis/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "kaibemaksu-muudatus",
+      "title": "Toote KM muutus",
+      "url": "https://ektaco.ee/helpcenter/compucash5/kaibemaksu-muudatus/toote-kaibemaksu-muutmine-compucashis/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "kaibemaksu-muudatus",
+      "title": "KM Merit Aktivas",
+      "url": "https://ektaco.ee/helpcenter/compucash5/kaibemaksu-muudatus/kaibemaksu-muutmine-merit-aktiva-liideses/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "kaibemaksu-muudatus",
+      "title": "KM RMP/Directo",
+      "url": "https://ektaco.ee/helpcenter/compucash5/kaibemaksu-muudatus/kaibemaksu-muutmine-rmp-liideses-directo-e-invoice/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Sisseost",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/sisseost/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Ladudevahelised liikumised",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/ladude-vahelised-liikumised/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Mahakandmine",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/mahakandmine/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Tootmine",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/tootmine/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Inventuur",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/inventuur/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Ostuarvete CSV import",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/ostuarvete-import/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Ostuarvete AI/PDF import",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/ostuarvete-import-failist/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Lao koondaruanne",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/lao-koondaruanne/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Taastellimine",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/taastellimine-ja-taastellimise-piirid/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Laoseis",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/laoseis/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Seismajäänud kaup",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/seismajaanud-toodete-laoseisuaruanne/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Tooteajalugu",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/tooteajalugu/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Ladu–Toode",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/ladu-toode/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "laohaldus",
+      "title": "Tarnijad",
+      "url": "https://ektaco.ee/helpcenter/compucash5/laohaldus/tarnijad/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "liidesed",
+      "title": "QDS kliendi järjekord",
+      "url": "https://ektaco.ee/helpcenter/compucash5/liidesed/qds/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "liidesed",
+      "title": "RIK e-arve",
+      "url": "https://ektaco.ee/helpcenter/compucash5/liidesed/rik-e-arveldaja/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "liidesed",
+      "title": "WooCommerce",
+      "url": "https://ektaco.ee/helpcenter/compucash5/liidesed/woocommerce-veebipood/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "liidesed",
+      "title": "Wolt",
+      "url": "https://ektaco.ee/helpcenter/compucash5/liidesed/wolt/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "liidesed",
+      "title": "Bolt",
+      "url": "https://ektaco.ee/helpcenter/compucash5/liidesed/bolt/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "liidesed",
+      "title": "Merit Aktiva",
+      "url": "https://ektaco.ee/helpcenter/compucash5/liidesed/merit-aktiva/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "liidesed",
+      "title": "Telema",
+      "url": "https://ektaco.ee/helpcenter/compucash5/liidesed/telema/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Töölauad",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/toolauad/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Arved",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/arved/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Müügitellimused",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/muugitellimused/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Koondarved",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/koondarved-2/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Läbimüügi aruanne",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/labimuugi-aruanne/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Makseviiside aruanne",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/makseviiside-aruanne/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Müügi koondaruanne",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/muugi-koondaruanne/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Vahetuste aruanne",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/vahetuste-aruanne/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Soodusmüügi aruanne",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/soodusmuugi-aruanne/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Statistika raport",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/statistika-raport/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Hinnakirjad",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/hinnakirjad/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Soodustused",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/soodustused/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Sooduskoodid",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/sooduskoodid/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "muuk",
+      "title": "Makseviisid",
+      "url": "https://ektaco.ee/helpcenter/compucash5/muuk/makseviisid/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "personal",
+      "title": "Kasutajad",
+      "url": "https://ektaco.ee/helpcenter/compucash5/personal/kasutajad/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "personal",
+      "title": "Kassa tegevused",
+      "url": "https://ektaco.ee/helpcenter/compucash5/personal/kassa-tegevused/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "personal",
+      "title": "Kontori tegevused",
+      "url": "https://ektaco.ee/helpcenter/compucash5/personal/kontori-tegevused/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "personal",
+      "title": "Õiguste grupid",
+      "url": "https://ektaco.ee/helpcenter/compucash5/personal/oiguste-grupid/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "seaded",
+      "title": "Kassa litsentsid",
+      "url": "https://ektaco.ee/helpcenter/compucash5/seaded/kassa-litsentside-haldus/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "seaded",
+      "title": "Kassa seadistused",
+      "url": "https://ektaco.ee/helpcenter/compucash5/seaded/kassa-seadistused/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "seaded",
+      "title": "KDS ja köögiprinterid",
+      "url": "https://ektaco.ee/helpcenter/compucash5/seaded/kds-ja-koogiprinterid/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "seaded",
+      "title": "E-posti seadistus",
+      "url": "https://ektaco.ee/helpcenter/compucash5/seaded/e-maili-seadistamine/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "seaded",
+      "title": "Saaliplaanid",
+      "url": "https://ektaco.ee/helpcenter/compucash5/seaded/saaliplaanid/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "tootehaldus",
+      "title": "Tooteregister",
+      "url": "https://ektaco.ee/helpcenter/compucash5/tootehaldus/tooted/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "tootehaldus",
+      "title": "Toodete import",
+      "url": "https://ektaco.ee/helpcenter/compucash5/tootehaldus/toodete-import/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "tootehaldus",
+      "title": "Bolt/Wolt veebimenüü",
+      "url": "https://ektaco.ee/helpcenter/compucash5/tootehaldus/veebimenuud/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "tootehaldus",
+      "title": "Tellikohe QR/veebimenüü",
+      "url": "https://ektaco.ee/helpcenter/compucash5/tootehaldus/veebimuuk/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "tootehaldus",
+      "title": "Lisandid ja erisoovid",
+      "url": "https://ektaco.ee/helpcenter/compucash5/tootehaldus/lisandid-erisoovid/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "tootehaldus",
+      "title": "Kinkekaardid",
+      "url": "https://ektaco.ee/helpcenter/compucash5/tootehaldus/kinkekaardid/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "tootehaldus",
+      "title": "Digitaalsed kinkekaardid",
+      "url": "https://ektaco.ee/helpcenter/compucash5/tootehaldus/digitaalne-kinkekaart/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "tootehaldus",
+      "title": "Toote variatsioonid",
+      "url": "https://ektaco.ee/helpcenter/compucash5/tootehaldus/toote-variatsioonid/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "tootehaldus",
+      "title": "CC5 kassa nupud",
+      "url": "https://ektaco.ee/helpcenter/compucash5/tootehaldus/kassa-nupud/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "tootehaldus",
+      "title": "CC4000 Windowsi nupud",
+      "url": "https://ektaco.ee/helpcenter/compucash5/tootehaldus/windowsi-kassa-nupud/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "uldine-compucash-5",
+      "title": "Lepingu ajutine peatamine",
+      "url": "https://ektaco.ee/helpcenter/compucash5/uldine-compucash-5/lepingu-ajutine-peatamine/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "uldine-compucash-5",
+      "title": "6 sammu CC5",
+      "url": "https://ektaco.ee/helpcenter/compucash5/uldine-compucash-5/6-sammu-alustamiseks-cc5/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "uldine-compucash-5",
+      "title": "6 sammu Retail",
+      "url": "https://ektaco.ee/helpcenter/compucash5/uldine-compucash-5/6-sammu-alustamiseks-retail/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "cc5-kassa",
+      "title": "CC5 kassa aktiveerimine",
+      "url": "https://ektaco.ee/helpcenter/kassa/cc5-kassa/cc5-kassa-aktiveerimine/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "cc5-kassa",
+      "title": "CC5 sisselogimine",
+      "url": "https://ektaco.ee/helpcenter/kassa/cc5-kassa/programmi-kaivitamine-ja-sisselogimine-cc5/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "cc5-kassa",
+      "title": "CC5 offline",
+      "url": "https://ektaco.ee/helpcenter/kassa/cc5-kassa/offline-too-cc5/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "cc5-kassa",
+      "title": "CC5 vahetused",
+      "url": "https://ektaco.ee/helpcenter/kassa/cc5-kassa/vahetused-cc5/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "cc5-kassa",
+      "title": "CC5 arveread",
+      "url": "https://ektaco.ee/helpcenter/kassa/cc5-kassa/arveridadega-tegevused-cc5/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "cc5-kassa",
+      "title": "CC5 müük ja arve",
+      "url": "https://ektaco.ee/helpcenter/kassa/cc5-kassa/muuk-ja-arvega-seotud-tegevused-cc5/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    },
+    {
+      "section": "cc5-kassa",
+      "title": "CC5 kassa üldtoimingud",
+      "url": "https://ektaco.ee/helpcenter/kassa/cc5-kassa/kassaga-seotud-uldised-tegevused-cc5/",
+      "review_level": "article_opened",
+      "data_source": "official_public_helpcenter"
+    }
+  ]
+}
