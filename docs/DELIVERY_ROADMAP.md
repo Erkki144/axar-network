@@ -1,0 +1,139 @@
+# AXAR ONE — dependency-ordered delivery roadmap (#60)
+
+**Basis:** `docs/AXAR_ONE_SYSTEM_INVENTORY.md` and `docs/INTEGRATION_MATRIX.md` (both from `main` @ `1b7a3af`).
+
+**Rules for every step:**
+- one small draft PR per step;
+- tests and their results in the PR;
+- no merge to `main` or production deploy without the owner's separate approval;
+- no real payments, no data deletion, no secrets.
+
+**Responsibility:** Claude owns the technical decisions, implementation, tests and documentation. The owner decides only business questions (provider, hardware, cost, contracts) and repository / production settings. For each such question this document gives 2–3 options and a recommendation.
+
+## Kokkuvõte eesti keeles
+
+**Järjekord:**
+1. **P0:** turva- ja kooskõlakontrollid, kontori ekraanid funktsioonidele, millel praegu on ainult API, ning majutuse ettevalmistus.
+2. **P1:** üks täielik andmeahel, mis töötab ilma arendajata:
+   - tootekaart → kassa → makse → köök → ladu → aruanne → raamatupidamine;
+   - arve tühistus, kreeditarve ja tagastus koos laokandega.
+3. **P2:** päris seadmed ja katkestused:
+   - kassa paigaldus Windowsile ja Androidile;
+   - printer;
+   - terminali liivakast;
+   - koormustest 10 müügikohaga.
+4. **P3:** ülejäänud moodulid ja ühe müügikoha piloot.
+
+**Järgmine PR (P0-2):** kontoriekraan kolmele funktsioonile, millel praegu on ainult API:
+- **kassa seaded** — offline-piirang, omaniku otsus;
+- **võrguühenduseta kirjete läbivaatus** — kordamine või tagasilükkamine;
+- **registrite kooskõlakontroll.**
+
+**Mõõdetav valmimiskriteerium:** brauseritest tõestab kolm asja.
+1. Juht muudab piirangu 72 h → 24 h ja kassa saab uue piirangu järgmisel ühendusel.
+2. Juht kordab karantiinis olevat kirjet ja see rakendub täpselt üks kord.
+3. Kooskõla leht näitab 13 kontrolli olekut; tahtliku rikkumise korral muutub vastav rida punaseks.
+
+**Sinu otsustada (äriotsused, mitte tehnilised):**
+- **kaarditerminali pakkuja** (§4);
+- **keskserveri majutus** (§4);
+- `main`-i kaitse sisselülitamine;
+- hoidla privaatseks muutmine;
+- veebilehe turvauuenduse (#51) avaldamine.
+
+## 1. Ordered work list
+
+| Step | PR / issue | Content | Depends on | Acceptance criteria (measurable) | Test command | Owner | Risk |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **P0-1** | this PR (#60) | inventory + integration matrix + roadmap; `reconcile.check` R1–R13; `/admin/reconciliation`; `/admin/trace/sales/{id}`; one-day E2E chain test; tamper tests | — | 1 business day on 2 registers reconciles with only the honest R8 warning; each of 11 tampered registers is named; R13 on synced till data; mutation check 6 / 6 | `pytest tests/test_e2e_chain_reconciliation.py` (SQLite + `AXAR_TEST_PG`) | Claude | low (read-only code) |
+| **P0-2** | next PR | office screens for: POS settings (offline limit), sync quarantine (retry / dismiss with reason), reconciliation + trace | P0-1 | browser test: limit 72 → 24 h reaches the till on the next contact; quarantined entry retried once (no duplicate sale); reconciliation page shows 13 rows; a tampered register turns its row red | `pytest tests_e2e/test_office_admin.py` | Claude | low |
+| **P0-3** | PR | wire `terminals/` (provider-neutral adapter) into `payments.py`; the sandbox replaces the inline mock; unknown → reconcile path unchanged | — | all `test_payments.py` + `test_terminal_contract.py` pass through the adapter; no direct `MockTerminalTxn` writes left in `payments.py`; still **SIMULATED** | `pytest tests/test_payments.py tests/test_terminal_contract.py` | Claude | medium (payment path; covered by 23 + 20 tests) |
+| **P0-4** | #62 | scheduled reconciliation in the worker (every N min) → audit event + health flag; hosting runbook (TLS, backups off-site, restore drill, monitoring, incident) for the chosen host | P0-1; owner: hosting decision §4 | a failing rule raises a health flag within one worker cycle (test); runbook reviewed; restore drill on the target host documented with timings | `pytest tests/test_reconcile_schedule.py` | Claude (code, runbook), owner (host account) | medium |
+| **P0-5** | owner settings | apply branch protection (`products/axar-one/ops/BRANCH_PROTECTION.md`); private repo decision; approve #51 (critical `next`) | — | settings evidence (screenshot / API read-back); `npm audit` clean on the website | — | owner | high until done |
+| **P1-1** | #61 | product and menu item management: create / edit / price change with validity date / activate / deactivate / category; office UI; stock mode (none / item / recipe) | P0-2 (office shell) | browser test: office creates "Seljanka 6.50", sets its recipe, the till shows the button without restart, a sale consumes the recipe; an old sale keeps its historic price | `pytest tests_e2e/test_product_to_sale.py` | Claude | medium |
+| **P1-2** | #48 | cancel / correct / credit / refund with per-line disposition: restock (sealed goods only), write-off with waste reason, no movement; never restock prepared food as raw ingredients; append-only reversal documents; approvals | P1-1, P0-3 | the #48 test list: duplicate cancel once, 2-of-3 lines, sealed drink restocked + burger written off, card refund timeout → unknown not doubled, offline replay, reports + stock + export reconcile (R1–R13 green) | `pytest tests/test_cancellations.py` | Claude (code), owner's accountant (legal review) | high (legal / VAT) |
+| **P1-3** | #4, PR #8 | accounting delivery: export_queue → adapter (AXAR CONNECT v2 or an accountant-approved file export) with acknowledgement; R8 becomes "ok" | P1-2 | every queued row acknowledged exactly once with a receipt id; retry never double-posts; journal preview balances (debits = credits) | `pytest tests/test_books_delivery.py` | Claude + AION; owner's accountant (format) | medium |
+| **P1-4** | #29 | offline table bills (split / card / transfer) applied centrally instead of quarantined | P0-3 | O1b soak extended with bills: every bill on central exactly once, tenders equal | `pytest tests/test_payments_offline.py` | Claude | medium |
+| **P2-1** | #29 O5 | sync agent HTTP transport (TLS, device token), Windows packaging (installer, SQLCipher, auto-start), Android spike | P1-4 | a Windows VM till sells 72 h offline, reconnects, R13 green; installer reproducible from CI | packaging CI job + `pytest tests/test_offline_sync.py` | Claude; owner: target hardware | high |
+| **P2-2** | #42 | crash / power-loss (VM hard reset during writes), 10-outlet load (10 tills × 2 h simulated trading), chaos on the worker | P2-1 | 0 lost or doubled sales; R1–R13 green after every scenario; p95 sale latency reported | `pytest tests_load/` (new) | Claude | medium |
+| **P2-3** | #25 | receipt + kitchen printing: print queue, local bridge, ESC/POS, templates, printer-offline fallback | P2-1 | hardware-in-the-loop on the chosen printer; offline printer → job queued, never lost, never printed twice | HIL checklist + unit tests | Claude; owner: printer purchase | medium |
+| **P2-4** | #25 | real terminal in the provider's **sandbox** (after the owner's provider choice and sandbox access) | P0-3, owner decision §4 | sandbox run: approve, decline, timeout → unknown → reconcile, refund / reversal | provider sandbox suite | Claude; owner: contract | high (provider onboarding time) |
+| **P2-5** | #40 | menu publish to POS and TV boards (versioned, scheduled) | P1-1 | a published menu version reaches tills and a TV page; the sales history keeps old names and prices | `pytest tests_e2e/test_menu_publish.py` | Claude | medium |
+| **P3-1** | #27 | hierarchy: legal entity → site → outlet → register + warehouse (ADR-0013, additive migration + backfill) | P1-3 | migration up / down / up on a copy of pilot data; RLS tests per entity; reports per outlet | `pytest tests/test_hierarchy.py` | Claude; owner: real outlet list | medium |
+| **P3-2** | #38, #39, #18, #33, #32, #31 | chef workspace, guest QR, people / HACCP, CONTROL dashboard, extensions, in dependency order after the pilot path | P1–P2 | per issue | per issue | Claude | scope |
+| **P3-3** | #44 | 1-outlet shadow pilot (2 weeks, daily reconciliation report), then step-by-step expansion | P0–P2 complete | 14 days, every day R1–R13 green or explained; accountant sign-off | daily `/admin/reconciliation` export | owner + Claude | operational |
+
+## 2. Dependency graph
+
+```mermaid
+flowchart LR
+  P01[P0-1 reconcile + E2E + docs] --> P02[P0-2 office screens]
+  P01 --> P04[P0-4 scheduled check + hosting runbook]
+  P03[P0-3 terminal adapter wired] --> P12
+  P02 --> P11[P1-1 product / menu items]
+  P11 --> P12[P1-2 cancel / credit / disposition #48]
+  P12 --> P13[P1-3 accounting delivery]
+  P03 --> P14[P1-4 offline bills]
+  P14 --> P21[P2-1 till transport + Windows]
+  P21 --> P22[P2-2 crash / load]
+  P21 --> P23[P2-3 printers]
+  P03 --> P24[P2-4 terminal sandbox]
+  P11 --> P25[P2-5 menu publish + TV]
+  P13 --> P31[P3-1 hierarchy]
+  P22 --> P33[P3-3 pilot]
+  P23 --> P33
+  P24 --> P33
+  P31 --> P33
+  P05[P0-5 owner settings] --> P33
+```
+
+## 3. Definition of done for every PR
+
+1. Draft PR with base `main`; description lists what changed, its impact, tests run, and what is still not proven.
+2. SQLite and PostgreSQL suites green locally and in CI. The 7 required checks:
+   - `secret-scan`
+   - `sast-python`
+   - `changes`
+   - `test`
+   - `test-postgres`
+   - `browser-e2e`
+   - `dependency-audit`
+3. A migration only if needed. It must be additive, with an up / down / up check, and `tests/test_migration_history.py` must stay single-head.
+4. `reconcile.check` stays green on the new flows. New registers get a new R-rule plus a tamper test.
+5. Vercel skips the build (only `products/` or `docs/` change); production unchanged.
+6. No merge or deploy without the owner's separate approval.
+
+## 4. Business decisions for the owner (options + recommendation)
+
+### Card terminal provider (blocks P2-4; P0-3 does not wait)
+
+| Option | For | Against |
+| --- | --- | --- |
+| A. A provider with a published ECR / cloud terminal API and a public sandbox (the #25 research shortlisted Revolut, Nexi, Worldline) | integration can start in the sandbox before any contract; fastest path to a tested flow | fees and contract terms differ; check acceptance of local cards |
+| B. The owner's current bank's terminal | one bank relationship | the #25 research could **not** verify an integration API (LHV); may be impossible to integrate |
+| C. Stand-alone terminal (amount typed by hand) for the pilot | no integration work | double entry, typing errors, no automatic reconciliation (R3 cannot cover the card leg) |
+
+**Recommendation:** A. Request sandbox access from two shortlisted providers. Claude compares the APIs against the adapter contract (`terminals/`) before the owner signs anything. Nothing is bought until the owner approves.
+
+### Central server hosting (blocks P0-4 and the pilot)
+
+| Option | For | Against |
+| --- | --- | --- |
+| A. EU cloud: managed PostgreSQL + one container host, off-site backups | managed backups / patching; tills already survive 72 h offline, so a cloud outage does not stop selling | monthly cost; needs an account in the owner's name |
+| B. Server on site (zoo) + cloud backup | data stays on site | hardware, power and UPS responsibility; remote access and patching are harder |
+| C. Both: cloud central + an edge node per outlet (ADR-0012) | best resilience | most to operate; this is the long-term target anyway |
+
+**Recommendation:** A now, growing into C with P2-1. Claude prepares the runbook and cost comparison. The owner opens the account. No purchase without approval.
+
+## 5. Risks
+
+| ID | Risk | Mitigation | Step |
+| --- | --- | --- | --- |
+| K1 | Office cannot operate API-only functions (limits, quarantine, bank, staff) | office screens | P0-2, P1-1 |
+| K2 | Simulated card path looks "done" | always labelled SIMULATED; adapter wired before any provider work | P0-3, P2-4 |
+| K3 | Accounting rows pile up undelivered | R8 warning visible; delivery adapter | P1-3 |
+| K4 | Cancellations done "by hand" in the database | #48 documents with approvals; reconciliation flags manual edits | P1-2, P0-1 |
+| K5 | Legal / VAT treatment of credits and receipts | accountant review before release | P1-2 |
+| K6 | No hosting / monitoring | runbook + scheduled reconciliation alert | P0-4 |
+| K7 | Unprotected `main` on a public repository | owner settings | P0-5 |
+| K8 | Scope growth before the pilot path | P3 modules only after P2 | all |

@@ -38,7 +38,7 @@ class NoCacheStatic(StaticFiles):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-from . import __version__, auth, events, inventory, offline, orders, payments, services, sync
+from . import __version__, auth, events, inventory, offline, orders, payments, reconcile, services, sync
 from .config import Settings
 from .db import bind_tenant, init_db, make_engine, request_factory, seed_demo
 from .models import DrawerSession, Refund, Register, Sale, Tenant
@@ -1026,6 +1026,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def event_health(who: Who, s: Db):
         auth.require_admin(who)
         return {"head": events.latest_seq(s, who.tenant_id), "consumers": events.consumer_health(s, who.tenant_id)}
+
+    # ------------------------------------------- reconciliation and trace (#60)
+
+    @app.get("/api/v1/admin/reconciliation")
+    def reconciliation(who: Who, s: Db):
+        """Every cross-register invariant for this tenant (read-only). Spans all
+        locations, so it needs the owner or a tenant-wide manager (MFA)."""
+        auth.require_admin(who)
+        return reconcile.check(s, who.tenant_id)
+
+    @app.get("/api/v1/admin/trace/sales/{sale_id}")
+    def trace_sale(sale_id: str, who: Who, s: Db):
+        """One sale through every register it touched (read-only)."""
+        auth.require_admin(who)
+        return reconcile.trace_sale(s, who.tenant_id, sale_id)
 
     # ------------------------------------------------------------ auth (RFC-0002)
 
