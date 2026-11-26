@@ -13,10 +13,13 @@ import httpx
 import pytest
 from playwright.sync_api import expect
 
-from axar_pos import reconcile
 
-from axar_pos import auth
+from axar_pos import auth, reconcile
 from conftest import ROOT, Server
+
+# Hangs on a Windows workstation (also on the base branch, 26.11.2026; cause not yet found).
+# CI (Linux) always runs it. Remove the skip once the Windows cause is fixed.
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="known Windows hang; runs in Linux CI")
 from test_cashier_ui import add, open_drawer, pay, wait_quote
 
 KEY = base64.urlsafe_b64encode(b"e" * 32).decode()   # test-only server key

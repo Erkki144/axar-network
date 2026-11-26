@@ -20,7 +20,12 @@ import uuid
 
 import httpx
 
+import pytest
+
 from conftest import HEADERS, Server
+
+# kill -9 needs POSIX signals; CI (Linux) always runs this test.
+pytestmark = pytest.mark.skipif(not hasattr(signal, "SIGKILL"), reason="POSIX-only: needs signal.SIGKILL")
 
 
 def _sell(client: httpx.Client, reg: int, pid: int, key: str) -> httpx.Response:

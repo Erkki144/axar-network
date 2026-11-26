@@ -94,3 +94,17 @@ Kumbki ei jäta etappi vahele.
 
 | Field | Meaning (why it exists) | Required / default | Validation | Used by (till, stock, books, report) | Related fields / rules | AXAR decision (take / change / drop + why) |
 |---|---|---|---|---|---|---|
+
+## 7. Automatic guards (CI) — every piece in its place
+
+Rules people forget are checked by machines on every pull request. A guard that fails names the missing piece and the fix.
+
+| Guard | Who it replaces | What it checks | Where |
+|---|---|---|---|
+| **Event contracts** | integration architect | every event type the code can emit (also through helper functions) has `contracts/events/<type>.v<n>.schema.json`; no orphan schemas | `tests/test_guard_contracts.py` |
+| **Register coverage** | data architect | every database table is watched by a named reconciliation rule or is declared "not a ledger" with a reason; every named rule exists | `tests/test_guard_contracts.py` |
+| **Rule count** | tester | screens and tests count reconciliation rules from `reconcile.RULES`, never a hard-coded number | `reconcile.RULES` |
+| **Numbering** | release / merge manager | migration, ADR and architecture numbers are unique in the branch (error) and against every other open PR (warning naming the PR and the renumbering fix); one migration head | `scripts/check_number_collisions.py`, CI job `numbering` |
+| **Platform marks** | tester | tests that need Linux say so (`skipif` with reason); CI runs them all | `tests_e2e/test_durability.py`, `test_server_auth.py` |
+
+Proof that a guard works is a deliberate break: e.g. a probe module emitting `drawer.cash.moved` without a schema fails the event guard (checked 27.11.2026).
