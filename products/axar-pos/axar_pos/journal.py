@@ -134,6 +134,16 @@ def append(s: Session, *, tenant_id: str, stream_id: str, entry_type: str, entit
     return e
 
 
+def entry_id_for(s: Session, tenant_id: str, settings, entity_id: str) -> str | None:
+    """The journal entry that recorded ``entity_id`` on THIS node's device
+    stream (edge only; None centrally or if the document was not journaled here)."""
+    if not settings.edge_device_id:
+        return None
+    return s.scalar(select(DeviceJournalEntry.id).where(
+        DeviceJournalEntry.tenant_id == tenant_id, DeviceJournalEntry.entity_id == entity_id,
+        DeviceJournalEntry.stream_id == f"device:{settings.edge_device_id}"))
+
+
 def stream_for(settings, register_id: int) -> str:
     """Central server: one stream per register. Edge node: one per device."""
     return f"device:{settings.edge_device_id}" if settings.edge_device_id else stream_for_register(register_id)

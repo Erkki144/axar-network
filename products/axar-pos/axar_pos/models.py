@@ -1033,7 +1033,7 @@ class DeviceInbox(Base):
     payload_hash: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16))      # accepted | quarantined | resolved | dismissed
     reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
-    sale_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    sale_id: Mapped[str | None] = mapped_column(String(36), nullable=True)  # created document: sale or refund (O3)
     received_at: Mapped[datetime]
     resolved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(nullable=True)

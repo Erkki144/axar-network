@@ -292,14 +292,14 @@ def test_price_mismatch_is_quarantined_and_can_be_dismissed_with_a_reason(edge, 
                         .where(AuthEvent.event == "sync.quarantine_dismissed")) == 1
 
 
-def test_refunds_made_offline_are_quarantined_for_review(edge, central, app, clock):
+def test_refunds_made_offline_sync_to_the_central_copy_of_the_sale(edge, central, app, clock):
+    """O3 (was: quarantined for review). Details: tests/test_offline_refunds.py."""
     edge.open_drawer(10_000)
     sale = edge.sell([("KOHV", 2)], 1000).json()
     assert edge.as_role("manager").refund(sale["id"], [(1, 1)]).status_code == 201
     agent(edge, Net(central.c), clock).run_until_idle()
-    assert [x.status for x in outbox(edge)] == ["acked", "quarantined"]
-    [q] = central.as_role("manager").get("/api/v1/sync/quarantine").json()
-    assert q["entry_type"] == "refund" and "not supported yet" in q["reason"]
+    assert [x.status for x in outbox(edge)] == ["acked", "acked"]
+    assert central.as_role("manager").get("/api/v1/sync/quarantine").json() == []
 
 
 # -------------------------------------------------------------------- the edge
