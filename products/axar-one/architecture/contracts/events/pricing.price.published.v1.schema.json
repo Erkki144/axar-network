@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/pricing.price.published/1",
+  "title": "pricing.price.published v1 payload",
+  "description": "A price version was approved by a second person (four eyes, P1-1a / ADR-0016). price_list_id null = base price; price_cents null = not sold in that price list. Effective from valid_from; past sales never change.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version_id", "product_id", "sku", "price_list_id", "price_cents", "valid_from", "proposed_by", "approved_by"],
+  "properties": {
+    "version_id": {"type": "string", "minLength": 36, "maxLength": 36},
+    "product_id": {"type": "integer", "minimum": 1},
+    "sku": {"type": "string", "minLength": 1, "maxLength": 64},
+    "price_list_id": {"type": ["integer", "null"], "minimum": 1},
+    "price_cents": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000000},
+    "valid_from": {"type": "string", "format": "date-time"},
+    "proposed_by": {"type": "string", "minLength": 1, "maxLength": 64},
+    "approved_by": {"type": "string", "minLength": 1, "maxLength": 64}
+  }
+}

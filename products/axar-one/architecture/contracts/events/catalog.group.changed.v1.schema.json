@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/catalog.group.changed/1",
+  "title": "catalog.group.changed v1 payload",
+  "description": "A product group was created or changed (P1-1a). Tills re-read their catalog.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["group_id", "parent_id", "name", "active", "change"],
+  "properties": {
+    "group_id": {"type": "integer", "minimum": 1},
+    "parent_id": {"type": ["integer", "null"], "minimum": 1},
+    "name": {"type": "string", "minLength": 1, "maxLength": 100},
+    "active": {"type": "boolean"},
+    "change": {"enum": ["created", "updated"]}
+  }
+}

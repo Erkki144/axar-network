@@ -97,7 +97,8 @@ def bill_state(s: Session, tenant_id: str, order: Order, now: datetime, settings
         total = s.scalar(select(Sale.total_cents).where(Sale.id == order.sale_id))
     elif order.lines:
         bdate = services.business_date_for(now, settings)
-        total = sum(x.gross_cents for x in services._price_lines(s, tenant_id, _lines(order), bdate, None))
+        total = sum(x.gross_cents for x in services._price_lines(s, tenant_id, _lines(order), bdate, None,
+                                                                  location_id=order.location_id, at=now))
     else:
         total = 0
     pays = list(s.scalars(select(Payment).where(Payment.order_id == order.id, Payment.tenant_id == tenant_id)
@@ -512,7 +513,7 @@ def _issue_sale(s: Session, tenant_id: str, order: Order, st: BillState, registe
     drawer = _open_drawer(s, tenant_id, register_id)
     bdate = services.business_date_for(now, settings)
     sale_id = str(uuid.uuid4())
-    lines = services._price_lines(s, tenant_id, _lines(order), bdate, sale_id)
+    lines = services._price_lines(s, tenant_id, _lines(order), bdate, sale_id, location_id=order.location_id, at=now)
     total = sum(x.gross_cents for x in lines)
     if total != st.total:
         raise BillChanged("prices changed while settling; reload the bill")

@@ -7,7 +7,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update
@@ -420,12 +420,18 @@ def _request_hash(register_id: int, lines: list[LineRequest], tendered_cents: in
 
 
 def _price_lines(s: Session, tenant_id: str, lines: list[LineRequest], bdate: date,
-                 sale_id: str | None) -> list[SaleLine]:
-    """Server-side pricing: catalog price × quantity, VAT by business date.
+                 sale_id: str | None, *, location_id: int | None = None,
+                 at: datetime | None = None) -> list[SaleLine]:
+    """Server-side pricing: outlet price × quantity, VAT by business date.
 
-    Single source of truth for both real sales and quotes. Returns unsaved
+    Single source of truth for both real sales and quotes. The unit price is
+    the approved price valid at ``at`` for the outlet ``location_id``
+    (``catalog.price_for``, P1-1a); ``at`` None = now. Returns unsaved
     SaleLine snapshots (never added to the session here).
     """
+    from . import catalog  # local: catalog imports this module
+
+    at = at or datetime.now(timezone.utc)
     out: list[SaleLine] = []
     for i, req in enumerate(lines, start=1):
         p = s.scalar(
@@ -439,7 +445,8 @@ def _price_lines(s: Session, tenant_id: str, lines: list[LineRequest], bdate: da
             # Same response for "missing" and "belongs to another tenant".
             raise NotFound(f"product {req.product_id} not found")
         rate = tax_rate_for(s, p.tax_category, bdate)
-        gross = p.price_cents * req.quantity
+        unit = catalog.price_for(s, tenant_id, p, location_id, at)
+        gross = unit * req.quantity
         vat = vat_from_gross(gross, rate)
         out.append(SaleLine(
             sale_id=sale_id,
@@ -448,7 +455,7 @@ def _price_lines(s: Session, tenant_id: str, lines: list[LineRequest], bdate: da
             product_id=p.id,
             sku=p.sku,
             name=p.name,
-            unit_price_cents=p.price_cents,
+            unit_price_cents=unit,
             quantity=req.quantity,
             gross_cents=gross,
             tax_category=p.tax_category,
@@ -460,14 +467,14 @@ def _price_lines(s: Session, tenant_id: str, lines: list[LineRequest], bdate: da
 
 
 def quote_cash_sale(s: Session, *, tenant_id: str, lines: list[LineRequest],
-                    settings: Settings, now: datetime) -> dict:
+                    settings: Settings, now: datetime, location_id: int | None = None) -> dict:
     """Read-only price preview with exactly the sale's pricing; writes nothing.
 
     The UI shows these server numbers instead of computing VAT/rounding itself.
     The authoritative amounts are still the ones returned by the sale.
     """
     bdate = business_date_for(now, settings)
-    priced = _price_lines(s, tenant_id, lines, bdate, None)
+    priced = _price_lines(s, tenant_id, lines, bdate, None, location_id=location_id, at=now)
     s.rollback()  # nothing to persist; release the transaction
     total = sum(ln.gross_cents for ln in priced)
     vat_total = sum(ln.vat_cents for ln in priced)
@@ -548,7 +555,7 @@ def create_cash_sale(
     sale_id = str(uuid.uuid4())
     correlation_id = str(uuid.uuid4())
 
-    sale_lines = _price_lines(s, tenant_id, lines, bdate, sale_id)
+    sale_lines = _price_lines(s, tenant_id, lines, bdate, sale_id, location_id=register.location_id, at=now)
     total = sum(ln.gross_cents for ln in sale_lines)
     vat_total = sum(ln.vat_cents for ln in sale_lines)
     cash_due = round_cash(total, settings.cash_rounding_step_cents)
