@@ -895,6 +895,8 @@ function openModal(build) {
 }
 function closeModal() {
   if (S.payment?.state === 'sending' || S.refund?.state === 'sending' || S.bill?.state === 'sending' || S.cashMove?.state === 'sending') return; // never abandon an in-flight request
+  if (S.cashMove && (S.cashMove.state === 'sending' || S.cashMove.state === 'unconfirmed')) return;
+  if (S.cashMove && S.cashMove.state !== 'done') S.cashMove = null;
   if (S.bill && S.bill.state !== 'unconfirmed') S.bill = null;
   if (S.recovery) return; // recovery screen is blocking until resolved
   $('modal').hidden = true;
