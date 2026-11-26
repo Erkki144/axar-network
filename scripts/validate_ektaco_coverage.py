@@ -28,3 +28,19 @@ assert any("/veebimenuud/" in x["url"] for x in items)
 assert any("/veebimuuk/" in x["url"] for x in items)
 assert any("/windowsi-kassa-nupud/" in x["url"] for x in items)
 print(f"OK: {len(office)} office + {len(till)} till = {len(items)} unique documented source links")
+
+# Ensure every documented end-to-end dependency has an accountable owner and proof gate.
+gap = json.loads((ROOT / "docs" / "ektaco" / "AXAR_GAP_REGISTER.json").read_text(encoding="utf-8"))
+edges = gap["edges"]
+ids = [e["edge_id"] for e in edges]
+assert len(edges) == gap["record_count"] == 52
+assert ids == [f"E{i}" for i in range(1, 53)], "Edge order/gap/duplication"
+for edge in edges:
+    assert edge["primary_issue"].startswith("#")
+    assert edge["priority"].startswith("P")
+    assert edge["acceptance_evidence_required"] and edge["baseline"]
+for code, issue in [("E19", "#69"), ("E27", "#68")]:
+    e = next(x for x in edges if x["edge_id"] == code)
+    assert e["primary_issue"] == issue
+    assert e["baseline"] == "confirmed_missing_main_in_inspected_function"
+print(f"OK: {len(edges)} source→AXAR integration edges tracked with proof gates")
