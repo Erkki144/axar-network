@@ -79,22 +79,7 @@ class _Finding:
 
 def check(s: Session, tenant_id: str) -> dict:
     """Run every invariant for one tenant. ``ok`` is False if any check fails."""
-    findings = [
-        _drawers(s, tenant_id),
-        _sale_totals(s, tenant_id),
-        _tenders(s, tenant_id),
-        _refunds(s, tenant_id),
-        _numbering(s, tenant_id),
-        _events_per_document(s, tenant_id),
-        _event_pipeline(s, tenant_id),
-        _books_export(s, tenant_id),
-        _stock_consumption(s, tenant_id),
-        _stock_ledger(s, tenant_id),
-        _orders_and_kitchen(s, tenant_id),
-        _receivables(s, tenant_id),
-        _sync_inbox(s, tenant_id),
-        _sale_prices(s, tenant_id),
-    ]
+    findings = [rule(s, tenant_id) for rule in RULES]
     out = [f.out() for f in findings]
     return {"tenant_id": tenant_id, "ok": all(f["status"] != "fail" for f in out),
             "complete": all(f["status"] == "ok" for f in out),
@@ -566,3 +551,22 @@ def trace_sale(s: Session, tenant_id: str, sale_id: str) -> dict:
         "sync_inbox": [{"device_id": i.device_id, "seq": i.seq, "entry_id": i.entry_id, "status": i.status}
                        for i in inbox],
     }
+
+
+# Every invariant, in report order. Tests and screens count rules from here.
+RULES = (
+    _drawers,
+    _sale_totals,
+    _tenders,
+    _refunds,
+    _numbering,
+    _events_per_document,
+    _event_pipeline,
+    _books_export,
+    _stock_consumption,
+    _stock_ledger,
+    _orders_and_kitchen,
+    _receivables,
+    _sync_inbox,
+    _sale_prices,
+)

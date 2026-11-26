@@ -20,6 +20,8 @@ import pytest
 from fastapi.testclient import TestClient
 from playwright.sync_api import expect
 
+from axar_pos import reconcile
+
 from axar_pos import offline
 from axar_pos.api import create_app
 from axar_pos.config import Settings
@@ -71,7 +73,7 @@ def test_reconciliation_screen_names_a_tampered_register_and_traces_a_sale(offic
     open_office(p)
     p.click("#recon-run")
     rows = p.locator("#recon-list .recon-row")
-    expect(rows).to_have_count(14)
+    expect(rows).to_have_count(len(reconcile.RULES))
     expect(p.locator("#recon-list .recon-row.fail")).to_have_count(0)
     expect(p.locator('[data-check="R1.drawer_cash"]')).to_have_class("recon-row ok")
 
