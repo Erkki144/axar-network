@@ -57,14 +57,16 @@ class RecordedSandboxTerminal:
 
     def capabilities(self) -> Capabilities:
         # status_query is what makes "unknown" resolvable (contract rule 2).
-        return Capabilities(purchase=True, partial_amount=True, status_query=True, cancel_pending=False,
+        # cancel_pending: cancelling an attempt id the provider has not seen leaves a
+        # tombstone, so a late arrival of that request is answered "cancelled".
+        return Capabilities(purchase=True, partial_amount=True, status_query=True, cancel_pending=True,
                             refund=False, settlement_report=True)
 
     def health(self, terminal_id: str) -> Health:
         return Health(terminal_id, self.script != "offline", "" if self.script != "offline" else "terminal offline")
 
     def _result(self, row: MockTerminalTxn) -> TerminalResult:
-        status = Status.APPROVED if row.result == "approved" else Status.DECLINED
+        status = {"approved": Status.APPROVED, "cancelled": Status.CANCELLED}.get(row.result, Status.DECLINED)
         return TerminalResult(row.payment_id, status, row.amount_cents, provider_ref=f"SBX-{row.payment_id[:8]}",
                               auth_code="SIM001" if status == Status.APPROVED else None, card_brand="SIMULATED",
                               card_last4="0000", at=row.created_at, raw_status=row.result)
@@ -87,7 +89,7 @@ class RecordedSandboxTerminal:
                     s.rollback()
                     s.begin()
                     row = s.get(MockTerminalTxn, req.attempt_id)
-            elif row.amount_cents != req.amount_cents:
+            elif row.result != "cancelled" and row.amount_cents != req.amount_cents:
                 raise ValueError("attempt id reused with a different amount")
             res = self._result(row)
         finally:
@@ -106,7 +108,26 @@ class RecordedSandboxTerminal:
             s.close()
 
     def cancel(self, attempt_id: str) -> TerminalResult:
-        raise CapabilityNotSupported("cancel")
+        """Cancel by OUR attempt id. Already decided -> unchanged (an approval
+        stays an approval). Never seen -> a "cancelled" tombstone is stored, so
+        if the original request arrives later it is answered "cancelled" and
+        charges nothing."""
+        s = self._session()
+        try:
+            row = s.get(MockTerminalTxn, attempt_id)
+            if row is None:
+                row = MockTerminalTxn(payment_id=attempt_id, tenant_id=self.tenant_id, amount_cents=0,
+                                      result="cancelled", created_at=datetime.now(timezone.utc))
+                s.add(row)
+                try:
+                    s.commit()
+                except IntegrityError:                    # the original arrived at the same moment
+                    s.rollback()
+                    s.begin()
+                    row = s.get(MockTerminalTxn, attempt_id)
+            return self._result(row)
+        finally:
+            s.close()
 
     def refund(self, req: RefundRequest) -> TerminalResult:
         raise CapabilityNotSupported("refund")     # card refunds come with #48

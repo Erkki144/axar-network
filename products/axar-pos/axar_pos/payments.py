@@ -104,7 +104,7 @@ def bill_state(s: Session, tenant_id: str, order: Order, now: datetime, settings
                           .order_by(Payment.created_at, Payment.id).execution_options(populate_existing=True)))
     captured = sum(p.amount_cents for p in pays if p.status == "captured")
     pend_tr = sum(p.amount_cents for p in pays if p.method == "transfer" and p.status == "pending")
-    reserved = sum(p.amount_cents for p in pays if p.method == "card" and p.status in ("pending", "unknown"))
+    reserved = sum(p.amount_cents for p in pays if p.method == "card" and p.status in IN_FLIGHT)
     rounding = sum(p.rounding_cents for p in pays if p.status == "captured")
     return BillState(total, captured, pend_tr, reserved, total - captured - pend_tr - reserved, rounding, pays)
 
@@ -268,19 +268,31 @@ def card_terminal(s: Session, tenant_id: str, simulate: str = "approved"):
     return RecordedSandboxTerminal(s.get_bind(), tenant_id, SIMULATE_TO_SCRIPT[simulate])
 
 
+DISPATCH_LEASE = timedelta(minutes=2)          # how long a dispatcher owns a "sending" attempt
+IN_FLIGHT = ("sending", "pending", "unknown")   # card states that reserve their amount on the bill
+
+
+class DispatchInProgress(Conflict):
+    code = "dispatch_in_progress"
+
+
 def pay_card(s: Session, *, tenant_id: str, order_id: str, register_id: int, expected_total_cents: int,
              amount_cents: int, simulate: str, idempotency_key: str, actor: str, settings: Settings,
              now: datetime) -> tuple[Payment, bool]:
     """Card tender through the provider-neutral terminal flow (SIMULATED provider).
 
-    1. The attempt is recorded FIRST as ``unknown`` (it reserves its amount on
-       the bill) and committed, so its id exists before the terminal is asked.
+    1. The attempt is recorded FIRST as ``sending`` (it reserves its amount on
+       the bill; this request OWNS the dispatch for ``DISPATCH_LEASE``) and
+       committed, so its id exists before the terminal is asked.
     2. ``terminals.flow.charge`` talks to the terminal OUTSIDE any POS
        transaction; our payment id is the provider's idempotency key.
-    3. The answer is recorded: captured / declined; a lost answer stays
-       ``unknown`` until ``reconcile_card`` asks the provider. A request that
-       provably never reached the provider is ``declined`` (no money taken).
-    A crash between 1 and 3 leaves ``unknown``: reconciliation finds out."""
+    3. The answer is recorded: captured / declined; a lost answer becomes
+       ``unknown`` (released to ``reconcile_card``). A request that provably
+       never reached the provider is ``declined``. A provider answer for another
+       attempt id or amount is never trusted: it stays ``unknown`` and is audited.
+    A crash between 1 and 3 leaves ``sending``; after the lease, reconciliation
+    asks the provider and, if the provider has not seen the attempt, CANCELS it
+    there first, so a late arrival of the original request can no longer charge."""
     from .terminals import PaymentRequest, flow
 
     if simulate not in SIMULATE_TO_SCRIPT:
@@ -299,7 +311,7 @@ def pay_card(s: Session, *, tenant_id: str, order_id: str, register_id: int, exp
         # This tender completes the bill, and completing issues the receipt on this
         # register's open drawer: check that BEFORE the terminal takes any money.
         _open_drawer(s, tenant_id, register_id)
-    p = _new_payment(order, method="card", status="unknown", amount=amount_cents, register_id=register_id,
+    p = _new_payment(order, method="card", status="sending", amount=amount_cents, register_id=register_id,
                      key=idempotency_key, req_hash=req, actor=actor, now=now)
     p, replayed = _commit_payment(s, tenant_id, order, p, idempotency_key, req, settings, now)
     if replayed:
@@ -309,16 +321,39 @@ def pay_card(s: Session, *, tenant_id: str, order_id: str, register_id: int, exp
                           PaymentRequest(attempt_id=p.id, terminal_id=terminal_id, amount_cents=amount_cents,
                                          reference=f"bill:{order_id}"))
     status = {"captured": "captured", "declined": "declined", "not_sent": "declined"}.get(outcome.pos_status, "unknown")
-    return _record_card_outcome(s, tenant_id, p.id, status, outcome, now, settings), False
+    return _record_card_outcome(s, tenant_id, p.id, status, outcome, now, settings, owner_states=("sending",)), False
+
+
+def _trusted(s: Session, tenant_id: str, p: Payment, status: str, outcome, now: datetime) -> str:
+    """A provider answer must be about THIS attempt and THIS amount; otherwise
+    it is not used to decide anything (stays unknown) and is audited."""
+    res = outcome.result if outcome is not None else None
+    if res is None or status not in ("captured", "declined"):
+        return status
+    if res.attempt_id == p.id and (res.amount_cents == p.amount_cents or status == "declined"):
+        return status
+    from . import auth
+
+    auth.audit(s, now, "card.provider_mismatch", "fail", tenant_id=tenant_id, staff_id=p.created_by,
+               detail=json.dumps({"payment": p.id, "provider_attempt": res.attempt_id,
+                                  "expected_cents": p.amount_cents, "provider_cents": res.amount_cents,
+                                  "provider_status": res.status.value}))
+    return "unknown"
 
 
 def _record_card_outcome(s: Session, tenant_id: str, payment_id: str, status: str, outcome, now: datetime,
-                         settings: Settings) -> Payment:
+                         settings: Settings, *, owner_states: tuple[str, ...]) -> Payment:
+    """Apply a provider answer. Only a holder of the attempt (``owner_states``)
+    may move it, EXCEPT that money the provider took is never discarded: an
+    approval for an attempt already recorded as declined is recorded as captured
+    (late approval), audited, and left for reconciliation if it overpays."""
     order_id = s.scalar(select(Payment.order_id).where(Payment.id == payment_id, Payment.tenant_id == tenant_id))
     order = _lock_bill(s, tenant_id, order_id)
     p = s.scalar(select(Payment).where(Payment.id == payment_id).execution_options(populate_existing=True))
-    if p.status not in ("unknown", "pending") or status == "unknown":
-        s.rollback()                 # already resolved by someone else, or still unknown: nothing to change
+    status = _trusted(s, tenant_id, p, status, outcome, now)     # may add an audit row (kept below)
+    late_approval = status == "captured" and p.status == "declined"
+    if status == p.status or (p.status not in owner_states and not late_approval):
+        s.commit()                   # nothing new, or someone else already resolved it (keeps any audit row)
         return p
     ref = outcome.result.provider_ref[:64] if outcome is not None and outcome.result is not None \
         and outcome.result.provider_ref else None
@@ -327,6 +362,11 @@ def _record_card_outcome(s: Session, tenant_id: str, payment_id: str, status: st
         pay.status, pay.updated_at = status, now
         if ref:
             pay.provider_ref = ref
+        if late_approval:
+            from . import auth
+
+            auth.audit(sess, now, "card.late_approval", "fail", tenant_id=tenant_id, staff_id=pay.created_by,
+                       detail=json.dumps({"payment": pay.id, "amount_cents": pay.amount_cents}))
         sess.flush()
 
     record(s, p)
@@ -335,9 +375,9 @@ def _record_card_outcome(s: Session, tenant_id: str, payment_id: str, status: st
         s.commit()
     except services.DomainError:
         # The provider already decided (money may be taken): the payment is ALWAYS
-        # recorded. Only issuing the receipt failed (e.g. the drawer was closed in
-        # the meantime); reconciliation R11 flags the covered bill without a sale
-        # and ``settle_bill`` finishes it once the cause is fixed.
+        # recorded. Only issuing the receipt failed (drawer closed meanwhile, or a
+        # late approval overpays the bill); reconciliation R11 names the bill and
+        # ``settle_bill`` (or a refund) finishes it.
         s.rollback()
         _lock_bill(s, tenant_id, order_id)
         p = s.scalar(select(Payment).where(Payment.id == payment_id).execution_options(populate_existing=True))
@@ -364,19 +404,44 @@ def get_payment(s: Session, tenant_id: str, payment_id: str) -> Payment:
 
 
 def reconcile_card(s: Session, *, tenant_id: str, payment_id: str, settings: Settings, now: datetime) -> Payment:
-    """Ask the provider (``terminals.flow.resolve``) what really happened to an
-    'unknown' card payment. Not found at the provider = no money taken."""
-    from .terminals import flow
+    """Ask the provider (``terminals.flow.resolve``) what really happened to a
+    card attempt whose answer is missing.
+
+    - While its dispatcher still owns it (``sending`` within ``DISPATCH_LEASE``)
+      the attempt is refused: 409 ``dispatch_in_progress``.
+    - "Not found" at the provider is NOT taken as "no money": the request may
+      still be on its way. The attempt is first CANCELLED at the provider by
+      its id (idempotent), so a late arrival is answered "cancelled" and can
+      never charge. Only then is it declined. A provider that cannot cancel
+      leaves it ``unknown`` for a person to decide."""
+    from .terminals import CapabilityNotSupported, Status, flow
 
     p = s.scalar(select(Payment).where(Payment.id == payment_id, Payment.tenant_id == tenant_id))
     if p is None or p.method != "card":
         raise NotFound("card payment not found")
-    if p.status not in ("unknown", "pending"):
+    if p.status not in IN_FLIGHT:
         return p
+    if p.status == "sending" and now - _aware(p.updated_at) < DISPATCH_LEASE:
+        raise DispatchInProgress("the terminal is still processing this payment; try again shortly")
     s.rollback()                     # never hold a POS transaction while talking to the provider
-    outcome = flow.resolve(card_terminal(s, tenant_id), payment_id, max_polls=1)
+    adapter = card_terminal(s, tenant_id)
+    outcome = flow.resolve(adapter, payment_id, max_polls=1)
+    if outcome.result is not None and outcome.result.status == Status.NOT_FOUND:
+        try:
+            from .terminals.flow import _outcome
+
+            outcome = _outcome(payment_id, adapter.cancel(payment_id))   # fence off a late arrival
+        except CapabilityNotSupported:
+            return _record_card_outcome(s, tenant_id, payment_id, "unknown", None, now, settings,
+                                        owner_states=IN_FLIGHT)
     status = {"captured": "captured", "declined": "declined"}.get(outcome.pos_status, "unknown")
-    return _record_card_outcome(s, tenant_id, payment_id, status, outcome, now, settings)
+    return _record_card_outcome(s, tenant_id, payment_id, status, outcome, now, settings, owner_states=IN_FLIGHT)
+
+
+def _aware(dt: datetime) -> datetime:
+    from datetime import timezone
+
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 def pay_transfer(s: Session, *, tenant_id: str, order_id: str, register_id: int, expected_total_cents: int,

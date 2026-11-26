@@ -392,7 +392,11 @@ def _orders_and_kitchen(s: Session, tenant_id: str) -> _Finding:
                        on_tickets=ticket_qty.get((o.id, ln.product_id), 0))
         if o.status in ("paid", "invoiced", "closed") and o.sale_id is None:
             f.fail(order_id=o.id, status=o.status, reason="settled order without a sale")
-        if o.sale_id is None and o.id in covered and covered[o.id] >= _order_total(s, tenant_id, o):
+        bill_total = s.get(Sale, o.sale_id).total_cents if o.sale_id else _order_total(s, tenant_id, o)
+        if covered.get(o.id, 0) > bill_total:
+            f.fail(order_id=o.id, covered_cents=covered[o.id], total_cents=bill_total,
+                   reason="payments exceed the bill (e.g. a late card approval): refund the difference")
+        if o.sale_id is None and o.id in covered and covered[o.id] >= bill_total:
             f.fail(order_id=o.id, status=o.status, covered_cents=covered[o.id],
                    reason="bill fully covered by payments but no receipt issued")
         if o.sale_id is not None:

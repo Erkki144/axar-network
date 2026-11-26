@@ -1110,7 +1110,7 @@ async function submitPayment() {
 // journal + Idempotency-Key as a sale.
 
 const METHOD_ET = { cash: 'Sularaha', card: 'Kaart', transfer: 'Ülekanne' };
-const PAY_STATUS_ET = { captured: 'laekunud', pending: 'ootab panka', unknown: 'teadmata', declined: 'keeldutud' };
+const PAY_STATUS_ET = { captured: 'laekunud', pending: 'ootab panka', unknown: 'teadmata', sending: 'terminalis', declined: 'keeldutud' };
 const roundCash5 = (c) => Math.floor((2 * c + 5) / 10) * 5; // == server round_cash(c, 5), c >= 0
 
 async function openBillPayment() {
@@ -1170,7 +1170,7 @@ function renderBill(c) {
     const li = el('li', `pay-${p.status}`);
     li.append(el('span', null, `${METHOD_ET[p.method]} ${formatEuro(p.amount_cents)}${p.rounding_cents ? ` (ümardus ${formatEuro(p.rounding_cents)})` : ''}`),
       el('span', 'muted', PAY_STATUS_ET[p.status] || p.status));
-    if (p.method === 'card' && p.status === 'unknown') {
+    if (p.method === 'card' && (p.status === 'unknown' || p.status === 'sending')) {
       const rb = el('button', 'secondary-btn', 'Küsi terminalist'); rb.type = 'button'; rb.dataset.reconcile = p.id;
       rb.addEventListener('click', () => reconcileCard(p.id, rb));
       li.append(rb);

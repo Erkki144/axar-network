@@ -14,6 +14,8 @@ provider needs:
 """
 
 import uuid
+
+import pytest
 from pathlib import Path
 
 from sqlalchemy import select
@@ -139,3 +141,163 @@ def test_drawer_closed_during_the_terminal_call_records_the_money_and_can_be_set
     again = a.post(f"/api/v1/orders/{o['id']}/settle", {"register_id": a.register_id()})
     assert again.status_code == 200 and again.json()["sale_id"] == r.json()["sale_id"]   # idempotent
     assert m.get("/api/v1/admin/reconciliation").json()["ok"] is True
+
+
+# ------------------------------------------- AION review (#65): live dispatch races
+# A deterministic barrier pauses the dispatching request inside the terminal
+# call while the test reconciles, pays again, and then lets it finish.
+
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+
+from axar_pos.models import AuthEvent, Sale
+from axar_pos.terminals import TerminalResult
+
+
+def _wait_for_status(app, status, timeout=10.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        with app.state.session_factory() as s:
+            p = s.scalars(select(Payment).where(Payment.method == "card", Payment.status == status)).first()
+            if p is not None:
+                return p.id
+        time.sleep(0.02)
+    raise AssertionError(f"no card payment reached {status!r}")
+
+
+def _paused_terminal(monkeypatch, *, reach_provider_first: bool):
+    """Patch the simulated provider: the dispatcher stops at a barrier, either
+    BEFORE its request reaches the provider or AFTER the provider approved but
+    before the answer gets back."""
+    entered, go = threading.Event(), threading.Event()
+    real = RecordedSandboxTerminal.start_payment
+
+    def paused(self, req):
+        if reach_provider_first:
+            res = real(self, req)
+            entered.set()
+            assert go.wait(20)
+            return res
+        entered.set()
+        assert go.wait(20)
+        return real(self, req)
+
+    monkeypatch.setattr(RecordedSandboxTerminal, "start_payment", paused)
+    return entered, go
+
+
+def _audit(app, event):
+    with app.state.session_factory() as s:
+        return list(s.scalars(select(AuthEvent).where(AuthEvent.event == event)))
+
+
+def test_reconcile_during_a_live_dispatch_cannot_release_the_reservation_or_charge_twice(a, app, monkeypatch, clock):
+    a.open_drawer()
+    o = open_bill(a, [("KOHV", 2)])
+    entered, go = _paused_terminal(monkeypatch, reach_provider_first=False)
+    with ThreadPoolExecutor(1) as pool:
+        first = pool.submit(pay, a, o["id"], "card", 500, 500)
+        assert entered.wait(10)
+        pid = _wait_for_status(app, "sending")
+        r = a.post(f"/api/v1/payments/{pid}/reconcile")                  # dispatcher still owns it
+        assert r.status_code == 409 and r.json()["error"] == "dispatch_in_progress"
+        assert bill(a, o["id"])["in_flight_cents"] == 500                  # reservation kept
+        clock.at += timedelta(minutes=3)                                   # the dispatcher looks dead
+        r = a.post(f"/api/v1/payments/{pid}/reconcile")                    # provider: not found -> cancelled there
+        assert r.status_code == 200 and r.json()["remaining_cents"] == 500 and r.json()["in_flight_cents"] == 0
+        assert provider_rows(app) == {pid: "cancelled"}                    # tombstone fences a late arrival
+        monkeypatch.undo()
+        second = pay(a, o["id"], "card", 500, 500)                         # the customer pays again
+        assert second.status_code == 201 and second.json()["bill"]["status"] == "paid"
+        go.set()                                                           # the original request finally arrives
+        late = first.result(20)
+    assert late.status_code == 201 and late.json()["payment"]["status"] == "declined"   # answered "cancelled"
+    rows = provider_rows(app)
+    assert sorted(rows.values()) == ["approved", "cancelled"]               # money taken exactly once
+    with app.state.session_factory() as s:
+        assert len(list(s.scalars(select(Sale)))) == 1
+    assert a.as_role("manager").get("/api/v1/admin/reconciliation").json()["ok"] is True
+
+
+def test_provider_approval_found_by_reconcile_is_kept_when_the_late_answer_arrives(a, app, monkeypatch, clock):
+    a.open_drawer()
+    o = open_bill(a, [("KOHV", 2)])
+    entered, go = _paused_terminal(monkeypatch, reach_provider_first=True)
+    with ThreadPoolExecutor(1) as pool:
+        first = pool.submit(pay, a, o["id"], "card", 500, 500)
+        assert entered.wait(10)
+        pid = _wait_for_status(app, "sending")
+        clock.at += timedelta(minutes=3)
+        r = a.post(f"/api/v1/payments/{pid}/reconcile")                    # provider already approved
+        assert r.status_code == 200 and r.json()["status"] == "paid" and r.json()["sale_id"]
+        again = pay(a, o["id"], "card", 500, 500)                          # nothing left to pay
+        assert again.status_code in (409, 422)
+        go.set()
+        late = first.result(20)
+    assert late.json()["payment"]["status"] == "captured"                  # not discarded, not doubled
+    assert list(provider_rows(app).values()) == ["approved"]
+    with app.state.session_factory() as s:
+        assert len(list(s.scalars(select(Sale)))) == 1
+
+
+def test_a_late_approval_is_never_discarded_even_if_the_attempt_was_marked_declined(a, app, monkeypatch):
+    a.open_drawer()
+    o = open_bill(a, [("KOHV", 2)])
+    entered, go = _paused_terminal(monkeypatch, reach_provider_first=True)
+    with ThreadPoolExecutor(1) as pool:
+        first = pool.submit(pay, a, o["id"], "card", 500, 500)
+        assert entered.wait(10)
+        pid = _wait_for_status(app, "sending")
+        with app.state.admin_engine.begin() as c:                           # a wrong resolution behind our back
+            from sqlalchemy import text
+            c.execute(text("UPDATE payments SET status = 'declined' WHERE id = :p"), {"p": pid})
+        go.set()
+        late = first.result(20)
+    assert late.json()["payment"]["status"] == "captured"                   # the money is recorded
+    assert late.json()["bill"]["status"] == "paid"
+    assert len(_audit(app, "card.late_approval")) == 1
+
+
+def test_a_late_approval_that_overpays_is_recorded_and_named_by_reconciliation(a, app, monkeypatch):
+    a.open_drawer()
+    o = open_bill(a, [("KOHV", 2)])
+    entered, go = _paused_terminal(monkeypatch, reach_provider_first=True)
+    with ThreadPoolExecutor(1) as pool:
+        first = pool.submit(pay, a, o["id"], "card", 500, 500)
+        assert entered.wait(10)
+        pid = _wait_for_status(app, "sending")
+        with app.state.admin_engine.begin() as c:                           # wrongly declined, then paid in cash
+            from sqlalchemy import text
+            c.execute(text("UPDATE payments SET status = 'declined' WHERE id = :p"), {"p": pid})
+        assert pay(a, o["id"], "cash", 500, 500, tendered_cents=500).status_code == 201
+        go.set()
+        late = first.result(20)
+    assert late.json()["payment"]["status"] == "captured"                   # recorded, never dropped
+    rep = a.as_role("manager").get("/api/v1/admin/reconciliation").json()
+    r11 = next(c for c in rep["checks"] if c["check"] == "R11.orders_kitchen")
+    assert not rep["ok"] and any("payments exceed the bill" in x["reason"] for x in r11["problems"])
+
+
+@pytest.mark.parametrize("field", ["amount_cents", "attempt_id"])
+def test_a_provider_answer_for_another_attempt_or_amount_is_not_trusted(a, app, monkeypatch, field):
+    a.open_drawer()
+    o = open_bill(a, [("KOHV", 2)])
+    real = RecordedSandboxTerminal.start_payment
+
+    def wrong(self, req):
+        res = real(self, req)
+        changes = {"amount_cents": res.amount_cents + 1} if field == "amount_cents" else {"attempt_id": "x" * 12}
+        from dataclasses import replace
+        return replace(res, **changes)
+
+    monkeypatch.setattr(RecordedSandboxTerminal, "start_payment", wrong)
+    r = pay(a, o["id"], "card", 300, 500)
+    assert r.status_code == 201 and r.json()["payment"]["status"] == "unknown"   # never captured on bad data
+    assert r.json()["bill"]["in_flight_cents"] == 300 and r.json()["bill"]["sale_id"] is None
+    assert len(_audit(app, "card.provider_mismatch")) == 1
+    monkeypatch.undo()
+    pid = r.json()["payment"]["id"]
+    r = a.post(f"/api/v1/payments/{pid}/reconcile")                        # the provider's own record decides
+    assert r.status_code == 200 and r.json()["paid_cents"] == 300
