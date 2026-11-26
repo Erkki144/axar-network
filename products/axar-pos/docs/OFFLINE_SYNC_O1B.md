@@ -76,8 +76,8 @@ UPDATE` (no `DELETE`) for the application role.
 1. **Central prices.** A sale is applied at central prices. If they differ from
    what the till charged, the sale is quarantined, not recorded "as sold".
    Recording at the snapshot price comes with the signed price snapshot (O2).
-2. **Offline refunds** are quarantined for manual review; automatic refund sync
-   is O3.
+2. **Offline refunds** sync automatically since O3 (see below). Table bills paid
+   offline (split/card/transfer) still go to the review queue.
 3. **Cash drawer** is per register on the central side; the till's drawer must
    be open centrally, otherwise the sale is quarantined and can be retried after
    the drawer is opened.
@@ -125,3 +125,16 @@ missed. Already-applied migrations 0001–0005 are not changed.
 - Tests: `tests_e2e/test_offline_banner.py` (warning + selling works, lock + basket kept + selling after contact, clock set back, no banner centrally).
 
 Migration `0007_offline_limit`: `pos_settings` (central) and `edge_sync_state` (edge), RLS + grants without DELETE.
+
+## O3: offline refunds sync automatically
+
+| Rule | How | Test (`tests/test_offline_refunds.py`) |
+|---|---|---|
+| A refund made on the till is applied centrally to the central copy of its original sale | the till's refund payload carries the original sale's journal entry id; the central server finds that entry in `device_inbox` and refunds the sale it created | `test_offline_sale_and_partial_refunds_sync_exactly_once` |
+| Never refunded twice | idempotency key `edge:<refund entry id>`; inbox dedup per device+seq; a retry of an already-applied refund links to it | same + `test_retry_never_refunds_twice_even_if_the_refund_already_exists` |
+| Order is respected | a refund of a sale that is still quarantined (or dismissed) is quarantined too; once the sale is retried, the refund can be retried | `test_refund_waits_for_its_quarantined_sale_and_applies_once_after_retry` |
+| Amounts must match | the central refund total must equal what the till paid out, otherwise `price_mismatch` → review queue, nothing applied | `test_refund_whose_amount_differs_is_quarantined_not_applied` |
+| Same rules as at the till | manager/owner role required; open central drawer with enough cash; never more units than sold | existing refund rules in `services.create_cash_refund` |
+
+`device_inbox.sale_id` holds the id of the document an entry created (a sale or a refund).
+Mutation check: 4 of 5 deliberate bugs caught; the 5th (dropping the status check) is equivalent, because a quarantined or dismissed sale never has a central sale id.

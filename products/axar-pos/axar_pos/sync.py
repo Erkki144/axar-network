@@ -103,7 +103,8 @@ def _apply(s: Session, *, tenant_id: str, device_id: str, w: dict, payload: dict
     """Apply one entry; ``on_success(sess, sale_id)`` runs inside the same
     transaction just before commit. Returns the sale id. Raises _Quarantine."""
     if w["type"] == "refund":
-        raise _Quarantine("refund sync is not supported yet (O3); review manually")
+        return _apply_refund(s, tenant_id=tenant_id, w=w, payload=payload, settings=settings, now=now,
+                             on_success=on_success)
     if w["type"] != "sale":
         raise _Quarantine(f"unknown entry type {w['type']!r}")
     if payload.get("kind") == "bill":
@@ -123,6 +124,54 @@ def _apply(s: Session, *, tenant_id: str, device_id: str, w: dict, payload: dict
         on_success(s, sale.id)
         s.commit()
     return sale.id
+
+
+class _RefundMismatch(services.DomainError):
+    code = "price_mismatch"
+
+
+def _apply_refund(s: Session, *, tenant_id: str, w: dict, payload: dict, settings, now, on_success) -> str:
+    """O3: a refund made on the till is applied to the CENTRAL copy of its
+    original sale (found through the sale's journal entry), with idempotency
+    key ``edge:<refund entry id>``. Anything that does not match exactly goes
+    to the review queue. Returns the refund id."""
+    orig_entry = payload.get("original_entry_id")
+    if not orig_entry:
+        raise _Quarantine("refund of a sale that was not made on this till offline; review manually")
+    orig = s.scalar(select(DeviceInbox).where(DeviceInbox.tenant_id == tenant_id, DeviceInbox.entry_id == orig_entry))
+    if orig is None:
+        raise _Quarantine("the original sale has not been received yet")
+    if orig.status not in ("accepted", "resolved") or not orig.sale_id:
+        raise _Quarantine(f"the original sale is {orig.status} (resolve it first, then retry this refund)")
+    if payload.get("role") not in services.REFUND_ROLES:
+        raise _Quarantine(f"refund role {payload.get('role')!r} is not allowed to refund")
+    reg = s.scalar(select(Register).where(Register.tenant_id == tenant_id, Register.code == payload.get("register_code"),
+                                          Register.active.is_(True)))
+    if reg is None:
+        raise _Quarantine(f"unknown register {payload.get('register_code')!r}")
+    lines = [services.RefundLineRequest(int(no), int(qty)) for no, qty in payload.get("sale_lines", [])]
+    if not lines:
+        raise _Quarantine("refund without lines")
+    expected = (payload.get("expect") or {}).get("total_cents")
+
+    def check_then_record(sess: Session, refund) -> None:
+        if refund.total_cents != expected:
+            raise _RefundMismatch(f"till refunded {expected}, central sale gives {refund.total_cents}")
+        on_success(sess, refund.id)
+
+    try:
+        refund, replayed = services.create_cash_refund(
+            s, tenant_id=tenant_id, register_id=reg.id, cashier_id=str(payload.get("cashier_id") or "edge")[:64],
+            role=payload["role"], sale_id=orig.sale_id, idempotency_key=f"edge:{w['id']}", lines=lines,
+            reason=str(payload.get("reason") or "offline refund")[:200], settings=settings, now=now,
+            approved_by=str(payload.get("approved_by") or "")[:64] or None, before_commit=check_then_record)
+    except services.DomainError as e:
+        s.rollback()
+        raise _Quarantine(f"{e.code}: {e}") from None
+    if replayed:                       # applied earlier (e.g. manager retry): record, never refund twice
+        on_success(s, refund.id)
+        s.commit()
+    return refund.id
 
 
 # ------------------------------------------------------------------ ingest

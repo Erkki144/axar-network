@@ -788,7 +788,7 @@ def _create_cash_refund(
         return _refund_replay_or_conflict(existing, req_hash)
     from . import offline
     offline.guard(s, settings, tenant_id, now)
-    get_register(s, tenant_id, register_id)
+    register = get_register(s, tenant_id, register_id)
     drawer = get_open_drawer(s, tenant_id, register_id)
     if drawer is None:
         raise NoOpenDrawer("open this register's cash drawer before refunding")
@@ -956,8 +956,13 @@ def _create_cash_refund(
         s.flush()  # a concurrent same-key refund fails HERE (handled below), before the journal
         journal.record(s, settings, tenant_id=tenant_id, register_id=register_id, entry_type="refund",
                        entity_id=refund.id, summary=journal.refund_summary(refund, refund_lines), now=now,
-                       payload={"original_sale_id": sale.id, "cashier_id": cashier_id, "reason": reason,
+                       payload={"original_sale_id": sale.id,
+                                # O3: lets the central server find ITS copy of the sale
+                                "original_entry_id": journal.entry_id_for(s, tenant_id, settings, sale.id),
+                                "register_code": register.code, "cashier_id": cashier_id,
+                                "approved_by": approved_by or cashier_id, "role": role, "reason": reason,
                                 "local_time": now.isoformat(),
+                                "sale_lines": [[r.line_no, r.quantity] for r in lines],
                                 "lines": [[ln.sku, ln.quantity, ln.gross_cents] for ln in refund_lines],
                                 "expect": {"total_cents": total, "cash_paid_cents": cash_paid}})
         s.commit()
