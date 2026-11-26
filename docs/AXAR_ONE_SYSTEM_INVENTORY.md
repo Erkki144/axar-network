@@ -121,7 +121,7 @@ Abbreviations:
 | C05 | Per-register receipt series (K1-000123), hash-chained device journal | #29, #49 | **INTEGRATED** | `journal.py` | `T/test_device_journal.py` (14) | #49 `c1f541d` | journal verify UI |
 | C06 | Table orders, kitchen tickets, ready status, realtime (SSE) | #13, #16 | **E2E TESTED** | `orders.py`, `api.py` `/events/stream` | `T/test_orders.py` (13), `E/test_cross_device_orders.py` (7) | #13, #21 | stations / routing, bump screen hardware, printer fallback |
 | C07 | Bill payments: split cash / **simulated** card / transfer receivable, bank import matching | #15 C3 | **E2E TESTED (SIMULATED)** | `payments.py` | `T/test_payments.py` (23), `E/test_bill_payments_ui.py` (4) | #26 `0d7a21c` | real terminal; bank import UI; receivables UI |
-| C08 | Provider-neutral card terminal adapter + sandbox + contract tests | #25 | **IN CODE, NOT CONNECTED** | `terminals/` | `T/test_terminal_contract.py` (20) | #52 `4786abe` | `payments.py` still calls its own mock (`MockTerminalTxn`), not `terminals/`; provider choice + sandbox access (owner) |
+| C08 | Provider-neutral card terminal adapter + sandbox + contract tests | #25 | **INTEGRATED (SIMULATED provider) since P0-3** | `terminals/`, `terminals/recorded.py`, `payments.pay_card` → `terminals.flow` | `T/test_terminal_contract.py` (20), `T/test_card_terminal_flow.py` (7) | #52 `4786abe`, P0-3 | real provider adapter + sandbox access (owner decision, roadmap P2-4) |
 | C09 | Printers (receipt, kitchen), receipt designer | #25 | **MISSING** (text receipt only) | `api.py` `receipt.txt` | receipt text tests | — | print queue, ESC/POS bridge, templates, hardware |
 | C10 | Identity: devices, PIN, manager password + TOTP, RBAC, step-up approvals | #2, #34 | **E2E TESTED** | `auth.py` | `T/test_auth.py` (42), `E/test_server_auth.py` (5) | #19 `7fe3a7e` | staff/device admin **UI** (API only) |
 | C11 | Tenant isolation (PostgreSQL RLS, non-owner role, append-only grants) | #2, #34 | **INTEGRATED** | migrations 0001–0008 | `T/test_postgres.py` (13), `T/test_tenancy_and_identity.py` (10) | #17 `a4d0af8` | pen test |
@@ -192,7 +192,7 @@ The till/office UI (`static/one/*.mjs`) calls the routes below. The following ro
 | #15 core coordination | C12, C25 | events + reconciliation; durable workflows partial |
 | #16 food service modes | C06 | table + express; other modes not specified in code |
 | #18 guest | C27 | planned |
-| #25 terminal / printer | C08, C09 | adapter not connected; no printer |
+| #25 terminal / printer | C08, C09 | adapter wired (simulated provider); no printer |
 | #27 hierarchy | C26 | partial |
 | #29 offline-first | C18–C22 | sync done; packaging missing |
 | #31 extensibility | C32 | planned |

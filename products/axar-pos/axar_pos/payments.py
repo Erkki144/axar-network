@@ -22,7 +22,7 @@ Money rules:
 - Invariant (tested): captured + pending transfer + reserved (card in flight)
   + remaining == bill total; never negative remaining, never overpaid.
 
-NO real card processing: card goes to ``MockTerminalTxn``. Bank lines are
+NO real card processing: card goes through ``terminals.flow`` to the SIMULATED recorded sandbox (``terminals/recorded.py``). Bank lines are
 imported (sandbox), never fetched from a real bank here.
 """
 
@@ -44,7 +44,6 @@ from .models import (
     BankTransaction,
     CustomerInvoice,
     DrawerSession,
-    MockTerminalTxn,
     Order,
     Payment,
     Sale,
@@ -255,13 +254,37 @@ def pay_cash(s: Session, *, tenant_id: str, order_id: str, register_id: int, exp
     return _commit_payment(s, tenant_id, order, p, idempotency_key, req, settings, now)
 
 
+SIMULATE_TO_SCRIPT = {"approved": "approve", "declined": "decline", "timeout": "timeout_after_approve",
+                      "offline": "offline"}
+
+
+def card_terminal(s: Session, tenant_id: str, simulate: str = "approved"):
+    """The card terminal adapter (#25 contract). Today only the SIMULATED,
+    recorded sandbox exists; a real provider adapter plugs in here after the
+    owner's provider choice (roadmap P2-4). The POS never calls a provider
+    directly: only ``terminals.flow``."""
+    from .terminals.recorded import RecordedSandboxTerminal
+
+    return RecordedSandboxTerminal(s.get_bind(), tenant_id, SIMULATE_TO_SCRIPT[simulate])
+
+
 def pay_card(s: Session, *, tenant_id: str, order_id: str, register_id: int, expected_total_cents: int,
              amount_cents: int, simulate: str, idempotency_key: str, actor: str, settings: Settings,
              now: datetime) -> tuple[Payment, bool]:
-    """MOCK terminal. ``simulate``: approved | declined | timeout (the
-    provider decides, but our answer is lost -> status unknown)."""
-    if simulate not in ("approved", "declined", "timeout"):
-        raise InvalidPayment("simulate must be approved, declined or timeout")
+    """Card tender through the provider-neutral terminal flow (SIMULATED provider).
+
+    1. The attempt is recorded FIRST as ``unknown`` (it reserves its amount on
+       the bill) and committed, so its id exists before the terminal is asked.
+    2. ``terminals.flow.charge`` talks to the terminal OUTSIDE any POS
+       transaction; our payment id is the provider's idempotency key.
+    3. The answer is recorded: captured / declined; a lost answer stays
+       ``unknown`` until ``reconcile_card`` asks the provider. A request that
+       provably never reached the provider is ``declined`` (no money taken).
+    A crash between 1 and 3 leaves ``unknown``: reconciliation finds out."""
+    from .terminals import PaymentRequest, flow
+
+    if simulate not in SIMULATE_TO_SCRIPT:
+        raise InvalidPayment("simulate must be approved, declined, timeout or offline")
     req = _hash({"op": "card", "order": order_id, "register": register_id, "total": expected_total_cents,
                  "amount": amount_cents, "simulate": simulate})
     if (p := _existing(s, tenant_id, idempotency_key, req)) is not None:
@@ -270,16 +293,67 @@ def pay_card(s: Session, *, tenant_id: str, order_id: str, register_id: int, exp
                                idempotency_key, req)
     if again is not None:
         return again, True
-    services.get_register(s, tenant_id, register_id)
-    pid = str(uuid.uuid4())
-    provider_result = "declined" if simulate == "declined" else "approved"
-    s.add(MockTerminalTxn(payment_id=pid, tenant_id=tenant_id, amount_cents=amount_cents, result=provider_result,
-                          created_at=now))
-    status = {"approved": "captured", "declined": "declined", "timeout": "unknown"}[simulate]
-    p = _new_payment(order, method="card", status=status, amount=amount_cents, register_id=register_id,
-                     key=idempotency_key, req_hash=req, actor=actor, now=now, provider_ref=f"MOCK-{pid[:8]}")
-    p.id = pid
-    return _commit_payment(s, tenant_id, order, p, idempotency_key, req, settings, now)
+    reg = services.get_register(s, tenant_id, register_id)
+    terminal_id = reg.code
+    if amount_cents == st.remaining and st.reserved == 0:
+        # This tender completes the bill, and completing issues the receipt on this
+        # register's open drawer: check that BEFORE the terminal takes any money.
+        _open_drawer(s, tenant_id, register_id)
+    p = _new_payment(order, method="card", status="unknown", amount=amount_cents, register_id=register_id,
+                     key=idempotency_key, req_hash=req, actor=actor, now=now)
+    p, replayed = _commit_payment(s, tenant_id, order, p, idempotency_key, req, settings, now)
+    if replayed:
+        return p, True
+    s.commit()                       # end the read transaction: never hold the database while the terminal works
+    outcome = flow.charge(card_terminal(s, tenant_id, simulate),
+                          PaymentRequest(attempt_id=p.id, terminal_id=terminal_id, amount_cents=amount_cents,
+                                         reference=f"bill:{order_id}"))
+    status = {"captured": "captured", "declined": "declined", "not_sent": "declined"}.get(outcome.pos_status, "unknown")
+    return _record_card_outcome(s, tenant_id, p.id, status, outcome, now, settings), False
+
+
+def _record_card_outcome(s: Session, tenant_id: str, payment_id: str, status: str, outcome, now: datetime,
+                         settings: Settings) -> Payment:
+    order_id = s.scalar(select(Payment.order_id).where(Payment.id == payment_id, Payment.tenant_id == tenant_id))
+    order = _lock_bill(s, tenant_id, order_id)
+    p = s.scalar(select(Payment).where(Payment.id == payment_id).execution_options(populate_existing=True))
+    if p.status not in ("unknown", "pending") or status == "unknown":
+        s.rollback()                 # already resolved by someone else, or still unknown: nothing to change
+        return p
+    ref = outcome.result.provider_ref[:64] if outcome is not None and outcome.result is not None \
+        and outcome.result.provider_ref else None
+
+    def record(sess: Session, pay: Payment) -> None:
+        pay.status, pay.updated_at = status, now
+        if ref:
+            pay.provider_ref = ref
+        sess.flush()
+
+    record(s, p)
+    try:
+        _after_change(s, tenant_id, order, now, settings, register_id=p.register_id, actor=p.created_by)
+        s.commit()
+    except services.DomainError:
+        # The provider already decided (money may be taken): the payment is ALWAYS
+        # recorded. Only issuing the receipt failed (e.g. the drawer was closed in
+        # the meantime); reconciliation R11 flags the covered bill without a sale
+        # and ``settle_bill`` finishes it once the cause is fixed.
+        s.rollback()
+        _lock_bill(s, tenant_id, order_id)
+        p = s.scalar(select(Payment).where(Payment.id == payment_id).execution_options(populate_existing=True))
+        record(s, p)
+        s.commit()
+    return s.scalar(select(Payment).where(Payment.id == payment_id).execution_options(populate_existing=True))
+
+
+def settle_bill(s: Session, *, tenant_id: str, order_id: str, register_id: int, actor: str, settings: Settings,
+                now: datetime) -> Order:
+    """Issue the receipt for a bill whose tenders already cover it (after a
+    failed issue, see ``_record_card_outcome``). Idempotent."""
+    order = _lock_bill(s, tenant_id, order_id)
+    _after_change(s, tenant_id, order, now, settings, register_id=register_id, actor=actor)
+    s.commit()
+    return order
 
 
 def get_payment(s: Session, tenant_id: str, payment_id: str) -> Payment:
@@ -290,22 +364,19 @@ def get_payment(s: Session, tenant_id: str, payment_id: str) -> Payment:
 
 
 def reconcile_card(s: Session, *, tenant_id: str, payment_id: str, settings: Settings, now: datetime) -> Payment:
-    """Ask the (mock) provider what really happened to an 'unknown' card payment."""
+    """Ask the provider (``terminals.flow.resolve``) what really happened to an
+    'unknown' card payment. Not found at the provider = no money taken."""
+    from .terminals import flow
+
     p = s.scalar(select(Payment).where(Payment.id == payment_id, Payment.tenant_id == tenant_id))
     if p is None or p.method != "card":
         raise NotFound("card payment not found")
-    order = _lock_bill(s, tenant_id, p.order_id)
-    p = s.scalar(select(Payment).where(Payment.id == payment_id).execution_options(populate_existing=True))
     if p.status not in ("unknown", "pending"):
-        s.rollback()
         return p
-    txn = s.get(MockTerminalTxn, payment_id)
-    p.status = "captured" if txn is not None and txn.result == "approved" else "declined"
-    p.updated_at = now
-    s.flush()
-    _after_change(s, tenant_id, order, now, settings, register_id=p.register_id, actor=p.created_by)
-    s.commit()
-    return p
+    s.rollback()                     # never hold a POS transaction while talking to the provider
+    outcome = flow.resolve(card_terminal(s, tenant_id), payment_id, max_polls=1)
+    status = {"captured": "captured", "declined": "declined"}.get(outcome.pos_status, "unknown")
+    return _record_card_outcome(s, tenant_id, payment_id, status, outcome, now, settings)
 
 
 def pay_transfer(s: Session, *, tenant_id: str, order_id: str, register_id: int, expected_total_cents: int,

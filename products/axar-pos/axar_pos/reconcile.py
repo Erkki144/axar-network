@@ -380,6 +380,10 @@ def _orders_and_kitchen(s: Session, tenant_id: str) -> _Finding:
             .join(KitchenTicketLine, KitchenTicketLine.ticket_id == KitchenTicket.id)
             .where(KitchenTicket.tenant_id == tenant_id)):
         ticket_qty[(order_id, int(pid))] += int(q)
+    covered = defaultdict(int)
+    for oid, amount in s.execute(select(Payment.order_id, Payment.amount_cents).where(
+            Payment.tenant_id == tenant_id, Payment.status.in_(SETTLING))):
+        covered[oid] += int(amount)
     for o in s.scalars(select(Order).where(Order.tenant_id == tenant_id)):
         f.checked += 1
         for ln in o.lines:
@@ -388,6 +392,9 @@ def _orders_and_kitchen(s: Session, tenant_id: str) -> _Finding:
                        on_tickets=ticket_qty.get((o.id, ln.product_id), 0))
         if o.status in ("paid", "invoiced", "closed") and o.sale_id is None:
             f.fail(order_id=o.id, status=o.status, reason="settled order without a sale")
+        if o.sale_id is None and o.id in covered and covered[o.id] >= _order_total(s, tenant_id, o):
+            f.fail(order_id=o.id, status=o.status, covered_cents=covered[o.id],
+                   reason="bill fully covered by payments but no receipt issued")
         if o.sale_id is not None:
             sale = s.get(Sale, o.sale_id)
             want = sorted((ln.product_id, ln.quantity) for ln in o.lines if ln.quantity > 0)
@@ -395,6 +402,16 @@ def _orders_and_kitchen(s: Session, tenant_id: str) -> _Finding:
             if got != want:
                 f.fail(order_id=o.id, sale_id=o.sale_id, order_lines=want, sale_lines=got)
     return f
+
+
+def _order_total(s: Session, tenant_id: str, o: Order) -> int:
+    """Current price of an open bill (same pricing as the bill screen)."""
+    from datetime import date
+
+    from .payments import _lines
+
+    return sum(x.gross_cents for x in services._price_lines(s, tenant_id, _lines(o), date.today(), None)) \
+        if o.lines else 0
 
 
 def _receivables(s: Session, tenant_id: str) -> _Finding:
