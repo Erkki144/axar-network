@@ -29,9 +29,9 @@ Märgid tabelites: ✅ olemas koodis ja testitud · ◐ osaliselt · ☐ puudu (
 | Register | Owner module | Key fields (meaning) | Referenced by | Change event | State |
 |---|---|---|---|---|---|
 | **Organisation** tenant → legal entity → location → register / warehouse / device | IAM / ORG | legal entity = VAT + receipts + GL; location = timezone + **business-day start**; register = receipt series | everything | `org.unit.changed` | ◐ (no legal entity, C26) |
-| **Product** (item) | CATALOG | name (i18n), group, type (goods / dish / service / gift card / system), base unit, VAT class, stock mode (none / item / recipe), active, hidden at till | price, recipe, POS layout, stock, sale lines | `catalog.product.changed` | ☐ (seed only, C15) |
-| **Product group** (tree) | CATALOG | parent, sort, default VAT / printer / station | product, reports, discounts | `catalog.group.changed` | ☐ |
-| **Price list → price version** | PRICING | list scope (outlet, order type), price incl./excl. VAT, **valid from**, valid to | till, sale line snapshot, margin | `pricing.price.published` | ☐ (single price on product) |
+| **Product** (item) | CATALOG | name (i18n), group, type (goods / dish / service / gift card / system), base unit, VAT class, stock mode (none / item / recipe), active, hidden at till | price, recipe, POS layout, stock, sale lines | `catalog.product.changed` | ✅ P1-1a |
+| **Product group** (tree) | CATALOG | parent, sort, default VAT / printer / station | product, reports, discounts | `catalog.group.changed` | ✅ P1-1a |
+| **Price list → price version** | PRICING | list scope (outlet, order type), price incl./excl. VAT, **valid from**, valid to | till, sale line snapshot, margin | `pricing.price.published` | ✅ P1-1a (four eyes, R14) |
 | **Recipe → recipe version** | RECIPES | components (item / sub-recipe), qty, loss %, from warehouse, per order type, **valid from** | stock consumption, cost, margin | `recipe.version.published` | ✅ versioned (C14), no event |
 | **Discount rule** | PRICING | manual / auto, %, amount, validity window, outlets, groups, combinable, role limit, customer-only | till, sale line, reports | `pricing.discount.changed` | ☐ |
 | **Payment method** | PAYMENTS | type (cash / card / transfer / voucher / room), tip allowed, archived | tender, drawer, books | `payments.method.changed` | ◐ (hard-coded) |
@@ -75,7 +75,7 @@ Format: **trigger → same transaction (atomic) → asynchronous reactions (each
 2. Reactions: `stock.consume` (recipe version valid at sale time → stock movements) ✅ · `books.export` (export queue) ✅ · loyalty points ☐ · reorder proposal ☐ · KDS / SSE ✅.
 3. Check: R1–R3, R5, R6, R8, R9, R10.
 
-### J2 Price change (☐ → P1-1 / P1-5)
+### J2 Price change (✅ P1-1a online tills; offline tills ☐ → P1-1d)
 1. Office: new price version with **valid from** → impact preview (outlets, order types, margin change) → publish → **atomic:** price version + `pricing.price.published`.
 2. Reactions: till price cache (online immediately; offline tills on next contact, then sale lines carry the version they used) · menu / TV (#40) · margin alert.
 3. History: past sales keep their snapshot. **Never** recomputed.

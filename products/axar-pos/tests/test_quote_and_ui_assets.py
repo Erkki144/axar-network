@@ -102,6 +102,11 @@ def test_ui_has_no_client_side_money_authority():
         # office (#60 P0-2): back-office login / logout, POS settings, offline review queue
         "'/api/v1/auth/login'", "'/api/v1/auth/logout'", "'/api/v1/admin/pos-settings'",
         "`/api/v1/sync/quarantine/${r.id}/retry`", "`/api/v1/sync/quarantine/${r.id}/dismiss`",
+        # catalog + prices (P1-1a): card fields and price PROPOSALS; approval is a second person's
+        "'/api/v1/catalog/products'", "`/api/v1/catalog/products/${p.id}`", "'/api/v1/catalog/groups'",
+        "'/api/v1/pricing/prices'", "`/api/v1/pricing/prices/${v.id}/approve`",
+        "`/api/v1/pricing/prices/${v.id}/reject`", "`/api/v1/pricing/prices/${v.id}/withdraw`",
+        "'/api/v1/pricing/lists'", "`/api/v1/pricing/outlets/${o.id}`",
     ]), paths
     assert src.count("method: 'POST'") + src.count("method: 'PUT'") == len(writes)
     for money in ("/api/v1/sales/cash'", "/pay-cash`", "/refunds`", "/payments`"):

@@ -7,6 +7,7 @@
 // password + TOTP). The office session token lives in memory only and never
 // replaces the till's own session.
 import { formatEuro } from './format.mjs';
+import { createCatalogOffice } from './office-catalog.mjs';
 
 const STATUS_ET = { ok: 'Korras', warning: 'Ootel', fail: 'VIGA' };
 const ENTRY_ET = { sale: 'Müük', refund: 'Tagastus' };
@@ -28,11 +29,13 @@ export function createOffice({ api, el, stateBox, announce, ApiError, authMode, 
     const b = el('button', cls, text); b.type = 'button'; if (id) b.id = id; b.addEventListener('click', onClick); return b;
   }
   function field(label, input) { const w = el('label', 'inv-field'); w.append(el('span', null, label), input); return w; }
+  const catalogUi = createCatalogOffice({ call: (...a) => call(...a), el, stateBox, announce, button, field,
+    errText: (e) => errText(e) });
 
   async function render(container) {
     root = container; root.replaceChildren();
     const tabs = el('div', 'inv-tabs'); tabs.setAttribute('role', 'tablist');
-    for (const [k, label] of [['recon', 'Kooskõla'], ['settings', 'Kassa seaded'], ['quarantine', 'Võrguühenduseta kirjed']]) {
+    for (const [k, label] of [['recon', 'Kooskõla'], ['catalog', 'Tooted ja hinnad'], ['settings', 'Kassa seaded'], ['quarantine', 'Võrguühenduseta kirjed']]) {
       const b = button(label, `category-btn${st.tab === k ? ' active' : ''}`, `office-tab-${k}`, () => { st.tab = k; render(root); });
       b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', String(st.tab === k));
       tabs.append(b);
@@ -41,6 +44,7 @@ export function createOffice({ api, el, stateBox, announce, ApiError, authMode, 
     root.append(tabs, body);
     if (needsLogin()) { renderLogin(body); return; }
     if (st.tab === 'recon') renderRecon(body);
+    else if (st.tab === 'catalog') await catalogUi.render(body);
     else if (st.tab === 'settings') await renderSettings(body);
     else await renderQuarantine(body);
   }

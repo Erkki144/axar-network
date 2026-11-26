@@ -1,7 +1,7 @@
 # NOTE: no `from __future__ import annotations` here — FastAPI must resolve the
 # locally defined dependency aliases (Who, Db) at route-definition time.
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Annotated, Iterator, Literal
 
@@ -38,7 +38,7 @@ class NoCacheStatic(StaticFiles):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-from . import __version__, auth, events, inventory, offline, orders, payments, reconcile, services, sync
+from . import __version__, auth, catalog, events, inventory, offline, orders, payments, reconcile, services, sync
 from .config import Settings
 from .db import bind_tenant, init_db, make_engine, request_factory, seed_demo
 from .models import DrawerSession, Refund, Register, Sale, Tenant
@@ -112,6 +112,68 @@ class BankImportIn(Strict):
 
 class QuoteIn(Strict):
     lines: Annotated[list[SaleLineIn], Field(min_length=1, max_length=200)]
+    register_id: int | None = None  # outlet prices (P1-1a); till sessions use their own register
+
+
+# ------------------------------------------------------------ catalog (P1-1a)
+
+PriceCents = Annotated[int, Field(strict=True, ge=0, le=10_000_000)]
+
+
+class GroupIn(Strict):
+    name: Annotated[str, Field(min_length=1, max_length=100)]
+    parent_id: int | None = None
+    sort: int = 0
+    active: bool = True
+
+
+class ProductCreateIn(Strict):
+    sku: Annotated[str, Field(min_length=1, max_length=64)]
+    name: Annotated[str, Field(min_length=1, max_length=200)]
+    base_price_cents: PriceCents
+    group_id: int | None = None
+    tax_category: Literal["standard", "reduced", "zero"] = "standard"
+    kind: Literal["standard", "system", "gift_card"] = "standard"
+    short_name: Annotated[str | None, Field(max_length=40)] = None
+    description: Annotated[str | None, Field(max_length=500)] = None
+    hidden_at_till: bool = False
+    stock_mode: Literal["none", "item", "recipe"] = "none"
+    barcodes: Annotated[list[str], Field(max_length=20)] = []
+    reason: Annotated[str | None, Field(max_length=200)] = None
+
+
+class ProductUpdateIn(Strict):
+    version: int
+    name: Annotated[str | None, Field(min_length=1, max_length=200)] = None
+    short_name: Annotated[str | None, Field(max_length=40)] = None
+    group_id: int | None = None
+    tax_category: Literal["standard", "reduced", "zero"] | None = None
+    kind: Literal["standard", "system", "gift_card"] | None = None
+    description: Annotated[str | None, Field(max_length=500)] = None
+    hidden_at_till: bool | None = None
+    active: bool | None = None
+    stock_mode: Literal["none", "item", "recipe"] | None = None
+    barcodes: Annotated[list[str] | None, Field(max_length=20)] = None
+
+
+class PriceListIn(Strict):
+    name: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class OutletPriceListIn(Strict):
+    price_list_id: int | None
+
+
+class PriceProposalIn(Strict):
+    product_id: int
+    price_list_id: int | None = None
+    price_cents: PriceCents | None  # None on a list = "not sold at these outlets"
+    valid_from: datetime | None = None
+    reason: Annotated[str | None, Field(max_length=200)] = None
+
+
+class DecisionIn(Strict):
+    note: Annotated[str | None, Field(max_length=200)] = None
 
 
 class CashSaleIn(Strict):
@@ -588,14 +650,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # AXAR ONE cashier UI (issue #11), served same-origin so it can call the API.
     app.mount("/one", NoCacheStatic(directory=STATIC / "one", html=True), name="one")
 
+    def outlet_of(who: auth.Principal, s: Session, register_id: int | None) -> int | None:
+        """The outlet whose prices apply: a till session's own location;
+        otherwise the given register's location (demo / office preview);
+        otherwise base prices."""
+        if who.location_id is not None:
+            return who.location_id
+        if register_id is not None:
+            return services.get_register(s, who.tenant_id, register_id).location_id
+        return None
+
     @app.get("/api/v1/products")
-    def products(who: Catalog, s: Db):
-        return [
-            {"id": p.id, "sku": p.sku, "name": p.name,
-             "price_cents": p.price_cents, "tax_category": p.tax_category,
-             "category": p.category}
-            for p in services.list_products(s, who.tenant_id)
-        ]
+    def products(who: Catalog, s: Db, register_id: Annotated[int | None, Query()] = None):
+        """What this till may sell, at this outlet's approved prices (P1-1a)."""
+        return catalog.till_catalog(s, who.tenant_id, outlet_of(who, s, register_id), settings.clock())
 
     @app.get("/api/v1/registers")
     def registers(who: Catalog, s: Db):
@@ -660,6 +728,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             lines=[services.LineRequest(ln.product_id, ln.quantity) for ln in body.lines],
             settings=settings,
             now=settings.clock(),
+            location_id=outlet_of(who, s, body.register_id),
         )
 
     @app.post("/api/v1/sales/cash")
@@ -1465,8 +1534,140 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/inventory/offers")
     def inv_offers(who: Stockkeeper, s: Db):
-        return [{"id": p.id, "sku": p.sku, "name": p.name, "price_cents": p.price_cents, "stock_mode": p.stock_mode,
-                 "stock_item_id": p.stock_item_id}
+        on = services.business_date_for(settings.clock(), settings)
+        return [{"id": p.id, "sku": p.sku, "name": p.name, "price_cents": inventory.offer_gross_price(s, who.tenant_id, p, on),
+                 "stock_mode": p.stock_mode, "stock_item_id": p.stock_item_id}
                 for p in services.list_products(s, who.tenant_id)]
+
+    # ------------------------------------------------------------ catalog + pricing (P1-1a)
+
+    CatalogWriter = Annotated[auth.Principal, Depends(need("catalog.write"))]
+    PriceApprover = Annotated[auth.Principal, Depends(need("pricing.approve"))]
+
+    def tenant_wide(who: auth.Principal) -> None:
+        """Base prices, price lists and the product card affect every outlet."""
+        if who.visible_locations() is not None:
+            raise services.Forbidden("catalog and prices are managed tenant-wide (owner or tenant-wide manager)")
+
+    def group_out(g) -> dict:
+        return {"id": g.id, "name": g.name, "parent_id": g.parent_id, "sort": g.sort, "active": g.active}
+
+    @app.get("/api/v1/catalog/groups")
+    def cat_groups(who: Catalog, s: Db):
+        return catalog.list_groups(s, who.tenant_id)
+
+    @app.post("/api/v1/catalog/groups", status_code=201)
+    def cat_group_new(body: GroupIn, who: CatalogWriter, s: Db):
+        tenant_wide(who)
+        g = catalog.save_group(s, who.tenant_id, now=settings.clock(), **body.model_dump())
+        s.commit()
+        return group_out(g)
+
+    @app.put("/api/v1/catalog/groups/{group_id}")
+    def cat_group_save(group_id: int, body: GroupIn, who: CatalogWriter, s: Db):
+        tenant_wide(who)
+        g = catalog.save_group(s, who.tenant_id, now=settings.clock(), group_id=group_id, **body.model_dump())
+        s.commit()
+        return group_out(g)
+
+    @app.get("/api/v1/catalog/products")
+    def cat_products(who: CatalogWriter, s: Db, group_id: Annotated[int | None, Query()] = None,
+                     q: Annotated[str | None, Query(max_length=100)] = None,
+                     include_inactive: Annotated[bool, Query()] = False):
+        return catalog.list_products(s, who.tenant_id, group_id=group_id, query=q, include_inactive=include_inactive)
+
+    @app.post("/api/v1/catalog/products", status_code=201)
+    def cat_product_new(body: ProductCreateIn, who: CatalogWriter, s: Db):
+        tenant_wide(who)
+        now = settings.clock()
+        p, v = catalog.create_product(s, who.tenant_id, actor=who.staff_id, now=now, **body.model_dump())
+        s.commit()
+        return {"product": catalog.product_card(s, who.tenant_id, p.id, now), "price_draft": catalog.version_out(v)}
+
+    @app.get("/api/v1/catalog/products/{product_id}")
+    def cat_product(product_id: int, who: CatalogWriter, s: Db):
+        return catalog.product_card(s, who.tenant_id, product_id, settings.clock())
+
+    @app.get("/api/v1/catalog/products/{product_id}/impact")
+    def cat_product_impact(product_id: int, who: CatalogWriter, s: Db):
+        return catalog.preview_product_change(s, who.tenant_id, product_id)
+
+    @app.put("/api/v1/catalog/products/{product_id}")
+    def cat_product_save(product_id: int, body: ProductUpdateIn, who: CatalogWriter, s: Db):
+        tenant_wide(who)
+        data = body.model_dump(exclude_unset=True)
+        version = data.pop("version")
+        barcodes = data.pop("barcodes", None)
+        now = settings.clock()
+        catalog.update_product(s, who.tenant_id, product_id, now=now, expected_version=version, fields=data,
+                               barcodes=barcodes)
+        s.commit()
+        return catalog.product_card(s, who.tenant_id, product_id, now)
+
+    @app.get("/api/v1/pricing/lists")
+    def price_lists(who: CatalogWriter, s: Db):
+        return catalog.list_price_lists(s, who.tenant_id)
+
+    @app.post("/api/v1/pricing/lists", status_code=201)
+    def price_list_new(body: PriceListIn, who: CatalogWriter, s: Db):
+        tenant_wide(who)
+        pl = catalog.create_price_list(s, who.tenant_id, name=body.name)
+        s.commit()
+        return {"id": pl.id, "name": pl.name, "active": pl.active, "outlets": []}
+
+    @app.get("/api/v1/pricing/outlets")
+    def price_outlets(who: CatalogWriter, s: Db):
+        return catalog.list_outlets(s, who.tenant_id)
+
+    @app.put("/api/v1/pricing/outlets/{location_id}")
+    def price_outlet_set(location_id: int, body: OutletPriceListIn, who: PriceApprover, s: Db):
+        tenant_wide(who)
+        loc = catalog.assign_outlet(s, who.tenant_id, location_id=location_id, price_list_id=body.price_list_id,
+                                    now=settings.clock(), actor=who.staff_id)
+        s.commit()
+        return {"id": loc.id, "name": loc.name, "price_list_id": loc.price_list_id}
+
+    @app.post("/api/v1/pricing/prices", status_code=201)
+    def price_propose(body: PriceProposalIn, who: CatalogWriter, s: Db):
+        tenant_wide(who)
+        vf = body.valid_from
+        if vf is not None and vf.tzinfo is None:
+            raise HTTPException(422, "valid_from needs a time zone")
+        v = catalog.propose_price(s, who.tenant_id, actor=who.staff_id, now=settings.clock(),
+                                  product_id=body.product_id, price_list_id=body.price_list_id,
+                                  price_cents=body.price_cents, valid_from=vf, reason=body.reason)
+        s.commit()
+        return catalog.version_out(v)
+
+    @app.get("/api/v1/pricing/prices/pending")
+    def price_pending(who: CatalogWriter, s: Db):
+        return catalog.pending_prices(s, who.tenant_id)
+
+    @app.get("/api/v1/pricing/prices/{version_id}/preview")
+    def price_preview(version_id: str, who: CatalogWriter, s: Db):
+        return catalog.preview_price(s, who.tenant_id, version_id, settings.clock())
+
+    @app.post("/api/v1/pricing/prices/{version_id}/approve")
+    def price_approve(version_id: str, body: DecisionIn, who: PriceApprover, s: Db):
+        tenant_wide(who)
+        v = catalog.approve_price(s, who.tenant_id, version_id, approver=who.staff_id, now=settings.clock(),
+                                  note=body.note)
+        s.commit()
+        return catalog.version_out(v)
+
+    @app.post("/api/v1/pricing/prices/{version_id}/reject")
+    def price_reject(version_id: str, body: DecisionIn, who: PriceApprover, s: Db):
+        tenant_wide(who)
+        v = catalog.reject_price(s, who.tenant_id, version_id, actor=who.staff_id, now=settings.clock(),
+                                 note=body.note)
+        s.commit()
+        return catalog.version_out(v)
+
+    @app.post("/api/v1/pricing/prices/{version_id}/withdraw")
+    def price_withdraw(version_id: str, body: DecisionIn, who: CatalogWriter, s: Db):
+        v = catalog.reject_price(s, who.tenant_id, version_id, actor=who.staff_id, now=settings.clock(),
+                                 note=body.note, withdraw=True)
+        s.commit()
+        return catalog.version_out(v)
 
     return app

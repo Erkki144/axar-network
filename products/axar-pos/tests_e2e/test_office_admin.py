@@ -71,7 +71,7 @@ def test_reconciliation_screen_names_a_tampered_register_and_traces_a_sale(offic
     open_office(p)
     p.click("#recon-run")
     rows = p.locator("#recon-list .recon-row")
-    expect(rows).to_have_count(13)
+    expect(rows).to_have_count(14)
     expect(p.locator("#recon-list .recon-row.fail")).to_have_count(0)
     expect(p.locator('[data-check="R1.drawer_cash"]')).to_have_class("recon-row ok")
 

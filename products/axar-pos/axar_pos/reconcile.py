@@ -93,6 +93,7 @@ def check(s: Session, tenant_id: str) -> dict:
         _orders_and_kitchen(s, tenant_id),
         _receivables(s, tenant_id),
         _sync_inbox(s, tenant_id),
+        _sale_prices(s, tenant_id),
     ]
     out = [f.out() for f in findings]
     return {"tenant_id": tenant_id, "ok": all(f["status"] != "fail" for f in out),
@@ -404,14 +405,53 @@ def _orders_and_kitchen(s: Session, tenant_id: str) -> _Finding:
     return f
 
 
+def _sale_prices(s: Session, tenant_id: str) -> _Finding:
+    """R14 (P1-1a): every sale line's unit price is the approved price that was
+    valid for that outlet at the moment of the sale; every approved price was
+    approved by someone other than its proposer (four eyes)."""
+    from . import catalog
+    from .models import PriceVersion
+
+    f = _Finding("R14.sale_prices", "Müügihind = sel hetkel kehtinud kinnitatud hind; neli silma")
+    products = {p.id: p for p in s.scalars(select(Product).where(Product.tenant_id == tenant_id))}
+    cache: dict[tuple, int | None] = {}
+    for sale in s.scalars(select(Sale).where(Sale.tenant_id == tenant_id).order_by(Sale.created_at)):
+        loc = sale.register.location_id
+        for ln in sale.lines:
+            f.checked += 1
+            key = (ln.product_id, loc, sale.created_at)
+            if key not in cache:
+                p = products.get(ln.product_id)
+                cache[key] = catalog.resolve(s, tenant_id, p, loc, sale.created_at)[0] if p else None
+            if cache[key] != ln.unit_price_cents:
+                f.fail(sale_id=sale.id, line_no=ln.line_no, product_id=ln.product_id, location_id=loc,
+                       charged_cents=ln.unit_price_cents, valid_price_cents=cache[key],
+                       at=sale.created_at.isoformat())
+    for v in s.scalars(select(PriceVersion).where(PriceVersion.tenant_id == tenant_id,
+                                                  PriceVersion.status == "approved")):
+        f.checked += 1
+        if v.created_by == "system:legacy":
+            continue
+        if not v.decided_by or v.decided_by == v.created_by:
+            f.fail(price_version_id=v.id, product_id=v.product_id, reason="four eyes broken",
+                   proposed_by=v.created_by, approved_by=v.decided_by)
+    return f
+
+
 def _order_total(s: Session, tenant_id: str, o: Order) -> int:
     """Current price of an open bill (same pricing as the bill screen)."""
-    from datetime import date
+    from datetime import datetime, timezone
 
     from .payments import _lines
 
-    return sum(x.gross_cents for x in services._price_lines(s, tenant_id, _lines(o), date.today(), None)) \
-        if o.lines else 0
+    if not o.lines:
+        return 0
+    now = datetime.now(timezone.utc)
+    try:
+        return sum(x.gross_cents for x in services._price_lines(s, tenant_id, _lines(o), now.date(), None,
+                                                                location_id=o.location_id, at=now))
+    except services.DomainError:  # e.g. a product no longer sold here: cannot be "fully covered"
+        return 2 ** 62
 
 
 def _receivables(s: Session, tenant_id: str) -> _Finding:

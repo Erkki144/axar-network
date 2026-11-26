@@ -71,6 +71,8 @@ PERMISSIONS: dict[str, tuple[str, ...]] = {
     "admin": MANAGER_ROLES,
     "inventory": MANAGER_ROLES,  # receipts, recipes, production, stock & margin reports
     "receivables": MANAGER_ROLES,  # customer invoices, bank statement import/matching (C3)
+    "catalog.write": MANAGER_ROLES,    # groups, product card, price DRAFTS (P1-1a)
+    "pricing.approve": MANAGER_ROLES,  # approve / reject drafts; never one's own (four eyes)
 }
 
 PIN_MIN, PIN_MAX = 4, 8

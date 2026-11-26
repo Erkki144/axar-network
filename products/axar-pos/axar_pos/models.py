@@ -90,6 +90,8 @@ class Location(Base):
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
     code: Mapped[str] = mapped_column(String(32))
     name: Mapped[str] = mapped_column(String(200))
+    # P1-1a: the outlet's price list. NULL = base prices only (catalog.price_for).
+    price_list_id: Mapped[int | None] = mapped_column(ForeignKey("price_lists.id"), nullable=True)
 
     __table_args__ = (UniqueConstraint("tenant_id", "code"),)
 
@@ -146,8 +148,83 @@ class Product(Base):
     # none | recipe (ingredients, made to order) | item (finished/resale stock).
     stock_mode: Mapped[str] = mapped_column(String(8), default="none", server_default="none")
     stock_item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id"), nullable=True)
+    # P1-1a product card (docs/discovery/catalog.md §2). ``price_cents`` above is
+    # the LEGACY price: used only while a product has no approved base version.
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("product_groups.id"), nullable=True)
+    short_name: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    kind: Mapped[str] = mapped_column(String(16), default="standard", server_default="standard")
+    hidden_at_till: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
     __table_args__ = (UniqueConstraint("tenant_id", "sku"),)
+
+
+class ProductGroup(Base):
+    """Product group tree (P1-1a). Names a branch; carries defaults later."""
+
+    __tablename__ = "product_groups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("product_groups.id"), nullable=True)
+    name: Mapped[str] = mapped_column(String(100))
+    sort: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(default=True)
+
+
+class ProductBarcode(Base):
+    __tablename__ = "product_barcodes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    code: Mapped[str] = mapped_column(String(32))
+
+    __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_barcode_code"),)
+
+
+class PriceList(Base):
+    """An outlet price list; outlets point at it (``Location.price_list_id``)."""
+
+    __tablename__ = "price_lists"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    active: Mapped[bool] = mapped_column(default=True)
+
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_price_list_name"),)
+
+
+class PriceVersion(Base):
+    """One proposed or published price (ADR-0015). Never edited once decided:
+    draft -> approved | rejected | withdrawn. A new price is a new row.
+
+    ``price_list_id`` NULL = the product's base price (all outlets without an
+    override). ``price_cents`` NULL = "not sold" in that price list (only
+    allowed on a list, never on the base). Four eyes: ``approved_by`` must
+    differ from ``created_by`` (catalog.approve_price)."""
+
+    __tablename__ = "price_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    price_list_id: Mapped[int | None] = mapped_column(ForeignKey("price_lists.id"), nullable=True)
+    price_cents: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # VAT-inclusive
+    valid_from: Mapped[datetime]
+    status: Mapped[str] = mapped_column(String(12), default="draft")
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime]
+    decided_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    __table_args__ = (
+        Index("ix_price_versions_lookup", "tenant_id", "product_id", "price_list_id", "status", "valid_from"),
+    )
 
 
 class DrawerSession(Base):

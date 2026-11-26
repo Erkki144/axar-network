@@ -298,3 +298,14 @@ P1-1 jaguneb kolmeks väikeseks PR-iks (reegel: üks väike PR sammu kohta).
 7. Looja ei saa enda hinnamustandit kinnitada.
 
 **P1-1-st välja:** allergeenid (P2), kinkekaardi müük ja lunastus (P2-9), kaaluga vöötkood ja kaalu ühendus (P2), lisandid ja erisoovid (P1-5 / P2), kassanuppude redaktor (P2-5).
+
+### 8.1 P1-1a valmis — mis tehti teisiti kui ülal kirjas (26.11.2026)
+
+| Teema | Ülal kirjas | Tehtud | Miks |
+|---|---|---|---|
+| Hind puudub müügipunkti hinnakirjas | „hinda pole = ei müüda“ | **kehtib põhihind**; „ei müüda“ on hinnakirjas eraldi märge (hind tühi) | Muidu peaks iga hinnakirja täitma iga tootega. Nüüd sisestatakse ainult erandid. |
+| Neli silma | ainukese omaniku erand | **erandit pole**: enda ettepanekut ei saa kinnitada keegi, ka omanik mitte | Erand on turvarisk. Kui ettevõttes on üks juht, tuleb see lahendada P1-8 õiguste grupis selgesõnaliselt. |
+| Hinna kinnitamine | — | Kinnitab ainult **kõigi müügipunktide** juht või omanik (kontori sessioon). Ühe müügipunkti juht ei saa muuta hindu, mis kehtivad ka teistes müügipunktides. | Põhihind ja hinnakirjad mõjutavad mitut müügipunkti. |
+| Tagantjärele hind | — | Kinnitamine ei saa hinda tagasi dateerida: kui kehtivuse algus on minevikus, kehtib hind kinnitamise hetkest. | Juba tehtud müüke ei tohi ümber hinnata. |
+| Vanad tooted | — | P1-1a eelne hind kirjutatakse esimesel kinnitamisel ajalukku kirjeks „hind enne hinnaversioone“ | R14 peab tõestama ka vanade müükide hinnad. |
+| **Võrguühenduseta kassa** | „saab muudatused järgmisel ühendusel“ | **EI OLE TEHTUD.** Keskserveriga ühendatud kassad saavad muudatuse kohe (sündmus → kassa laeb hinnad uuesti). Võrguühenduseta kassa saab praegu ühendudes ainult ajapiirangu. Kui ta müüb vana hinnaga, satub müük juhi läbivaatusele („price_mismatch“) ega lähe kaotsi. | Hindade tõmbamine võrguühenduseta kassasse on sünkroonimise transpordi osa. Lisatud tegevuskavasse sammuna **P1-1d**. |

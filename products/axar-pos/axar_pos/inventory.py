@@ -586,11 +586,22 @@ def list_documents(s: Session, tenant_id: str, status: str | None = None) -> lis
     return list(s.scalars(q.order_by(SupplierDocument.status, SupplierDocument.created_at.desc()).limit(200)))
 
 
+def offer_gross_price(s: Session, tenant_id: str, product: Product, on: date) -> int:
+    """Base price valid at the end of ``on`` (catalog.resolve, P1-1a); 0 if none is approved yet."""
+    from datetime import datetime, time, timezone
+
+    from . import catalog
+
+    at = datetime.combine(on, time(23, 59, 59), tzinfo=timezone.utc)
+    return catalog.resolve(s, tenant_id, product, None, at)[0] or 0
+
+
 def offer_net_price(s: Session, tenant_id: str, product: Product, on: date) -> int:
     from .money import vat_from_gross
     from .services import tax_rate_for
 
-    return product.price_cents - vat_from_gross(product.price_cents, tax_rate_for(s, product.tax_category, on))
+    gross = offer_gross_price(s, tenant_id, product, on)
+    return gross - vat_from_gross(gross, tax_rate_for(s, product.tax_category, on))
 
 
 def preview_recipe(s: Session, tenant_id: str, *, product_id: int | None, lines: list[tuple[int, int]],
@@ -618,7 +629,7 @@ def preview_recipe(s: Session, tenant_id: str, *, product_id: int | None, lines:
         if p is None:
             raise NotFound("product not found")
         net = offer_net_price(s, tenant_id, p, on)
-        res.update({"price_gross_cents": p.price_cents, "price_net_cents": net,
+        res.update({"price_gross_cents": offer_gross_price(s, tenant_id, p, on), "price_net_cents": net,
                     "food_cost_bp": muldiv(per_unit, 10000, net) if net else None,
                     "margin_cents": net - per_unit})
     return res

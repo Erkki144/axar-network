@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "axar://events/catalog.product.changed/1",
+  "title": "catalog.product.changed v1 payload",
+  "description": "The product card changed (P1-1a). Prices are never part of it (pricing.price.published). Deactivation never changes stock.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["product_id", "sku", "name", "group_id", "kind", "active", "hidden_at_till", "tax_category", "version", "change"],
+  "properties": {
+    "product_id": {"type": "integer", "minimum": 1},
+    "sku": {"type": "string", "minLength": 1, "maxLength": 64},
+    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+    "group_id": {"type": ["integer", "null"], "minimum": 1},
+    "kind": {"enum": ["standard", "system", "gift_card"]},
+    "active": {"type": "boolean"},
+    "hidden_at_till": {"type": "boolean"},
+    "tax_category": {"enum": ["standard", "reduced", "zero"]},
+    "version": {"type": "integer", "minimum": 1},
+    "change": {"enum": ["created", "updated", "activated", "deactivated"]}
+  }
+}

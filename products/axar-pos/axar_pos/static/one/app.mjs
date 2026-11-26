@@ -291,7 +291,7 @@ function scheduleQuote() {
   const seq = ++S.quoteSeq;
   S.quoteTimer = setTimeout(async () => {
     try {
-      const { data } = await api('/api/v1/sales/quote', { method: 'POST', body: { lines: requestLines(lines) } });
+      const { data } = await api('/api/v1/sales/quote', { method: 'POST', body: { lines: requestLines(lines), register_id: S.registerId } });
       if (seq !== S.quoteSeq) return;
       S.quote = data; S.quoteSig = sig;
     } catch (e) {
@@ -777,6 +777,7 @@ function liveFrame(frame) {
     else if (type.startsWith('kitchen.')) { LIVE.pending.add('kitchen'); LIVE.pending.add('tables'); }
     else if (type.startsWith('drawer.') || type.startsWith('pos.')) LIVE.pending.add('drawer');
     else if (type.startsWith('stock.')) LIVE.pending.add('stock');
+    else if (type.startsWith('catalog.') || type.startsWith('pricing.')) LIVE.pending.add('catalog');
   }
   clearTimeout(LIVE.timer);
   LIVE.timer = setTimeout(applyLive, 80);   // coalesce bursts
@@ -790,6 +791,13 @@ async function applyLive() {
   if (all || p.has('drawer')) await refreshDrawer();
   if ((all || p.has('tables')) && S.bill && !$('modal').hidden && ['input', 'error'].includes(S.bill.state)) await loadBill();
   if ((all || p.has('stock')) && S.mode === 'inventory') await inventoryUi.refresh();
+  if (all || p.has('catalog')) {
+    try {
+      await loadProducts();
+      if (S.mode === 'express' && !$('product-grid')?.contains(document.activeElement)) renderExpress();
+      if (S.mode === 'express' || S.mode === 'tables') renderBasket();
+    } catch { /* the next event or reload retries */ }
+  }
 }
 
 function startPolling() {
@@ -1857,8 +1865,18 @@ async function selectRegister(id) {
   S.registerId = id;
   try { localStorage.setItem(LS_REGISTER, String(id)); } catch { /* ignore */ }
   S.quote = null; S.quoteSig = '';
+  await loadProducts();
   await refreshDrawer();
   activateMode(S.mode);
+}
+
+/** The outlet's sellable products at its approved prices (P1-1a). Re-read on
+ * register change and when the office publishes a price or product change. */
+async function loadProducts() {
+  const q = S.registerId ? `?register_id=${S.registerId}` : '';
+  const { data } = await api(`/api/v1/products${q}`);
+  S.products = data;
+  S.quote = null; S.quoteSig = '';
 }
 
 // ------------------------------------------------------ offline limit (O1c)
@@ -1953,6 +1971,7 @@ async function loadWorkspace() {
   const bound = AUTH.me?.register_id;
   S.registerId = bound && S.registers.some((r) => r.id === bound) ? bound
     : S.registers.some((r) => r.id === saved) ? saved : S.registers[0].id;
+  await loadProducts();
   renderRegisterSelect();
   renderIdentity();
   S.storageOk = storageWorks();

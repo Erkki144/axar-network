@@ -90,7 +90,8 @@ def _plan_sale(s: Session, tenant_id: str, payload: dict, settings, now) -> tupl
         lines.append(services.LineRequest(pid, int(qty)))
     if not lines:
         raise _Quarantine("sale without lines")
-    priced = services._price_lines(s, tenant_id, lines, services.business_date_for(now, settings), None)
+    priced = services._price_lines(s, tenant_id, lines, services.business_date_for(now, settings), None,
+                                   location_id=reg.location_id, at=now)
     central_total = sum(x.gross_cents for x in priced)
     expected = payload.get("expect", {}).get("total_cents")
     if central_total != expected:

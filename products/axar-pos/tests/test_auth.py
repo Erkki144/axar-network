@@ -696,3 +696,32 @@ def test_reconciliation_and_trace_need_an_owner_or_tenant_wide_manager(shop, wor
     r = shop["adm"].get("/api/v1/admin/reconciliation")
     assert r.status_code == 200 and r.json()["ok"] is True
     assert shop["adm"].get("/api/v1/admin/trace/sales/x").status_code == 404
+
+
+def test_catalog_roles_and_four_eyes_with_real_sessions(shop, world):
+    """P1-1a with server sessions (demo identity bypasses roles): a cashier
+    cannot touch the catalog; a manager scoped to one outlet cannot change
+    prices for every outlet; a tenant-wide manager approves what the owner
+    proposed, and the owner can never approve the owner's own proposal."""
+    adm = shop["adm"]
+    assert shop["till"].post("/api/v1/catalog/products",
+                             {"sku": "X", "name": "X", "base_price_cents": 100}).status_code == 403
+    loc_secret = adm.put(f"/api/v1/admin/staff/{shop['manager']}/credentials",
+                         {"login": "mart", "password": MGR_PW}).json()["totp_secret"]
+    local_mgr = world.admin(login="mart", password=MGR_PW, secret=loc_secret)
+    assert local_mgr.post("/api/v1/catalog/products",
+                          {"sku": "X", "name": "X", "base_price_cents": 100}).status_code == 403
+
+    r = adm.post("/api/v1/catalog/products", {"sku": "SELJ", "name": "Seljanka", "base_price_cents": 650})
+    assert r.status_code == 201, r.text
+    draft = r.json()["price_draft"]
+    assert adm.post(f"/api/v1/pricing/prices/{draft['id']}/approve", {}).status_code == 403   # own proposal
+    assert local_mgr.post(f"/api/v1/pricing/prices/{draft['id']}/approve", {}).status_code == 403  # outlet scope
+
+    boss = world.staff(adm, "Liis", [("manager", None)], "6618")
+    boss_secret = adm.put(f"/api/v1/admin/staff/{boss}/credentials",
+                          {"login": "liis", "password": MGR_PW}).json()["totp_secret"]
+    tenant_mgr = world.admin(login="liis", password=MGR_PW, secret=boss_secret)
+    ok = tenant_mgr.post(f"/api/v1/pricing/prices/{draft['id']}/approve", {})
+    assert ok.status_code == 200 and ok.json()["decided_by"] == boss
+    assert any(p["sku"] == "SELJ" and p["price_cents"] == 650 for p in shop["till"].get("/api/v1/products").json())
