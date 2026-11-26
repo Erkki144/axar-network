@@ -323,7 +323,7 @@
     {
       "edge_id": "E36",
       "requirement": "Gift token funding → redemption liability",
-      "primary_issue": "#32",
+      "primary_issue": "#70",
       "priority": "P1",
       "acceptance_evidence_required": "preprinted token cannot spend before activation",
       "baseline": "research_requirement_not_implementation_claim",
