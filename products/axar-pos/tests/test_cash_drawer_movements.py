@@ -129,6 +129,6 @@ def test_drawer_close_detects_tampered_movement_counter(a):
                      .values(cash_out_cents=1000))
         sess.commit()
     bad = a.post(f"/api/v1/drawer/{d['id']}/close", {"counted_cents": 4000})
-    assert bad.status_code == 409, bad.text
+    assert bad.status_code == 500, bad.text  # invariant corruption, not a user conflict
     assert bad.json()["error"] == "ledger_mismatch"
     assert len(a.get(f"/api/v1/drawer/{d['id']}/movements").json()) == 1
