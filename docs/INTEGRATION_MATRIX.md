@@ -61,7 +61,7 @@ flowchart LR
   W --> EXQ
   EXQ -. MISSING: delivery adapter .-> ACC[Accounting system]
   BANK[Bank statement lines] -- /receivables/bank-import --> API
-  TERM[Card terminal] -. MISSING: adapter not wired; payments use a mock .-> API
+  TERM["Card terminal (SIMULATED provider via terminals.flow; real provider MISSING)"] -.-> API
   PRN[Printers] -. MISSING .-> API
   MENU[Office: product / menu] -. MISSING: no product API .-> REG
   REC --- REG
@@ -109,8 +109,8 @@ Columns:
 | E5 | Express cash sale → sale register | `sales`, `sale_lines` | `POST /sales/cash` → `pos.sale.completed` v1 | `Idempotency-Key` (`uq_sale_idempotency`) + request hash | one txn: sale + lines + drawer CAS + numbers + journal + outbox | `sale` + till device | receipt numbers from a row-locked counter | lost response → retry returns the same sale; same key with another body → 409 | R1, R2, R3, R5, R6 | `test_sales.py`, `test_registers_and_concurrency.py` |
 | E6 | Order → kitchen | `orders`, `kitchen_tickets` | `POST /orders/{id}/kitchen` → `kitchen.ticket.created` v1, `…ready` v2 | `Idempotency-Key` (`uq_ticket_idempotency`); order `version` (optimistic) | one txn | `orders`; ready: `kitchen.update` | per order version | stale version → 409; replay → same ticket | R11 | `test_orders.py`, `test_cross_device_orders.py` |
 | E7 | Bill → payments → sale | `payments`, then `sales` | `POST /orders/{id}/payments` → `pos.sale.completed` v2 (tenders) | `Idempotency-Key` (`uq_payment_idempotency`) | each payment one txn; the last settling payment issues the sale in the same txn | `orders` / `sale` | bill state frozen once partly paid | card `unknown` → bill blocked until `/payments/{id}/reconcile` | R3, R11 | `test_payments.py` |
-| E8 | Card payment → terminal | `mock_terminal_txns` (SIMULATED) | internal mock in `payments.py` | payment id | payment txn | — | — | declined → bill stays open; timeout → `unknown` | R3 | `test_payments.py` |
-| E8b | Terminal adapter (provider-neutral) | — | `terminals/` contract | — | — | — | — | contract tests only | — | `test_terminal_contract.py` — **not wired to E8** |
+| E8 | Card payment → terminal | provider side: `mock_terminal_txns` (SIMULATED, own transaction); POS side: `payments` | `terminals.flow.charge` / `.resolve` over a `TerminalAdapter` (`terminals/recorded.py`) | our payment id = provider attempt id | 1) attempt recorded `unknown` + committed, 2) terminal asked outside any POS txn, 3) answer recorded | `sale` + till device | bill lock per step | not sent → declined; lost answer → unknown → `/payments/{id}/reconcile`; completing tender checks the drawer BEFORE the terminal; receipt not issuable after approval → payment kept, `/orders/{id}/settle` | R3, R11 | `test_card_terminal_flow.py`, `test_payments.py` |
+| E8b | Real provider adapter | — | same `TerminalAdapter` contract | — | — | — | — | must pass `test_terminal_contract.py` | — | **MISSING** until the owner chooses a provider (roadmap P2-4) |
 | E9 | Transfer part → receivable → bank | `customer_invoices`, `bank_transactions` | `/receivables/bank-import` | `bank_tx_id` (`uq_bank_tx`), Estonian reference number 7-3-1 | per import line | `receivables` | — | duplicate bank line → ignored; overpay → `overpaid` | R12 | `test_payments.py` |
 | E10 | Sale → refund | `refunds`, `refund_lines` | `POST /sales/{id}/refunds` → `pos.refund.completed` v1 | `Idempotency-Key` (`uq_refund_idempotency`) | one txn: refund + allocation CAS + drawer CAS | `refund.request` + manager approval | per sale CAS on `sale_refund_state` | over-refund refused under concurrency; mixed-tender sale cannot be refunded in cash | R1, R4, R6 | `test_refunds.py`, `test_refund_allocation.py` |
 | E11 | Refund → stock (restock / write-off) | **MISSING** | — | — | — | — | — | refunds never restock today (explicit in `consumers.stock_consume`) | — | #48 |

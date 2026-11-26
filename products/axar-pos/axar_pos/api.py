@@ -92,7 +92,7 @@ class BillPaymentIn(Strict):
     expected_total_cents: Cents
     amount_cents: Annotated[int, Field(strict=True, ge=1, le=100_000_000)]
     tendered_cents: Cents = 0                                   # cash
-    simulate: Literal["approved", "declined", "timeout"] = "approved"  # card (MOCK terminal)
+    simulate: Literal["approved", "declined", "timeout", "offline"] = "approved"  # card (SIMULATED terminal)
     customer_name: Annotated[str, Field(max_length=200)] = ""   # transfer
     customer_code: Annotated[str | None, Field(max_length=32)] = None
     due_days: Annotated[int, Field(strict=True, ge=0, le=90)] = 14
@@ -906,11 +906,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/v1/payments/{payment_id}/reconcile")
     def card_reconcile(payment_id: str, who: Seller, s: Db):
-        """Ask the (MOCK) provider what happened to a card payment whose answer was lost."""
+        """Ask the (SIMULATED) provider, through ``terminals.flow``, what happened to a card payment whose answer was lost."""
         visible_order(s, who, payments.get_payment(s, who.tenant_id, payment_id).order_id)
         p = payments.reconcile_card(s, tenant_id=who.tenant_id, payment_id=payment_id, settings=settings,
                                     now=settings.clock())
         o = visible_order(s, who, p.order_id)
+        return payments.bill_out(o, payments.bill_state(s, who.tenant_id, o, settings.clock(), settings))
+
+    class SettleIn(Strict):
+        register_id: Id
+
+    @app.post("/api/v1/orders/{order_id}/settle")
+    def bill_settle(order_id: str, body: SettleIn, who: Seller, s: Db):
+        """Issue the receipt for a bill its tenders already cover (after a card
+        approval whose receipt could not be issued, e.g. drawer closed). Idempotent."""
+        till_register(who, body.register_id)
+        visible_order(s, who, order_id)
+        o = payments.settle_bill(s, tenant_id=who.tenant_id, order_id=order_id, register_id=body.register_id,
+                                 actor=who.cashier_id, settings=settings, now=settings.clock())
         return payments.bill_out(o, payments.bill_state(s, who.tenant_id, o, settings.clock(), settings))
 
     @app.get("/api/v1/receivables/invoices")
