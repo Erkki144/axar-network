@@ -683,3 +683,16 @@ def test_offline_limit_setting_needs_an_owner_or_tenant_wide_manager(shop, world
     r = shop["adm"].put("/api/v1/admin/pos-settings", body)
     assert r.status_code == 200 and r.json()["offline_limit_hours"] == 24
     assert shop["adm"].get("/api/v1/admin/pos-settings").json()["offline_limit_hours"] == 24
+
+
+def test_reconciliation_and_trace_need_an_owner_or_tenant_wide_manager(shop, world):
+    """#60: the consistency check spans every location of the tenant."""
+    assert shop["till"].get("/api/v1/admin/reconciliation").status_code in (401, 403)        # cashier till
+    secret = shop["adm"].put(f"/api/v1/admin/staff/{shop['manager']}/credentials",
+                             {"login": "mart", "password": MGR_PW}).json()["totp_secret"]
+    mgr = world.admin(login="mart", password=MGR_PW, secret=secret)                        # manager of L1 only
+    assert mgr.get("/api/v1/admin/reconciliation").status_code == 403
+    assert mgr.get("/api/v1/admin/trace/sales/x").status_code == 403
+    r = shop["adm"].get("/api/v1/admin/reconciliation")
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert shop["adm"].get("/api/v1/admin/trace/sales/x").status_code == 404
