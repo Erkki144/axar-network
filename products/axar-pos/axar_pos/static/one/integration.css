@@ -110,3 +110,21 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 .offline-banner.warn{background:#fff4dc;color:#7a4b06;border:1px solid #f0d49a}
 .offline-banner.blocked{background:#fde8e8;color:#8f1d1d;border:1px solid #f1b8b8}
 @media(max-width:640px){.offline-banner{margin:10px 17px 0}}
+
+/* Office (#60 P0-2): reconciliation rows, review queue */
+.recon-list{list-style:none;margin:12px 0;padding:0;display:grid;gap:8px}
+.recon-row{border:1px solid #d9e2e5;border-left-width:6px;border-radius:10px;padding:10px 12px;background:#fff}
+.recon-row.ok{border-left-color:#2e8b57}
+.recon-row.warning{border-left-color:#b7791f}
+.recon-row.fail{border-left-color:#b42318;background:#fff5f4}
+.recon-top{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline}
+.recon-top small{color:#4a5a60}
+.recon-badge{font-size:.8rem;font-weight:700;padding:2px 8px;border-radius:999px}
+.recon-badge.ok{background:#e8f6ee;color:#1d5e3b}
+.recon-badge.warning{background:#fdf3e1;color:#7a4b0b}
+.recon-badge.fail{background:#fdecec;color:#8c2323}
+.recon-detail{white-space:pre-wrap;word-break:break-word;font-size:.8rem;max-height:220px;overflow:auto}
+.recon-trace{margin-top:18px;display:grid;gap:8px;max-width:640px}
+.trace-list{margin:4px 0;padding-left:18px;display:grid;gap:4px}
+.q-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.q-actions input{flex:1 1 220px;min-height:44px}
