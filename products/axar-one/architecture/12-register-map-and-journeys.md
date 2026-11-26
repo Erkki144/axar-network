@@ -1,7 +1,7 @@
 # 12 — Register map and change journeys ("the nervous system")
 
 Status: **Proposed**. Extends `03-data-ownership.md` (single writer per table) and `04-event-catalog.md` (events).
-Decision behind it: `adr/ADR-0015-master-data-as-versioned-registers.md`.
+Decision behind it: `adr/ADR-0016-master-data-as-versioned-registers.md`.
 
 ## Kokkuvõte eesti keeles
 
@@ -16,7 +16,7 @@ Registrite liigid:
 - **Tuletatud vaated** (aruanded, laoseis, KDS): arvutatakse tehingutest ja saab alati uuesti ehitada.
 
 **Suurim puudus täna:** põhiandmete muutused (toode, hind, retsept, soodustus, töötaja, ladu) ei tekita sündmusi.
-Need on andmebaasis otse muudetud väärtused. Seda parandavad ADR-0015 ja tegevuskava sammud P1-1, P1-5 ja P1-8.
+Need on andmebaasis otse muudetud väärtused. Seda parandavad ADR-0016 ja tegevuskava sammud P1-1, P1-5 ja P1-8.
 
 Märgid tabelites: ✅ olemas koodis ja testitud · ◐ osaliselt · ☐ puudu (planeeritud).
 
@@ -24,7 +24,7 @@ Märgid tabelites: ✅ olemas koodis ja testitud · ◐ osaliselt · ☐ puudu (
 
 ## 1. Register map
 
-### 1.1 Master data (versioned, effective-dated — ADR-0015)
+### 1.1 Master data (versioned, effective-dated — ADR-0016)
 
 | Register | Owner module | Key fields (meaning) | Referenced by | Change event | State |
 |---|---|---|---|---|---|

@@ -1,4 +1,4 @@
-"""Catalog and pricing (P1-1a, ADR-0015, docs/discovery/catalog.md §8).
+"""Catalog and pricing (P1-1a, ADR-0016, docs/discovery/catalog.md §8).
 
 Registers owned here (single writer):
 - product groups (tree), the product card and barcodes;

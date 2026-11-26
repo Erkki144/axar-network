@@ -198,7 +198,7 @@ class PriceList(Base):
 
 
 class PriceVersion(Base):
-    """One proposed or published price (ADR-0015). Never edited once decided:
+    """One proposed or published price (ADR-0016). Never edited once decided:
     draft -> approved | rejected | withdrawn. A new price is a new row.
 
     ``price_list_id`` NULL = the product's base price (all outlets without an

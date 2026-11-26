@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "axar://events/pricing.price.published/1",
   "title": "pricing.price.published v1 payload",
-  "description": "A price version was approved by a second person (four eyes, P1-1a / ADR-0015). price_list_id null = base price; price_cents null = not sold in that price list. Effective from valid_from; past sales never change.",
+  "description": "A price version was approved by a second person (four eyes, P1-1a / ADR-0016). price_list_id null = base price; price_cents null = not sold in that price list. Effective from valid_from; past sales never change.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version_id", "product_id", "sku", "price_list_id", "price_cents", "valid_from", "proposed_by", "approved_by"],

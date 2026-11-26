@@ -36,7 +36,7 @@ Piloot (P3-3) ootab nüüd ka sammude P1-6, P1-7 ja P1-8 valmimist.
 **PR #67 (Ektaco uuring I–IV) vastavuskaart:** `docs/discovery/PR67_GAP_MAP.md` — lisatud P1-1e, P1-7b, P1-9, P1-10, P2-10, P2-11; 52-servaline register E1–E52 seotud sammudega (#68 → P1-9, #69 → P1-7b, #70 → P2-9).
 
 **Kuidas iga samm sünnib** (rollid, etapid, väravad, tööriistad): `products/axar-one/architecture/13-delivery-journey.md`.
-**Registrite kaart ja muudatuste teekonnad:** `products/axar-one/architecture/12-register-map-and-journeys.md` ja ADR-0015.
+**Registrite kaart ja muudatuste teekonnad:** `products/axar-one/architecture/12-register-map-and-journeys.md` ja ADR-0016.
 
 **Järgmine PR (P0-2):** kontoriekraan kolmele funktsioonile, millel praegu on ainult API:
 - **kassa seaded** — offline-piirang, omaniku otsus;

@@ -1,4 +1,4 @@
-# ADR-0015 — Master data as versioned, event-emitting registers
+# ADR-0016 — Master data as versioned, event-emitting registers
 
 Status: **Proposed** (owner review). Related: ADR-0003, ADR-0004, ADR-0005, `12-register-map-and-journeys.md`.
 

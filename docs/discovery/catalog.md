@@ -17,7 +17,7 @@ salvestamata väärtust, vajutasin „Katkesta“ ja kontrollisin, et midagi ei 
 |---|---|---|---|
 | Mis on „toode“ | **üks kirje** on korraga müügitoode, laokaup ja tooraine; lipud „laotoode“ ja „retsept“ | **kaks registrit**: `Product` = müügipakkumine (menüüs, kassas), `Item` = laokaup (tooraine, valmistoode, edasimüük, pakend) | **jätame AXAR-i mudeli.** Üks laokaup (piim) võib olla kümne müügitoote koostises, ja üks müügitoode (kohv) ei pea olema laos. Kontoris näitame neid ühel kaardil, kui `stock_mode = item`, et kasutaja ei peaks topelt sisestama. |
 | Käibemaks | **number tootel** (24) | **maksukategooria** tootel + versioonitud määrad (`TaxRate.valid_from`) | **jätame AXAR-i mudeli.** Määra muutus (nt 22 → 24 %) ei nõua iga toote muutmist ja vanad müügid jäävad õigeks. |
-| Hind | hind **iga hinnakirja kohta**, tühi = selles hinnakirjas ei müüda | **üks hind** tootel (`price_cents`) | **ehitame hinnakirjad + hinnaversioonid** (ADR-0015). |
+| Hind | hind **iga hinnakirja kohta**, tühi = selles hinnakirjas ei müüda | **üks hind** tootel (`price_cents`) | **ehitame hinnakirjad + hinnaversioonid** (ADR-0016). |
 | Retsept | komponent võib olla toode või alamretsept; kadu %; ladu; tellimuse tüüp; tootlikkus; „kanna maha tootena“ | versioonitud, read = laokaup + kogus; tootlikkus; partii-retsept (`output_item_id`) | **laiendame**: kadu %, tellimuse tüüp, ühik, alamretsept (kaudselt läbi pooltoote). |
 | Rühm | puu, rühma kaupa seaded | tekstiväli `category` „ainult kassa jaoks“ | **ehitame rühmade puu.** |
 | Kogus müügireal | komakohaga (kaalukaup) | **täisarv** (`SaleLine.quantity`) | **muudame** mikroühikuteks nagu laos (`qty_micro`). Vajalik kaalukauba ja grammide jaoks. |

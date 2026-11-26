@@ -77,7 +77,7 @@ Kumbki ei jäta etappi vahele.
 | Requirement in discovery | `<DOMAIN>-<n>` | `CAT-12` "product must have a VAT class" |
 | Gap | `G<nn>` | G13 discounts missing |
 | Roadmap step | `P<phase>-<n>` | P1-5 |
-| ADR | `ADR-<nnnn>-<slug>.md` | ADR-0015 |
+| ADR | `ADR-<nnnn>-<slug>.md` | ADR-0016 |
 | Branch | `claude/<topic>-<id>` (existing) | `claude/catalog-p1-1-…` |
 
 ## 5. Domain order (what we take through stages 2–7)

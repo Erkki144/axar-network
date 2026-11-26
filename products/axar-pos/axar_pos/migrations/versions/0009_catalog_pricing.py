@@ -5,7 +5,7 @@ Revises: 0008
 Create Date: 2026-11-26
 
 Product group tree, product card fields, barcodes, outlet price lists and
-four-eyes price versions (ADR-0015, docs/discovery/catalog.md §8). Additive
+four-eyes price versions (ADR-0016, docs/discovery/catalog.md §8). Additive
 only: existing products keep ``price_cents`` as their legacy price until a
 base price version is approved. RLS + grants like 0008.
 """
