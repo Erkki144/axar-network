@@ -36,7 +36,8 @@ const LS_REGISTER = 'axar.one.register';
 // Written BEFORE the POST, cleared only after a definitive server answer.
 const LS_PENDING = 'axar.one.pending.v1';
 const PENDING_PATHS = [/^\/api\/v1\/sales\/cash$/, /^\/api\/v1\/sales\/[0-9a-f-]{36}\/refunds$/,
-  /^\/api\/v1\/orders\/[0-9a-f-]{36}\/pay-cash$/, /^\/api\/v1\/orders\/[0-9a-f-]{36}\/payments$/];
+  /^\/api\/v1\/orders\/[0-9a-f-]{36}\/pay-cash$/, /^\/api\/v1\/orders\/[0-9a-f-]{36}\/payments$/,
+  /^\/api\/v1\/drawer\/\d+\/movements$/];
 const ICONS = { Kohv: ['☕', 'sand'], Toit: ['🥐', 'rose'], Joogid: ['💧', 'sky'], Muud: ['📦', 'lilac'] };
 
 // ------------------------------------------------------------------ HTTP layer
@@ -113,6 +114,7 @@ const S = {
   quote: null, quoteSig: '', quoteError: '', quoteSeq: 0, quoteTimer: null,
   payment: null,              // pending/last payment attempt
   refund: null,               // pending refund attempt
+  cashMove: null,             // pending physical cash movement (#68)
   recovery: null,             // blocking recovery of a persisted pending op
   storageOk: true,            // false => money operations are blocked
   locksOk: true,              // false => no cross-tab lock => money operations blocked
@@ -169,7 +171,8 @@ function validRecord(rec) {
   if (rec.v !== 1 || typeof rec.key !== 'string' || rec.key.length < 8 || rec.key.length > 128) return false;
   if (typeof rec.createdAt !== 'string' || Number.isNaN(Date.parse(rec.createdAt))) return false;
   const b = rec.body;
-  if (!b || !isInt(b.register_id, 1, Number.MAX_SAFE_INTEGER) || rec.registerId !== b.register_id) return false;
+  if (!b || !isInt(rec.registerId, 1, Number.MAX_SAFE_INTEGER)) return false;
+  if (rec.op !== 'cashmove' && (!isInt(b.register_id, 1, Number.MAX_SAFE_INTEGER) || rec.registerId !== b.register_id)) return false;
   const okLines = () => Array.isArray(b.lines) && b.lines.length > 0 && b.lines.length <= 200;
   if (rec.op === 'sale') {
     if (!isInt(b.tendered_cents, 0, 100_000_000) || !onlyKeys(rec.headers || {}, [])) return false;
@@ -193,6 +196,17 @@ function validRecord(rec) {
       && isInt(b.amount_cents, 1, 100_000_000) && (b.tendered_cents === undefined || isInt(b.tendered_cents, 0, 100_000_000))
       && (b.simulate === undefined || ['approved', 'declined', 'timeout'].includes(b.simulate))
       && (b.customer_name === undefined || (typeof b.customer_name === 'string' && b.customer_name.length <= 200));
+  }
+  if (rec.op === 'cashmove') {
+    const m = /^\/api\/v1\/drawer\/(\d+)\/movements$/.exec(rec.path);
+    return Boolean(m) && isInt(Number(m[1]), 1, Number.MAX_SAFE_INTEGER)
+      && onlyKeys(b, ['direction', 'amount_cents', 'reason_code', 'reason_text'])
+      && ['in', 'out'].includes(b.direction)
+      && isInt(b.amount_cents, 1, 100_000_000)
+      && ['SAFE_DROP','FLOAT_TOPUP','CASH_CORRECTION','BANK_DEPOSIT','OTHER'].includes(b.reason_code)
+      && typeof b.reason_text === 'string' && b.reason_text.trim().length >= 5 && b.reason_text.length <= 300
+      && onlyKeys(rec.headers || {}, ['X-Approval-Id'])
+      && (rec.headers?.['X-Approval-Id'] === undefined || UUID_RE.test(rec.headers['X-Approval-Id']));
   }
   if (rec.op === 'refund') {
     if (!okLines()) return false;
@@ -410,7 +424,12 @@ function renderDrawerStatus() {
     box.append(b);
   } else {
     const d = S.drawer;
-    box.append(el('span', null, `Vahetus #${d.id} avatud · ${d.sale_count} müüki · oodatav sularaha ${formatEuro(d.expected_cents)}`));
+    box.append(el('span', null, 'Vahetus #' + d.id + ' avatud · ' + d.sale_count + ' müüki · oodatav sularaha ' + formatEuro(d.expected_cents)));
+    const cashIn = el('button', 'secondary-btn', 'Sularaha sisse'); cashIn.type = 'button'; cashIn.id = 'cash-in';
+    cashIn.addEventListener('click', () => openCashMovementDialog('in'));
+    const cashOut = el('button', 'secondary-btn', 'Sularaha välja'); cashOut.type = 'button'; cashOut.id = 'cash-out';
+    cashOut.addEventListener('click', () => openCashMovementDialog('out'));
+    box.append(cashIn, cashOut);
   }
 }
 
@@ -875,7 +894,9 @@ function openModal(build) {
   if (focusable) focusable.focus();
 }
 function closeModal() {
-  if (S.payment?.state === 'sending' || S.refund?.state === 'sending' || S.bill?.state === 'sending') return; // never abandon an in-flight request
+  if (S.payment?.state === 'sending' || S.refund?.state === 'sending' || S.bill?.state === 'sending' || S.cashMove?.state === 'sending') return; // never abandon an in-flight request
+  if (S.cashMove && (S.cashMove.state === 'sending' || S.cashMove.state === 'unconfirmed')) return;
+  if (S.cashMove && S.cashMove.state !== 'done') S.cashMove = null;
   if (S.bill && S.bill.state !== 'unconfirmed') S.bill = null;
   if (S.recovery) return; // recovery screen is blocking until resolved
   $('modal').hidden = true;
@@ -987,6 +1008,115 @@ async function refreshDrawer() {
     announce(e.message);
   }
   renderDrawerStatus(); renderTotals();
+}
+
+
+function openCashMovementDialog(direction) {
+  if (!S.drawer || !can('drawer')) return;
+  S.cashMove = { drawerId: S.drawer.id, direction, amount: '',
+    reasonCode: direction === 'out' ? 'SAFE_DROP' : 'FLOAT_TOPUP',
+    reason: '', approverId: '', approverPin: '', approvalId: null,
+    key: null, bodySig: null, state: 'input', error: '' };
+  openModal(renderCashMovement);
+}
+
+function renderCashMovement(c) {
+  const m = S.cashMove; if (!m) return;
+  c.replaceChildren();
+  const title = el('h2', null, m.direction === 'in' ? 'Sularaha sisse' : 'Sularaha välja / seifi');
+  title.id = 'dialog-title';
+  c.append(title, el('p', 'muted', 'See ei ole müük. Iga üleandmine lisatakse eraldi kassapäevikusse.'));
+  const locked = m.state === 'sending' || m.state === 'unconfirmed';
+  const row = el('div', 'form-row');
+  const amountLabel = el('label', 'section-label', 'Summa eurodes'); amountLabel.htmlFor = 'cash-move-amount';
+  const input = el('input'); input.id = 'cash-move-amount'; input.inputMode = 'decimal'; input.value = m.amount;
+  input.disabled = locked;
+  input.addEventListener('input', () => { m.amount = input.value; ok.disabled = !valid(); });
+  row.append(amountLabel, input); c.append(row);
+  const code = el('select'); code.id = 'cash-move-code'; code.disabled = locked;
+  for (const [value, label] of [['SAFE_DROP','Seifi üleandmine'], ['FLOAT_TOPUP','Vahetusraha täiendamine'],
+                                 ['BANK_DEPOSIT','Panka üleandmine'], ['CASH_CORRECTION','Kassa korrigeerimine'], ['OTHER','Muu']]) {
+    const opt = el('option', null, label); opt.value = value; code.append(opt);
+  }
+  code.value = m.reasonCode;
+  code.addEventListener('change', () => { m.reasonCode = code.value; m.approvalId = null; ok.disabled = !valid(); });
+  const cl = el('label', 'section-label', 'Põhjus'); cl.htmlFor = 'cash-move-code'; c.append(cl, code);
+  const rr = el('div', 'form-row');
+  const rl = el('label', 'section-label', 'Kirjeldus (vähemalt 5 märki)'); rl.htmlFor = 'cash-move-reason';
+  const reason = el('input'); reason.id = 'cash-move-reason'; reason.maxLength = 300; reason.disabled = locked;
+  reason.value = m.reason;
+  reason.addEventListener('input', () => { m.reason = reason.value; m.approvalId = null; ok.disabled = !valid(); });
+  rr.append(rl, reason); c.append(rr);
+  const needsApproval = m.direction === 'out' && AUTH.mode === 'server'
+    && !(AUTH.me?.roles || []).some((r) => r === 'manager' || r === 'owner');
+  if (needsApproval && !locked) c.append(approvalFields(m, () => { ok.disabled = !valid(); }));
+  if (m.state === 'sending') c.append(stateBox('busy', 'Salvestan kassaliikumist…'));
+  if (m.state === 'unconfirmed') c.append(stateBox('unconfirmed',
+    'Serveri tulemus pole teada. Ära anna raha uuesti välja. Korda sama kirjega.'));
+  if (m.state === 'error') c.append(stateBox('error', m.error));
+  const ok = el('button', 'primary-btn', m.state === 'unconfirmed' ? 'Kontrolli sama tehingut' : 'Kinnita kassaliikumine');
+  ok.type = 'button'; ok.id = 'confirm-cash-movement';
+  const valid = () => m.state === 'unconfirmed' || (
+    parseEuroInput(m.amount) > 0 && m.reason.trim().length >= 5 &&
+    (!needsApproval || Boolean(m.approvalId) || (m.approverId && /^\d{4,8}$/.test(m.approverPin))));
+  ok.disabled = m.state === 'sending' || !valid();
+  ok.addEventListener('click', submitCashMovement);
+  c.append(ok);
+}
+
+async function submitCashMovement() {
+  const m = S.cashMove; if (!m || m.state === 'sending') return;
+  if (!S.online && m.state !== 'unconfirmed') {
+    m.state = 'error'; m.error = 'Puudub kinnitatud serveriühendus. Ära liiguta sularaha offline-režiimis.';
+    renderCashMovement($('modal-content')); return;
+  }
+  const amount = parseEuroInput(m.amount);
+  if (!(amount > 0) || m.reason.trim().length < 5) return;
+  const body = {direction: m.direction, amount_cents: amount,
+                reason_code: m.reasonCode, reason_text: m.reason.trim()};
+  const bodySig = JSON.stringify(body);
+  if (m.state === 'unconfirmed' && bodySig !== m.bodySig) {
+    m.error = 'Tundmatu tulemusega tehingut ei tohi muuta'; renderCashMovement($('modal-content')); return;
+  }
+  if (!m.key || m.bodySig !== bodySig) {
+    m.key = newKey(); m.bodySig = bodySig; m.approvalId = null;
+  }
+  const retry = m.state === 'unconfirmed';
+  const needsApproval = m.direction === 'out' && AUTH.mode === 'server'
+    && !(AUTH.me?.roles || []).some((r) => r === 'manager' || r === 'owner');
+  let headers = {};
+  if (needsApproval && !m.approvalId) {
+    try {
+      const { data } = await api('/api/v1/auth/approvals', {method:'POST', body: {
+        action:'drawer_cash_out', approver_id:m.approverId, pin:m.approverPin,
+        request:{drawer_id:m.drawerId, ...body}}});
+      m.approvalId = data.approval_id;
+    } catch (e) { m.error = 'Juhi kinnitust ei saanud: ' + e.message; m.state = retry ? 'unconfirmed' : 'error';
+      renderCashMovement($('modal-content')); return; }
+    finally { m.approverPin = ''; }
+  }
+  if (m.approvalId) headers['X-Approval-Id'] = m.approvalId;
+  m.state = 'sending'; renderCashMovement($('modal-content'));
+  const rec = {op:'cashmove', key:m.key, path:'/api/v1/drawer/' + m.drawerId + '/movements',
+    body, headers, registerId:S.registerId, createdAt:new Date().toISOString()};
+  const out = await runMoneyOperation(rec, null);
+  if (out.blocked) { m.state='error'; m.error=out.blocked; }
+  else if (out.data) { m.state='done'; await showCashMovementResult(out.data); return; }
+  else if (isUncertain(out.err)) { m.state='unconfirmed'; m.error=out.err.message; }
+  else { m.state='error'; m.error=out.err.message; m.key=null; m.bodySig=null; m.approvalId=null; }
+  renderCashMovement($('modal-content'));
+}
+
+async function showCashMovementResult(data) {
+  const c = $('modal-content'); c.replaceChildren();
+  const h = el('h2', null, 'Kassaliikumine kinnitatud'); h.id='dialog-title';
+  const msg = el('p', null, (data.direction === 'in' ? 'Sisse ' : 'Välja ') + formatEuro(data.amount_cents) +
+                ' · ' + data.reason_text);
+  const done = el('button', 'primary-btn', 'Valmis'); done.type='button';
+  done.addEventListener('click', () => { S.cashMove=null; closeModal(); });
+  c.append(h,msg,el('p','muted','Tehingu ID: ' + data.id),done);
+  await refreshDrawer();
+  done.focus();
 }
 
 // -------------------------------------------------------------------- payment
@@ -1393,7 +1523,7 @@ function guardJournal(key, rec) {
   const cur = readPending();
   if (cur.state === 'corrupt' || cur.state === 'unreadable') return 'seadmes on loetamatu pooleli tehing – laadi leht uuesti';
   if (cur.state === 'ok' && cur.rec.key !== key) return 'teises aknas või varem on pooleli tehing – lõpeta see enne';
-  try { writePending({ ...rec, registerId: rec.body.register_id }); } catch {
+  try { writePending({ ...rec, registerId: rec.registerId || rec.body.register_id }); } catch {
     S.storageOk = false; renderTotals();
     return 'seadme salvestus ei tööta, tehingut ei saadetud (topelttehingu oht)';
   }
@@ -1610,7 +1740,7 @@ function renderRecovery(c, note = '', cls = 'unconfirmed') {
   const box = el('div'); box.id = 'recovery';
   const bad = found.state === 'corrupt' || found.state === 'unreadable';
   const title = el('h2', null, bad ? 'Pooleli tehingu kirje on loetamatu'
-    : found.rec.op === 'refund' ? 'Pooleli tagastus' : 'Pooleli makse');
+    : found.rec.op === 'refund' ? 'Pooleli tagastus' : found.rec.op === 'cashmove' ? 'Pooleli sularahaliikumine' : 'Pooleli makse');
   title.id = 'dialog-title';
   box.append(title);
   if (bad) {
@@ -1631,7 +1761,8 @@ function renderRecovery(c, note = '', cls = 'unconfirmed') {
     box.append(discard);
   } else {
     const { rec } = found;
-    const what = rec.op === 'billpay'
+    const what = rec.op === 'cashmove' ? 'Kassa rahaliikumine ' + rec.body.direction.toUpperCase() + ' ' + formatEuro(rec.body.amount_cents) + '. Põhjus: ' + rec.body.reason_text
+      : rec.op === 'billpay'
       ? `Lauaarve osamakse: ${METHOD_ET[rec.body.method]} ${formatEuro(rec.body.amount_cents)}.`
       : rec.op === 'sale'
       ? `${rec.body.lines ? `Kassamüük, ${rec.body.lines.length} rida` : 'Lauaarve tasumine'}. Kliendilt vastu võetud ${formatEuro(rec.body.tendered_cents)}.`
@@ -1668,7 +1799,7 @@ async function recoverPending(btn) {
     if (S.refund?.key === rec.key) S.refund = null;
     if (!out.cleaned) { renderRecovery($('modal-content'), CLEANUP_WARNING, 'error'); return; } // journal kept
     S.recovery = null; $('close-modal').hidden = false;
-    if (rec.op === 'sale') await showReceipt(out.data); else await showRefundResult(out.data);
+    if (rec.op === 'sale') await showReceipt(out.data); else if (rec.op === 'cashmove') await showCashMovementResult(out.data); else await showRefundResult(out.data);
     return;
   }
   if (isUncertain(out.err)) { renderRecovery($('modal-content'), `Tulemus on endiselt teadmata (${out.err.message}). Proovi hetke pärast uuesti.`); return; }
@@ -1689,7 +1820,7 @@ function checkPendingJournal() {
   const found = readPending();
   if (found.state === 'none') return;
   // Our own in-flight attempt in this tab is handled by its own dialog.
-  if (found.state === 'ok' && [S.payment?.key, S.refund?.key, S.bill?.key].includes(found.rec.key)) return;
+  if (found.state === 'ok' && [S.payment?.key, S.refund?.key, S.bill?.key, S.cashMove?.key].includes(found.rec.key)) return;
   if (found.state === 'ok' && found.rec.registerId && S.registers.some((r) => r.id === found.rec.registerId)) {
     S.registerId = found.rec.registerId; renderRegisterSelect(); refreshDrawer();
   }
