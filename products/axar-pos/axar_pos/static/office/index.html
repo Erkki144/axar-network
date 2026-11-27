@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="et">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#112b35">
+  <title>AXAR ONE — kontor</title>
+  <!-- #76: the office is its own application with its own login (password + TOTP).
+       It shares only the design system and display helpers with the till. -->
+  <link rel="stylesheet" href="../one/styles.css">
+  <link rel="stylesheet" href="../one/integration.css">
+  <link rel="stylesheet" href="office.css">
+</head>
+<body class="office-app">
+  <header class="office-bar">
+    <div class="brand" aria-label="AXAR ONE kontor"><span class="brand-glyph">◈</span><span class="brand-name">AXAR<span>ONE</span></span><small class="office-tag">KONTOR</small></div>
+    <nav class="office-nav" id="office-nav" aria-label="Kontori alad" hidden>
+      <button type="button" class="category-btn active" data-area="office" id="area-office">Kontor</button>
+      <button type="button" class="category-btn" data-area="inventory" id="area-inventory">Ladu</button>
+    </nav>
+    <div class="office-who" id="office-who" hidden></div>
+    <button type="button" class="secondary-btn" id="office-logout" hidden>Logi välja</button>
+  </header>
+  <main class="office-main" id="office-root" aria-live="polite">
+    <p class="muted-p">Laadin…</p>
+  </main>
+  <div id="announcer" class="sr-only" aria-live="polite"></div>
+  <script type="module" src="app.mjs"></script>
+</body>
+</html>

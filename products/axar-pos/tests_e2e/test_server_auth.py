@@ -184,34 +184,38 @@ def test_kitchen_view_respects_permissions(till, auth_server):
 
 
 def test_office_needs_a_back_office_login_and_keeps_the_till_session(till, auth_server):
-    """#60 P0-2: tenant-wide office actions need password + TOTP even for a
-    PIN-logged manager; a failed or expired office login never locks the till."""
-    login(till, "Kati", "4829")
-    expect(till.locator('[data-mode="office"]')).to_be_hidden()      # cashier: no office
-    till.click("#lock-button")
-    login(till, "Mart", "7351")
-    expect(till.locator('[data-mode="office"]')).to_be_visible()
-    till.click('[data-mode="office"]')
-    expect(till.locator("#office-login")).to_be_visible()
-    till.fill("#office-login", "owner")
-    till.fill("#office-password", OWNER_PW)
-    till.fill("#office-totp", "000000")
-    till.click("#office-login-submit")
-    expect(till.locator("#office-body .dialog-error")).not_to_be_empty()
-    expect(till.locator("#auth-screen")).to_be_hidden()               # the till session is still there
-    step = int(time.time()) // 30 + 1                                 # newer than the fixture's login step
-    till.fill("#office-login", "owner")
-    till.fill("#office-password", OWNER_PW)
-    till.fill("#office-totp", auth.totp_at(auth_server.env["_TOTP"], step))
-    till.click("#office-login-submit")
-    till.click("#recon-run")
-    expect(till.locator("#recon-list .recon-row")).to_have_count(len(reconcile.RULES))
-    expect(till.locator("#recon-list .recon-row.fail")).to_have_count(0)
-    till.click("#office-tab-settings")
-    expect(till.locator("#offline-limit")).to_have_value("72")
+    """#76: the till and the office are two applications with two logins. The
+    till has no office entry at all; the office at /office/ needs password +
+    TOTP even for a manager already signed in at the till; a failed office
+    login never touches the till session, and the office never sees the till."""
+    login(till, "Mart", "7351")                                        # a manager at the till
+    expect(till.locator('[data-mode="office"]')).to_have_count(0)      # no office inside the till
+    expect(till.locator('[data-mode="inventory"]')).to_have_count(0)
+    office = till.context.new_page()
+    office.goto(f"{auth_server.base}/office/")
+    expect(office.locator("#login-user")).to_be_visible()               # only the login, no office data
+    expect(office.locator("#office-tab-recon")).to_have_count(0)
+    office.fill("#login-tenant", "demo")
+    office.fill("#login-user", "owner")
+    office.fill("#login-password", OWNER_PW)
+    office.fill("#login-totp", "000000")
+    office.click("#login-submit")
+    expect(office.locator("#office-login-form .dialog-error")).not_to_be_empty()
+    step = int(time.time()) // 30 + 1                                   # newer than the fixture's login step
+    office.fill("#login-user", "owner")
+    office.fill("#login-password", OWNER_PW)
+    office.fill("#login-totp", auth.totp_at(auth_server.env["_TOTP"], step))
+    office.click("#login-submit")
+    office.click("#recon-run")
+    expect(office.locator("#recon-list .recon-row")).to_have_count(len(reconcile.RULES))
+    expect(office.locator("#recon-list .recon-row.fail")).to_have_count(0)
+    office.click("#office-tab-settings")
+    expect(office.locator("#offline-limit")).to_have_value("72")
+    expect(office.locator("#product-grid")).to_have_count(0)            # no till inside the office
+    # The till session is untouched by everything above.
+    expect(till.locator("#auth-screen")).to_be_hidden()
     expect(till.locator("#cashier-name")).to_have_text("Mart")
-    # Locking the till ends the office session too: the next person must log in again.
-    till.click("#lock-button")
-    login(till, "Mart", "7351")
-    till.click('[data-mode="office"]')
-    expect(till.locator("#office-login")).to_be_visible()
+    # Logging out of the office does not log out the till, and back.
+    office.click("#office-logout")
+    expect(office.locator("#login-user")).to_be_visible()
+    expect(till.locator("#cashier-name")).to_have_text("Mart")

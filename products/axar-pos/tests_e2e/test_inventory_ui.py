@@ -13,6 +13,17 @@ from conftest import Server
 from test_cashier_ui import add, open_drawer, pay
 
 
+def open_inventory(p):
+    """#76: stock lives in the office application, not in the till."""
+    p.goto(f"{p.srv.base}/office/")
+    p.click("#area-inventory")
+
+
+def open_till(p):
+    p.goto(f"{p.srv.base}/one/")
+    p.wait_for_selector("#product-grid .product")
+
+
 @pytest.fixture
 def page(browser, tmp_path):
     srv = Server(tmp_path, {"AXAR_POS_INPROCESS_WORKER": "1"})
@@ -30,7 +41,7 @@ def page(browser, tmp_path):
 
 
 def test_invoice_to_stock_to_recipe_to_sale(page):
-    page.click('[data-mode="inventory"]')
+    open_inventory(page)
     # 1) purchase invoice with a NEW supplier and a NEW item, saved as draft
     page.click("#new-invoice")
     page.select_option("#inv-supplier", "new")
@@ -79,14 +90,14 @@ def test_invoice_to_stock_to_recipe_to_sale(page):
     page.click("#recipe-save")
     expect(page.locator("#recipe-editor")).to_contain_text("Kehtiv versioon 1")
     # 5) sell 2 portions at the till
-    page.click('[data-mode="express"]')
+    open_till(page)
     open_drawer(page)
     add(page, "Päevasupp", 2)
     pay(page, "20,00")
     expect(page.locator("#change-due")).to_be_visible()
     page.click("#next-customer")
     # 6) consumption arrives on the stock card (in-process worker, no manual step)
-    page.click('[data-mode="inventory"]')
+    open_inventory(page)
     page.locator('[data-tab="stock"]').click()
     expect(page.locator("tr[data-item^='KARTUL']")).to_contain_text("9,6 kg", timeout=10_000)
     page.locator("tr[data-item^='KARTUL'] button").click()
@@ -96,7 +107,7 @@ def test_invoice_to_stock_to_recipe_to_sale(page):
 
 
 def _post_invoice(p, doc_no, qty, net, new_item=False):
-    p.click('[data-mode="inventory"]')
+    open_inventory(p)
     p.locator('[data-tab="invoices"]').click()
     p.click("#new-invoice")
     if new_item:
@@ -136,8 +147,7 @@ def test_stock_card_redrawn_by_click_and_live_event_at_once_shows_one_table(page
 
     other_ctx = browser.new_context(viewport={"width": 1280, "height": 900})
     other = other_ctx.new_page()
-    other.goto(f"{page.srv.base}/one/")
-    other.wait_for_selector("#product-grid .product")
+    other.srv = page.srv
     _post_invoice(other, "A-2", "1", "5,00")                           # another device: stock changes
     while len(held) < 2 and time.monotonic() < deadline + 10:
         page.wait_for_timeout(50)                                       # render 2 from the live event

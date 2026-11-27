@@ -38,7 +38,7 @@ class NoCacheStatic(StaticFiles):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-from . import __version__, auth, catalog, events, inventory, offline, orders, payments, reconcile, services, sync
+from . import __version__, auth, catalog, events, realms, inventory, offline, orders, payments, reconcile, services, sync
 from .config import Settings
 from .db import bind_tenant, init_db, make_engine, request_factory, seed_demo
 from .models import DrawerCashMovement, DrawerSession, Refund, Register, Sale, Tenant
@@ -607,6 +607,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                        touch=request.url.path != "/api/v1/events/stream")
             s.info["actor"] = {"kind": "staff", "staff_id": who.staff_id, "device_id": who.device_id,
                                "session_id": who.session_id}
+            enforce_realm(request, who)
             return who
         if not x_tenant_id or not x_cashier_id:
             raise HTTPException(401, "X-Tenant-ID and X-Cashier-ID headers required (demo identity)")
@@ -618,8 +619,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(403, "invalid role")
         bind_tenant(s, tenant.id)
         s.info["actor"] = {"kind": "staff", "staff_id": x_cashier_id[:64], "device_id": None, "session_id": None}
-        return auth.Principal(tenant_id=tenant.id, tenant_name=tenant.name, staff_id=x_cashier_id[:64],
-                              staff_name=x_cashier_id[:64], roles=frozenset({role}), demo=True)
+        who = auth.Principal(tenant_id=tenant.id, tenant_name=tenant.name, staff_id=x_cashier_id[:64],
+                             staff_name=x_cashier_id[:64], roles=frozenset({role}), demo=True)
+        enforce_realm(request, who)
+        return who
+
+    def enforce_realm(request: Request, who: auth.Principal) -> None:
+        """#76: till and office sessions never cross (axar_pos/realms.py)."""
+        route = request.scope.get("route")
+        try:
+            realms.check(request.method, getattr(route, "path", request.url.path), who.kind, who.demo)
+        except realms.WrongRealm as e:
+            err = services.Forbidden(str(e))
+            err.code = "wrong_realm"
+            raise err from None
 
     def need(permission: str):
         def dep(who: Annotated[auth.Principal, Depends(identity)]) -> auth.Principal:
@@ -673,6 +686,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # AXAR ONE cashier UI (issue #11), served same-origin so it can call the API.
     app.mount("/one", NoCacheStatic(directory=STATIC / "one", html=True), name="one")
+
+    # #76: the till and the office are two applications with two logins.
+    @app.get("/pos", include_in_schema=False)
+    @app.get("/pos/", include_in_schema=False)
+    def ui_pos():
+        return RedirectResponse("/one/", status_code=307)
+
+    @app.get("/office", include_in_schema=False)
+    def ui_office_slash():
+        return RedirectResponse("/office/", status_code=307)
+
+    app.mount("/office", NoCacheStatic(directory=STATIC / "office", html=True), name="office")
 
     def outlet_of(who: auth.Principal, s: Session, register_id: int | None) -> int | None:
         """The outlet whose prices apply: a till session's own location;

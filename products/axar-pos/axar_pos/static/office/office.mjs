@@ -6,7 +6,7 @@
 // Server mode: these are back-office actions (owner or tenant-wide manager,
 // password + TOTP). The office session token lives in memory only and never
 // replaces the till's own session.
-import { formatEuro } from './format.mjs';
+import { formatEuro } from '../one/format.mjs';
 import { createCatalogOffice } from './office-catalog.mjs';
 
 const STATUS_ET = { ok: 'Korras', warning: 'Ootel', fail: 'VIGA' };

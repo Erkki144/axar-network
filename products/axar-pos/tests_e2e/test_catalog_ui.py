@@ -61,9 +61,7 @@ def tile(p, name):
 
 def test_new_product_four_eyes_live_till_and_outlet_price(shop):
     p, srv = shop, shop.srv
-    p.goto(f"{srv.base}/one/")
-    p.wait_for_selector("#product-grid .product")
-    p.click('[data-mode="office"]')
+    p.goto(f"{srv.base}/office/")                                      # #76: office is its own application
     p.click("#office-tab-catalog")
 
     # 1. new product: a proposal, not sold yet
@@ -80,12 +78,12 @@ def test_new_product_four_eyes_live_till_and_outlet_price(shop):
     expect(row).to_contain_text("Enda esitatud hinda ei saa kinnitada")
     second(srv, "POST", f"/api/v1/pricing/prices/{pending(srv)[0]['id']}/approve", {})
 
-    # 3. the till shows it without a reload
-    p.click('[data-mode="express"]')
+    # 3. the till (its own application) shows it
+    p.goto(f"{srv.base}/one/")
     expect(tile(p, "Seljanka")).to_contain_text("6,50 €", timeout=10_000)
 
     # 4. outlet B: own price list, own price
-    p.click('[data-mode="office"]')
+    p.goto(f"{srv.base}/office/")
     p.click("#office-tab-catalog")
     p.fill("#list-name", "Sadam")
     p.click("#list-submit")
@@ -102,7 +100,8 @@ def test_new_product_four_eyes_live_till_and_outlet_price(shop):
     second(srv, "POST", f"/api/v1/pricing/prices/{pending(srv)[0]['id']}/approve", {})
 
     regs = {r["code"]: r["id"] for r in srv.api("/api/v1/registers")}
-    p.click('[data-mode="express"]')
+    p.goto(f"{srv.base}/one/")
+    p.wait_for_selector("#product-grid .product")
     p.select_option("#register-select", str(regs["SADAM1"]))
     expect(tile(p, "Seljanka")).to_contain_text("6,90 €", timeout=10_000)
     p.select_option("#register-select", str(regs["KASSA1"]))

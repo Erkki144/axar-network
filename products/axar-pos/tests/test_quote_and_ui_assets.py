@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from axar_pos.models import OutboxEvent, Sale
 
 STATIC_ONE = Path(__file__).resolve().parents[1] / "axar_pos" / "static" / "one"
+STATIC_OFFICE = STATIC_ONE.parent / "office"   # #76: separate office application
 
 
 def quote(api, lines):
@@ -74,7 +75,7 @@ def test_ui_assets_served_with_safe_headers(client):
 
 def test_ui_has_no_client_side_money_authority():
     """Guard against re-introducing browser-side VAT/rounding (AION contract)."""
-    src = "\n".join(p.read_text(encoding="utf-8") for p in STATIC_ONE.glob("*.mjs"))
+    src = "\n".join(p.read_text(encoding="utf-8") for p in [*STATIC_ONE.glob("*.mjs"), *STATIC_OFFICE.glob("*.mjs")])
     for forbidden in ("vatIncluded", "cashRounded", "cartSummary", "rateBp", "vat_from_gross"):
         assert forbidden not in src, forbidden
     # Every money POST goes through one function that always sends the
@@ -101,6 +102,8 @@ def test_ui_has_no_client_side_money_authority():
         "`/api/v1/payments/${paymentId}/reconcile`",
         # office (#60 P0-2): back-office login / logout, POS settings, offline review queue
         "'/api/v1/auth/login'", "'/api/v1/auth/logout'", "'/api/v1/admin/pos-settings'",
+        # office application (#76): its own login / logout
+        "'/api/v1/auth/login'", "'/api/v1/auth/logout'",
         "`/api/v1/sync/quarantine/${r.id}/retry`", "`/api/v1/sync/quarantine/${r.id}/dismiss`",
         # catalog + prices (P1-1a): card fields and price PROPOSALS; approval is a second person's
         "'/api/v1/catalog/products'", "`/api/v1/catalog/products/${p.id}`", "'/api/v1/catalog/groups'",
@@ -113,3 +116,29 @@ def test_ui_has_no_client_side_money_authority():
         assert all(money not in p for p in paths), money
     # No silent success: the only "Makse kinnitatud" is rendered from the server response.
     assert len(re.findall(r"Makse kinnitatud", src)) >= 1
+
+
+def test_till_and_office_are_separate_applications():
+    """#76: the till bundle has no office code or navigation; the office bundle
+    has no till money operations. Shared: design system and format helpers."""
+    till_html = (STATIC_ONE / "index.html").read_text(encoding="utf-8")
+    till_js = "\n".join(p.read_text(encoding="utf-8") for p in STATIC_ONE.glob("*.mjs"))
+    for forbidden in ('data-mode="office"', 'data-mode="inventory"'):
+        assert forbidden not in till_html, forbidden
+    for forbidden in ("office.mjs", "office-catalog.mjs", "inventory.mjs", "createOffice", "createInventory",
+                      "/api/v1/catalog/", "/api/v1/pricing/", "/api/v1/inventory/", "/api/v1/admin/"):
+        assert forbidden not in till_js, forbidden
+    assert not (STATIC_ONE / "office.mjs").exists() and not (STATIC_ONE / "inventory.mjs").exists()
+    office_js = "\n".join(p.read_text(encoding="utf-8") for p in STATIC_OFFICE.glob("*.mjs"))
+    for forbidden in ("/api/v1/sales/cash", "/pay-cash", "/movements", "/api/v1/drawer/open", "runMoneyOperation",
+                      "/api/v1/auth/pin-login", "/api/v1/tables"):
+        assert forbidden not in office_js, forbidden
+    imports = [l for l in office_js.splitlines() if l.startswith("import ")]
+    assert all("'./" in l or "'../one/format.mjs'" in l for l in imports), imports
+
+
+def test_office_and_pos_urls(client):
+    assert client.get("/office/").status_code == 200
+    assert "AXAR ONE — kontor" in client.get("/office/").text
+    r = client.get("/pos/", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/one/"
