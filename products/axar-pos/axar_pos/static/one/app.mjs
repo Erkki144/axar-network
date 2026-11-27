@@ -1981,7 +1981,13 @@ function renderIdentity() {
   $('mode-pill').textContent = AUTH.mode === 'demo' ? '● DEMO' : `● ${(me?.roles || []).map((r) => ROLE_ET[r] || r).join(', ')}`;
   $('lock-top').hidden = AUTH.mode !== 'server';
   $('lock-button').hidden = AUTH.mode !== 'server';
-  $('register-select').disabled = AUTH.mode === 'server' && Boolean(me?.register_id);
+  // No register picker is ever presented to a real cashier, including
+  // a misconfigured or unbound till that cannot open the sales workspace.
+  const till = AUTH.mode === 'server';
+  $('register-select').disabled = till;
+  $('register-select').hidden = till;
+  $('register-select').style.display = till ? 'none' : '';
+  $('register-fixed-label').hidden = !till;
 }
 
 async function afterLogin() {
