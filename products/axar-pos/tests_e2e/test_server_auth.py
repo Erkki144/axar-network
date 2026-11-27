@@ -104,6 +104,49 @@ def test_enrol_pin_login_sell_and_wrong_pin(till, auth_server):
     expect(till.locator("#change-due")).to_have_text("Tagasi 2,50 €")
 
 
+
+def test_provisioned_register_is_read_only_and_not_from_localstorage(till, auth_server):
+    """#81: an authenticated till must display its assigned register, no picker."""
+    login(till, "Kati", "4829")
+    expect(till.locator("#register-select")).to_be_hidden()
+    fixed = till.locator("#register-fixed-label")
+    expect(fixed).to_be_visible()
+    expect(fixed).to_contain_text("Kassa")
+    initial_label = fixed.inner_text()
+    till.evaluate("localStorage.setItem('axar.one.register', '999999')")
+    till.reload()
+    expect(till.locator("#register-select")).to_be_hidden()
+    expect(fixed).to_have_text(initial_label)
+    open_drawer(till)
+    add(till, "Kohv")
+    pay(till, "5,00")
+    expect(till.locator("#change-due")).to_have_text("Tagasi 2,50 €")
+
+
+def test_device_without_register_never_guesses_a_register(browser, auth_server):
+    """A real device with register=None cannot silently use the first till."""
+    cmd = subprocess.run([sys.executable, "-m", "axar_pos.cli", "enroll-code",
+                          "--tenant", "demo", "--location", "POOD1",
+                          "--name", "Unbound-Device"], cwd=ROOT, env=auth_server.env,
+                         check=True, capture_output=True, text=True)
+    code = cmd.stdout.strip().rsplit(" ", 1)[1]
+    ctx = browser.new_context(viewport={"width": 1024, "height": 768})
+    page = ctx.new_page()
+    try:
+        page.goto(f"{auth_server.base}/one/")
+        page.fill("#enroll-code", code)
+        page.click("#enroll-submit")
+        expect(page.locator("#auth-title")).to_have_text("Sisselogimine")
+        login(page, "Kati", "4829")
+        expect(page.locator("#view-root")).to_contain_text(
+            "Kassa ei ole sellele seadmele õigesti määratud"
+        )
+        expect(page.locator("#product-grid .product")).to_have_count(0)
+    finally:
+        ctx.close()
+
+
+
 def test_refund_needs_another_managers_pin_in_the_ui(till, auth_server):
     login(till, "Kati", "4829")
     open_drawer(till)
