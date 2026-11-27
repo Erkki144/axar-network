@@ -227,7 +227,7 @@ def test_enrollment_code_is_single_use_and_expires(world):
 def test_enrollment_needs_mfa_back_office_session(shop):
     body = {"location_id": shop["loc"], "register_id": shop["reg"], "device_name": "X"}
     r = shop["till"].post("/api/v1/admin/enrollment-codes", body)
-    assert r.status_code == 403 and r.json()["error"] == "mfa_required"
+    assert r.status_code == 403 and r.json()["error"] == "wrong_realm"   # #76: a till session never reaches the office
 
 
 def test_device_token_is_stored_hashed(shop):
@@ -337,7 +337,7 @@ def test_role_matrix(shop, world):
     assert shop["till"].get("/api/v1/receivables/invoices").status_code == 403     # C3: managers only
     mgr_till = world.till(shop["dev"], shop["manager"], "7351")
     r = mgr_till.get("/api/v1/admin/staff")
-    assert r.status_code == 403 and r.json()["error"] == "mfa_required"   # PIN is not strong auth
+    assert r.status_code == 403 and r.json()["error"] == "wrong_realm"   # PIN is not strong auth (#76: office realm)
     assert shop["adm"].get("/api/v1/reports/daily").status_code == 200
     assert shop["adm"].get("/api/v1/receivables/invoices").status_code == 200
     me = shop["till"].get("/api/v1/auth/me").json()
@@ -352,9 +352,11 @@ def test_money_actions_only_on_the_device_register(shop):
     assert till.sell(other_reg).status_code == 403
     assert till.sell(reg).status_code == 201
     assert [r["id"] for r in till.get("/api/v1/registers").json()] == [reg]
-    # A back-office session has no device: no selling from the office browser.
-    r = shop["adm"].sell(reg)
-    assert r.status_code == 403 and r.json()["error"] == "device_required"
+    # A back-office session never sells (#76): refused before any handler runs.
+    r = shop["adm"].post("/api/v1/sales/cash", {"register_id": reg, "tendered_cents": 1000,
+                                                "lines": [{"product_id": 1, "quantity": 1}]},
+                         {"Idempotency-Key": str(uuid.uuid4())})
+    assert r.status_code == 403 and r.json()["error"] == "wrong_realm"
 
 
 def test_records_carry_staff_device_and_session(shop):
