@@ -441,6 +441,16 @@ function renderRegisterSelect() {
     sel.append(o);
   }
   sel.value = String(S.registerId);
+  // The provisioned device fixes the register. There is no register picker
+  // in the authenticated cashier workspace; demo keeps a testing switch.
+  const isTill = AUTH.mode === 'server';
+  sel.disabled = isTill;
+  sel.hidden = isTill;
+  sel.style.display = isTill ? 'none' : '';
+  const fixed = $('register-fixed-label');
+  fixed.hidden = !isTill;
+  fixed.textContent = (S.registers.find((r) => r.id === S.registerId)?.location.name || 'Asukoht') +
+    ' · ' + (S.registers.find((r) => r.id === S.registerId)?.name || 'Kassa määramata');
 }
 
 function activateMode(next) {
@@ -1777,7 +1787,13 @@ function renderRecovery(c, note = '', cls = 'unconfirmed') {
     box.append(st);
     const retry = el('button', 'primary-btn', 'Proovi uuesti (sama tehing)'); retry.type = 'button'; retry.id = 'recover-retry';
     retry.addEventListener('click', () => recoverPending(retry));
-    box.append(retry);
+    if (AUTH.mode === 'server' && rec.registerId !== S.registerId) {
+      box.append(stateBox('error',
+        'See pooleli tehing kuulub teisele kassale. Turvalisuse huvides ei saa seda siin uuesti saata. ' +
+        'Ära võta raha teist korda vastu; palu juhil kontrollida algset kassat ja tehingu olekut.'));
+    } else {
+      box.append(retry);
+    }
   }
   c.append(box);
 }
@@ -1822,7 +1838,10 @@ function checkPendingJournal() {
   if (found.state === 'none') return;
   // Our own in-flight attempt in this tab is handled by its own dialog.
   if (found.state === 'ok' && [S.payment?.key, S.refund?.key, S.bill?.key, S.cashMove?.key].includes(found.rec.key)) return;
-  if (found.state === 'ok' && found.rec.registerId && S.registers.some((r) => r.id === found.rec.registerId)) {
+  // Recovery data can be stale or belong to an earlier provisioned register.
+  // It must NEVER redirect a real cashier to another register.
+  if (AUTH.mode !== 'server' && found.state === 'ok' && found.rec.registerId &&
+      S.registers.some((r) => r.id === found.rec.registerId)) {
     S.registerId = found.rec.registerId; renderRegisterSelect(); refreshDrawer();
   }
   showRecovery(found);
@@ -1962,7 +1981,13 @@ function renderIdentity() {
   $('mode-pill').textContent = AUTH.mode === 'demo' ? '● DEMO' : `● ${(me?.roles || []).map((r) => ROLE_ET[r] || r).join(', ')}`;
   $('lock-top').hidden = AUTH.mode !== 'server';
   $('lock-button').hidden = AUTH.mode !== 'server';
-  $('register-select').disabled = AUTH.mode === 'server' && Boolean(me?.register_id);
+  // No register picker is ever presented to a real cashier, including
+  // a misconfigured or unbound till that cannot open the sales workspace.
+  const till = AUTH.mode === 'server';
+  $('register-select').disabled = till;
+  $('register-select').hidden = till;
+  $('register-select').style.display = till ? 'none' : '';
+  $('register-fixed-label').hidden = !till;
 }
 
 async function afterLogin() {
@@ -2083,8 +2108,17 @@ async function loadWorkspace() {
   let saved = null;
   try { saved = Number(localStorage.getItem(LS_REGISTER)); } catch { /* ignore */ }
   const bound = AUTH.me?.register_id;
-  S.registerId = bound && S.registers.some((r) => r.id === bound) ? bound
-    : S.registers.some((r) => r.id === saved) ? saved : S.registers[0].id;
+  if (AUTH.mode === 'server') {
+    if (!Number.isInteger(bound) || !S.registers.some((r) => r.id === bound)) {
+      root.replaceChildren(stateBox('error',
+        'Kassa ei ole sellele seadmele õigesti määratud. Teenindaja ei saa kassat valida. ' +
+        'Palu juhil kontrollida seadme sidumist AXAR OFFICE-is.'));
+      return;
+    }
+    S.registerId = bound; // ONLY the server-authenticated device controls the till.
+  } else {
+    S.registerId = S.registers.some((r) => r.id === saved) ? saved : S.registers[0].id;
+  }
   await loadProducts();
   renderRegisterSelect();
   renderIdentity();
