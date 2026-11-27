@@ -66,3 +66,12 @@ Built today: tenant + device realms (ADR-0009, `auth.py`, C10). Missing: platfor
 3. **Same code for office and till** while they share the web client; the installed till wraps the same UI (ADR-0012, PR #30).
 4. **Platform is built when needed:** before the second customer. Until then tenants are created with the admin CLI.
 5. **Every surface action is attributable:** realm, user, device, location and session are on every event (envelope v2).
+
+## 4. Implemented (#76, 27.11.2026)
+
+- **Two applications:** the till at `/one/` (alias `/pos/`) and the office at `/office/`. The till bundle has no office or stock code and no office navigation; the office bundle has no till money operations. Shared: the design system and display helpers (`/one/format.mjs`, styles).
+- **Two logins:** till = staff PIN on an enrolled device (`kind="till"`); office = company, user name, password and TOTP (`kind="admin"`). The office token lives in memory only; logging out of one never logs out the other.
+- **Server enforcement:** `axar_pos/realms.py` gives every API route one realm (`pos`, `office`, `read`, `auth`); `identity()` refuses a till token in the office and an office token at the till with `403 wrong_realm`, before any handler. A route without a realm is unreachable (fail closed).
+- **Guards:** `tests/test_realms.py` (every route has a realm; negative tests with real sessions; no DB change on refusal; one person, two logins), `tests/test_quote_and_ui_assets.py` (bundles stay apart).
+- **Screens:** `docs/reviews/76-screens/`.
+- **Still open:** office approvals of till actions stay a one-time step-up proof on the till (`/auth/approvals`); Menu Studio publishing with per-till ACK is #40.

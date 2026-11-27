@@ -1,7 +1,7 @@
 // AXAR ONE — inventory screens (#14): invoice inbox, stock & stock card,
 // recipe editor with live cost. All amounts and costs come from the server;
 // the browser only parses what the user typed and formats what it received.
-import { formatEuro, parseEuroInput } from './format.mjs';
+import { formatEuro, parseEuroInput } from '../one/format.mjs';
 
 const SCALE = 1_000_000n;
 const UOM_ET = { kg: 'kg', l: 'l', pcs: 'tk' };

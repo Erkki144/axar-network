@@ -1,0 +1,14 @@
+/* #76 office application shell; everything else comes from the shared design system. */
+body.office-app { display: block; min-height: 100vh; }
+.office-bar { display: flex; align-items: center; gap: 16px; padding: 12px 20px; flex-wrap: wrap;
+  background: var(--surface, #fff); border-bottom: 1px solid var(--line, #e3e7ea); }
+.office-bar .brand { display: flex; align-items: center; gap: 8px; }
+.office-tag { font-weight: 700; letter-spacing: .08em; opacity: .7; }
+.office-nav { display: flex; gap: 8px; flex: 1; }
+.office-who { opacity: .8; }
+.office-main { padding: 20px; max-width: 1280px; margin: 0 auto; }
+.office-login { max-width: 420px; margin: 40px auto; display: grid; gap: 12px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+/* The shared design system styles buttons and nav as flex/full width; the office bar overrides that. */
+.office-app [hidden] { display: none !important; }
+.office-bar .secondary-btn { width: auto; flex: 0 0 auto; padding: 8px 16px; }

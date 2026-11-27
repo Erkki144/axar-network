@@ -7,7 +7,7 @@
 //   means the product is not sold at those outlets.
 // - Deactivating a product never changes stock.
 // This module only shows server answers and sends the manager's choices.
-import { centsToInput, formatEuro, parseEuroInput } from './format.mjs';
+import { centsToInput, formatEuro, parseEuroInput } from '../one/format.mjs';
 
 const STATUS_ET = { draft: 'Ootab kinnitust', approved: 'Kinnitatud', rejected: 'Tagasi lükatud', withdrawn: 'Tagasi võetud' };
 const TAX_ET = { standard: 'Tavamäär', reduced: 'Vähendatud määr', zero: '0 %' };

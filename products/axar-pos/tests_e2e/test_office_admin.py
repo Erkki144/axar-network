@@ -58,9 +58,9 @@ def registers(srv):
 
 
 def open_office(p):
-    p.goto(f"{p.srv.base}/one/")
-    p.wait_for_selector("#product-grid .product")
-    p.click('[data-mode="office"]')
+    """#76: the office is its own application at /office/ (demo identity here)."""
+    p.goto(f"{p.srv.base}/office/")
+    p.wait_for_selector("#office-tab-recon")
 
 
 def test_reconciliation_screen_names_a_tampered_register_and_traces_a_sale(office):
@@ -112,9 +112,7 @@ def test_manager_sets_the_offline_limit_in_the_settings_screen(office):
     expect(p.locator("#settings-msg")).to_contain_text("Salvestatud: 24 h")
     got = httpx.get(f"{srv.base}/api/v1/admin/pos-settings", headers=MANAGER, timeout=5).json()
     assert got["offline_limit_hours"] == 24
-    p.reload()
-    p.wait_for_selector("#product-grid .product")
-    p.click('[data-mode="office"]')
+    open_office(p)
     p.click("#office-tab-settings")
     expect(p.locator("#offline-limit")).to_have_value("24")
 

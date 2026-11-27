@@ -687,6 +687,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # AXAR ONE cashier UI (issue #11), served same-origin so it can call the API.
     app.mount("/one", NoCacheStatic(directory=STATIC / "one", html=True), name="one")
 
+    # #76: the till and the office are two applications with two logins.
+    @app.get("/pos", include_in_schema=False)
+    @app.get("/pos/", include_in_schema=False)
+    def ui_pos():
+        return RedirectResponse("/one/", status_code=307)
+
+    @app.get("/office", include_in_schema=False)
+    def ui_office_slash():
+        return RedirectResponse("/office/", status_code=307)
+
+    app.mount("/office", NoCacheStatic(directory=STATIC / "office", html=True), name="office")
+
     def outlet_of(who: auth.Principal, s: Session, register_id: int | None) -> int | None:
         """The outlet whose prices apply: a till session's own location;
         otherwise the given register's location (demo / office preview);
