@@ -141,6 +141,7 @@ def test_device_without_register_never_guesses_a_register(browser, auth_server):
         expect(page.locator("#view-root")).to_contain_text(
             "Kassa ei ole sellele seadmele õigesti määratud"
         )
+        expect(page.locator("#register-select")).to_be_hidden()
         expect(page.locator("#product-grid .product")).to_have_count(0)
     finally:
         ctx.close()
