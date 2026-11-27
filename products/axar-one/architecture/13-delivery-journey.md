@@ -105,6 +105,8 @@ Rules people forget are checked by machines on every pull request. A guard that 
 | **Register coverage** | data architect | every database table is watched by a named reconciliation rule or is declared "not a ledger" with a reason; every named rule exists | `tests/test_guard_contracts.py` |
 | **Rule count** | tester | screens and tests count reconciliation rules from `reconcile.RULES`, never a hard-coded number | `reconcile.RULES` |
 | **Numbering** | release / merge manager | migration, ADR and architecture numbers are unique in the branch (error) and against every other open PR (warning naming the PR and the renumbering fix); one migration head | `scripts/check_number_collisions.py`, CI job `numbering` |
+| **Input paths** | tester | every write endpoint (51 on 27.11.2026) is exercised with success by at least one test; a full `tests/` run fails otherwise and names the path | `tests/conftest.py` (recorder) |
+| **Journey** | tester + integration architect | one business day through every input, each followed to the registers it must reach; R1–R14 reconcile | `tests/test_input_journey.py` |
 | **Platform marks** | tester | tests that need Linux say so (`skipif` with reason); CI runs them all | `tests_e2e/test_durability.py`, `test_server_auth.py` |
 
 Proof that a guard works is a deliberate break: e.g. a probe module emitting `drawer.cash.moved` without a schema fails the event guard (checked 27.11.2026).

@@ -41,7 +41,7 @@ class NoCacheStatic(StaticFiles):
 from . import __version__, auth, catalog, events, inventory, offline, orders, payments, reconcile, services, sync
 from .config import Settings
 from .db import bind_tenant, init_db, make_engine, request_factory, seed_demo
-from .models import DrawerSession, Refund, Register, Sale, Tenant
+from .models import DrawerCashMovement, DrawerSession, Refund, Register, Sale, Tenant
 
 STATIC = Path(__file__).parent / "static"
 
@@ -232,6 +232,17 @@ class DrawerCloseIn(Strict):
     note: Annotated[str | None, Field(max_length=500)] = None
 
 
+class DrawerCashMoveIn(Strict):
+    direction: Literal["in", "out"]
+    amount_cents: Annotated[int, Field(strict=True, ge=1, le=100_000_000)]
+    reason_code: Literal["SAFE_DROP", "FLOAT_TOPUP", "CASH_CORRECTION", "BANK_DEPOSIT", "OTHER"]
+    reason_text: Annotated[str, Field(min_length=5, max_length=300)]
+
+
+class DrawerCashMoveApprovalRequest(DrawerCashMoveIn):
+    drawer_id: Id
+
+
 Identity = auth.Principal  # backwards-compatible name
 
 
@@ -264,7 +275,7 @@ class DrawerCloseApprovalRequest(Strict):
 
 
 class ApprovalIn(Strict):
-    action: Literal["refund", "drawer_close"]
+    action: Literal["refund", "drawer_close", "drawer_cash_out"]
     approver_id: Annotated[str, Field(min_length=1, max_length=36)]
     pin: Annotated[str, Field(min_length=1, max_length=16)]
     request: dict
@@ -462,13 +473,26 @@ def _drawer_out(d: DrawerSession) -> dict:
         "cash_sales_cents": d.cash_sales_cents,
         "refund_count": d.refund_count,
         "cash_refunds_cents": d.cash_refunds_cents,
+        "cash_in_cents": d.cash_in_cents,
+        "cash_out_cents": d.cash_out_cents,
         # While open: running expectation. Once closed: frozen at close.
         "expected_cents": d.expected_cents
         if d.status == "closed"
-        else d.opening_float_cents + d.cash_sales_cents - d.cash_refunds_cents,
+        else d.opening_float_cents + d.cash_sales_cents - d.cash_refunds_cents
+             + d.cash_in_cents - d.cash_out_cents,
         "counted_cents": d.counted_cents,
         "variance_cents": d.variance_cents,
         "note": d.note,
+    }
+
+
+def _cash_movement_out(m: DrawerCashMovement) -> dict:
+    return {
+        "id": m.id, "drawer_session_id": m.drawer_session_id, "register_id": m.register_id,
+        "sequence_no": m.sequence_no,
+        "direction": m.direction, "amount_cents": m.amount_cents,
+        "reason_code": m.reason_code, "reason_text": m.reason_text,
+        "actor": m.actor, "approval_id": m.approval_id, "created_at": m.created_at.isoformat(),
     }
 
 
@@ -718,6 +742,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         d = services.close_drawer(s, who.tenant_id, drawer_id, who.cashier_id,
                                   body.counted_cents, body.note, now, variance_allowed=variance_allowed)
         return _drawer_out(d)
+
+    @app.get("/api/v1/drawer/{drawer_id}/movements")
+    def drawer_cash_movements(drawer_id: int, who: DrawerUser, s: Db):
+        d = services.get_drawer(s, who.tenant_id, drawer_id)
+        till_register(who, d.register_id)
+        return [_cash_movement_out(m) for m in
+                services.list_cash_movements(s, who.tenant_id, drawer_id)]
+
+    @app.post("/api/v1/drawer/{drawer_id}/movements", status_code=201)
+    def drawer_cash_move(
+        drawer_id: int, body: DrawerCashMoveIn, who: DrawerUser, s: Db,
+        idempotency_key: Annotated[str, Header(min_length=8, max_length=128)],
+        x_approval_id: Annotated[str | None, Header(max_length=36)] = None,
+    ):
+        d = services.get_drawer(s, who.tenant_id, drawer_id)
+        till_register(who, d.register_id)
+        move_hash = services.cash_movement_hash(drawer_id, body.direction,
+            body.amount_cents, body.reason_code, body.reason_text)
+        # Replaying a committed command is safe without consuming the same
+        # one-use manager token twice; the service checks the request hash.
+        old = s.scalar(select(DrawerCashMovement).where(
+            DrawerCashMovement.tenant_id == who.tenant_id,
+            DrawerCashMovement.idempotency_key == idempotency_key))
+        if old is not None:
+            if old.request_hash != move_hash:
+                raise services.IdempotencyConflict("cash movement key already used for different request")
+            return _cash_movement_out(old)
+
+        if body.direction == "out" and not (who.demo or who.roles & set(auth.MANAGER_ROLES)):
+            if not x_approval_id:
+                raise services.ApprovalRequired("a separate manager must approve physical cash OUT")
+            approval = auth.peek_approval(s, who, x_approval_id, "drawer_cash_out", move_hash, settings.clock())
+            auth.consume_approval(s, approval.id, settings.clock())
+        else:
+            approval = None
+
+        m = services.record_cash_movement(s, who.tenant_id, drawer_id,
+            direction=body.direction, amount_cents=body.amount_cents,
+            reason_code=body.reason_code, reason_text=body.reason_text,
+            actor=who.cashier_id, approval_id=approval.id if approval else None,
+            idempotency_key=idempotency_key, now=settings.clock())
+        return _cash_movement_out(m)
 
     @app.post("/api/v1/sales/quote")
     def quote_sale(body: QuoteIn, who: Catalog, s: Db):
@@ -1222,9 +1288,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             req_hash = services._refund_request_hash(
                 r.sale_id, r.register_id, [services.RefundLineRequest(x.line_no, x.quantity) for x in r.lines],
                 r.reason)
-        else:
+        elif body.action == "drawer_close":
             r = DrawerCloseApprovalRequest.model_validate(body.request)
             req_hash = drawer_close_hash(r.drawer_id, r.counted_cents)
+        else:
+            r = DrawerCashMoveApprovalRequest.model_validate(body.request)
+            if r.direction != "out" or not who.can("drawer"):
+                raise services.Forbidden("only drawer cash-out requests can be approved")
+            drawer = services.get_drawer(s, who.tenant_id, r.drawer_id)
+            till_register(who, drawer.register_id)
+            req_hash = services.cash_movement_hash(r.drawer_id, r.direction, r.amount_cents,
+                                                   r.reason_code, r.reason_text)
         a = auth.create_approval(s, who, device=d, action=body.action, request_hash=req_hash,
                                  approver_id=body.approver_id, pin=body.pin, now=settings.clock(),
                                  ip=client_ip(request))

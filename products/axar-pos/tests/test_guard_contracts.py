@@ -113,6 +113,7 @@ TABLE_COVERAGE: dict[str, str] = {
     "stock_movements": "R10.stock_ledger", "stock_balances": "R10.stock_ledger",
     "recipes": "R9.stock_consumption", "recipe_lines": "R9.stock_consumption",
     "production_batches": "R10.stock_ledger", "supplier_documents": "R10.stock_ledger",
+    "drawer_cash_movements": "R1.drawer_cash",
     "supplier_document_lines": "R10.stock_ledger",
     # orders and kitchen
     "orders": "R11.orders_kitchen", "order_lines": "R11.orders_kitchen",

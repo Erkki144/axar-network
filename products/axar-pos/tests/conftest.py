@@ -174,3 +174,64 @@ def a(client) -> Api:
 @pytest.fixture
 def b(client) -> Api:
     return Api(client, "t-b")
+
+
+# ------------------------------------------------- input-path coverage guard
+# Every write endpoint (an "input" into AXAR) must be exercised by at least one
+# test that checks where its data lands. The recorder notes which route
+# templates the tests call with 2xx; a full run fails if a write route was
+# never exercised successfully (tester's guard, 13-delivery-journey.md §7).
+
+_CALLED: set[tuple[str, str]] = set()
+_ALL_WRITES: set[tuple[str, str]] = set()
+
+
+def _route_of(app, method: str, path: str) -> str | None:
+    from starlette.routing import Match
+
+    scope = {"type": "http", "method": method, "path": path.split("?")[0], "root_path": "", "query_string": b"",
+             "headers": []}
+    for r in app.router.routes:
+        m, _ = r.matches(scope)
+        if m == Match.FULL:
+            return getattr(r, "path", None)
+    return None
+
+
+_orig_request = TestClient.request
+
+
+def _recording_request(self, method, url, *args, **kwargs):
+    resp = _orig_request(self, method, url, *args, **kwargs)
+    m = method.upper()
+    if m in ("POST", "PUT", "PATCH", "DELETE") and 200 <= resp.status_code < 300:
+        route = _route_of(self.app, m, str(url).replace(str(self.base_url), ""))
+        if route:
+            _CALLED.add((m, route))
+    if not _ALL_WRITES:
+        for r in self.app.router.routes:
+            for mm in (getattr(r, "methods", None) or set()) & {"POST", "PUT", "PATCH", "DELETE"}:
+                if getattr(r, "path", "").startswith("/api/"):
+                    _ALL_WRITES.add((mm, r.path))
+    return resp
+
+
+TestClient.request = _recording_request
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Enforced only on a full, unfiltered run of tests/ (not with -k or one file)."""
+    opt = session.config.option
+    full = not opt.keyword and not opt.markexpr and not getattr(opt, "lf", False) \
+        and all(os.path.basename(str(a).rstrip("/\\")) in ("tests", "") for a in (session.config.args or ["tests"]))
+    report = os.environ.get("AXAR_INPUT_COVERAGE_REPORT")
+    missing = sorted(_ALL_WRITES - _CALLED)
+    if report:
+        with open(report, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(f"{m} {p}" for m, p in missing))
+    if full and _ALL_WRITES and missing and exitstatus == 0:
+        tr = session.config.pluginmanager.get_plugin("terminalreporter")
+        if tr:
+            tr.write_line(f"INPUT PATHS NEVER EXERCISED WITH SUCCESS ({len(missing)}): "
+                          + ", ".join(f"{m} {p}" for m, p in missing), red=True)
+        session.exitstatus = 1

@@ -33,6 +33,7 @@ from .models import (
     DeadLetter,
     DeviceInbox,
     DeviceJournalEntry,
+    DrawerCashMovement,
     DrawerSession,
     EventConsumer,
     ExportQueue,
@@ -92,7 +93,7 @@ def check(s: Session, tenant_id: str) -> dict:
 def _drawers(s: Session, tenant_id: str) -> _Finding:
     """R1: each drawer's running totals equal the immutable sales/payments and
     refunds ledgers; a closed drawer's expected cash = float + in - out."""
-    f = _Finding("R1.drawer_cash", "Kassasahtli jooksev summa = müügi- ja tagastusregister")
+    f = _Finding("R1.drawer_cash", "Kassasahtli jooksev summa = müügi-, tagastus- ja sularahaliikumiste register")
     for d in s.scalars(select(DrawerSession).where(DrawerSession.tenant_id == tenant_id).order_by(DrawerSession.id)):
         f.checked += 1
         sales = services.ledger_cash_sales(s, tenant_id, d.id)
@@ -103,8 +104,20 @@ def _drawers(s: Session, tenant_id: str) -> _Finding:
         if refunds != (d.cash_refunds_cents, d.refund_count):
             f.fail(drawer_id=d.id, register_id=d.register_id, what="cash out",
                    running=[d.cash_refunds_cents, d.refund_count], ledger=list(refunds))
+        # #68: non-sale cash (safe drop, float top-up) is its own append-only ledger.
+        moved = dict(s.execute(
+            select(DrawerCashMovement.direction, func.coalesce(func.sum(DrawerCashMovement.amount_cents), 0))
+            .where(DrawerCashMovement.tenant_id == tenant_id, DrawerCashMovement.drawer_session_id == d.id)
+            .group_by(DrawerCashMovement.direction)).all())
+        cash_in, cash_out = int(moved.get("in", 0)), int(moved.get("out", 0))
+        if cash_in != d.cash_in_cents:
+            f.fail(drawer_id=d.id, register_id=d.register_id, what="cash in (non-sale)",
+                   running=d.cash_in_cents, ledger=cash_in)
+        if cash_out != d.cash_out_cents:
+            f.fail(drawer_id=d.id, register_id=d.register_id, what="cash out (non-sale)",
+                   running=d.cash_out_cents, ledger=cash_out)
         if d.status == "closed":
-            expected = d.opening_float_cents + sales[0] - refunds[0]
+            expected = d.opening_float_cents + sales[0] - refunds[0] + cash_in - cash_out
             if d.expected_cents != expected or d.variance_cents != (d.counted_cents or 0) - expected:
                 f.fail(drawer_id=d.id, what="closing", expected_cents=d.expected_cents, recomputed_cents=expected,
                        variance_cents=d.variance_cents)
@@ -259,6 +272,11 @@ def _event_pipeline(s: Session, tenant_id: str) -> _Finding:
         cursor = c.cursor if c else 0
         if c is not None and c.blocked_at is not None:
             f.fail(consumer=name, reason="blocked", failing_seq=c.failing_seq, error=c.last_error)
+        elif c is not None and c.failing_seq is not None:
+            # Retrying with backoff: not "just lag". Show WHY, so a manager can fix the
+            # cause (e.g. an outlet without a default warehouse) before it blocks.
+            f.wait(consumer=name, reason="retrying", failing_seq=c.failing_seq, attempts=c.attempts,
+                   error=c.last_error, cursor=cursor, head=head, lag=head - cursor)
         elif cursor < head:
             f.wait(consumer=name, cursor=cursor, head=head, lag=head - cursor)
     for dl in s.scalars(select(DeadLetter).where(DeadLetter.tenant_id == tenant_id, DeadLetter.resolved_at.is_(None))):
