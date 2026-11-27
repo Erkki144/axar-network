@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="et">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AXAR ATLAS · süsteemi digitaalne kaksik</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">◈</div>
+      <div><strong>AXAR<span>ONE</span></strong><small>ATLAS / SYSTEM MAP</small></div>
+    </div>
+    <div class="sidebar-label">TÖÖKESKKOND</div>
+    <nav aria-label="Atlase vaated" class="nav">
+      <button type="button" class="nav-btn active" data-view="architecture" aria-current="page"><span class="nav-icon">◉</span> Arhitektuur</button>
+      <button type="button" class="nav-btn" data-view="journeys"><span class="nav-icon">⌁</span> Andmete teekonnad</button>
+      <button type="button" class="nav-btn" data-view="registers"><span class="nav-icon">▤</span> Andmeregistrid</button>
+      <button type="button" class="nav-btn" data-view="gates"><span class="nav-icon">◇</span> Kontroll ja valvurid</button>
+    </nav>
+    <div class="sidebar-label" style="margin-top:30px">ÄRIVOOD</div>
+    <div class="flow-nav" id="flow-nav"></div>
+    <div class="sidebar-bottom">
+      <span class="indicator-dot"></span><strong>Koodipõhine hetkepilt</strong>
+      <p>Reaalajas telemeetria pole ühendatud. Rohelist teenuseolekut ei teeskle.</p>
+      <span class="tiny">27.11.2026 · arhitektuuri prototüüp</span>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="crumb">AXAR ONE <span> / </span> SYSTEM INTELLIGENCE <span> / </span> <strong>ATLAS</strong></div>
+      <div class="top-status">
+        <span class="status-chip"><i class="dot source"></i> SOURCE SNAPSHOT</span>
+        <span class="status-chip muted"><i class="dot off"></i> LIVE ÜHENDAMATA</span>
+      </div>
+    </header>
+    <div class="content">
+      <div class="heading">
+        <div>
+          <div class="eyebrow">DIGITAALNE SÜSTEEMIKAART / V1</div>
+          <h1 id="view-title">Kogu süsteem. Üks vaade.</h1>
+          <p id="view-description">Moodulid, andmete autoriteedid, sündmused ja sõltuvused ühes kontrollitavas struktuuris.</p>
+        </div>
+        <a class="github-link" href="https://github.com/Erkki144/axar-network" target="_blank" rel="noopener noreferrer">⌁ GitHubi lähtekood</a>
+      </div>
+
+      <section class="metrics" aria-label="Atlase kokkuvõte">
+        <div class="metric"><small>KAARDISTATUD KOMPONENDID</small><strong id="metric-nodes">—</strong><span>Kood + kavandatud osad</span></div>
+        <div class="metric"><small>ÜHENDUSE LEPINGUD</small><strong id="metric-edges">—</strong><span>Allikate ja moodulite seosed</span></div>
+        <div class="metric"><small>KONTROLLI VAJAVAD</small><strong id="metric-pending">—</strong><span>Osalised / kavandatud</span></div>
+        <div class="metric metric-muted"><small>PÄRIS REAALAJA ANDMED</small><strong>—</strong><span>Ühendus tegemata</span></div>
+      </section>
+
+      <section id="architecture-view" class="view-panel">
+        <div class="panel-top">
+          <div class="panel-title"><span class="signal" aria-hidden="true"></span> SÜSTEEMI NÄRVIVÕRK <small id="graph-count"></small></div>
+          <div class="toolbar">
+            <label class="search"><span aria-hidden="true">⌕</span><input id="graph-search" type="search" placeholder="Otsi moodulit, vastutajat..." aria-label="Otsi arhitektuurikaardilt"></label>
+            <select id="edge-filter" aria-label="Vali ühenduse liik">
+              <option value="all">Kõik ühendused</option>
+              <option value="api">API ja käsud</option>
+              <option value="event">Sündmused</option>
+              <option value="data">Andmebaas</option>
+              <option value="sync">Offline-sync</option>
+              <option value="device">Seadmed</option>
+              <option value="quality">Kontrollid</option>
+            </select>
+          </div>
+        </div>
+        <div class="graph-shell" id="graph-shell">
+          <svg id="network" viewBox="0 0 1490 900" role="img" aria-label="Interaktiivne AXAR ONE arhitektuurikaart. Tab ja Enter avavad sõlme üksikasjad.">
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 Z" fill="#6586a1"></path></marker>
+            </defs>
+            <g id="graph-pan">
+              <g id="graph-edges"></g>
+              <g id="graph-nodes"></g>
+            </g>
+          </svg>
+          <div class="zoom-tools" aria-label="Kaardi suurendamine">
+            <button type="button" id="zoom-in" title="Suurenda" aria-label="Suurenda kaarti">+</button>
+            <button type="button" id="zoom-fit" title="Taasta suurus">100%</button>
+            <button type="button" id="zoom-out" title="Vähenda" aria-label="Vähenda kaarti">−</button>
+          </div>
+          <div class="graph-legend"><span class="legend code">Koodis</span><span class="legend partial">Osaline</span><span class="legend planned">Kavandatud</span><span class="legend prototype">Prototüüp</span></div>
+        </div>
+        <div class="graph-footer"><span>Vali sõlm, et näha selle vastutust, koodi ja puudujääke.</span><span>Allikapõhine ülevaade · mitte reaalajas olek</span></div>
+      </section>
+
+      <section id="journeys-view" class="view-panel" hidden>
+        <div class="panel-top"><div class="panel-title">ÄRIVOOD / PROTSESSID</div><small>Teekonnad tuginevad arhitektuurile, mitte salvestatud pärismüükidele</small></div>
+        <div id="journeys-list" class="journeys-list"></div>
+      </section>
+
+      <section id="registers-view" class="view-panel" hidden>
+        <div class="panel-top"><div class="panel-title">KOMPONENTIDE JA REGISTRITE VASTUTUS</div><small>Üks äriline autoriteet igale registrile</small></div>
+        <div class="table-wrap">
+          <table><thead><tr><th>Komponent</th><th>Vastutaja</th><th>Rakenduse seis</th><th>Allikas</th></tr></thead><tbody id="registry-table"></tbody></table>
+        </div>
+      </section>
+
+      <section id="gates-view" class="view-panel" hidden>
+        <div class="panel-top"><div class="panel-title">SYSTEM GOVERNOR / KAITSEVÄRAVAD</div><small>Valmimine peab põhinema testide ja integratsioonide tõenditel</small></div>
+        <div id="gates-list" class="gates-list"></div>
+      </section>
+
+      <footer class="app-footer">AXAR ATLAS V0.1 · Staatiline arhitektuuri prototüüp · Ei juhi makseid, kassasid ega tootmissüsteemi.</footer>
+    </div>
+  </main>
+
+  <aside class="inspector" id="inspector" aria-label="Komponendi andmed">
+    <div class="inspector-top"><span class="inspector-label">SÜSTEEMI INSPEKTOR</span><span class="corner-mark">◈</span></div>
+    <div id="inspector-body"><div class="inspector-empty"><div class="pulse-orbit">◈</div><h2>Vali graafikult moodul</h2><p>Näed selle vastutajat, olemasolevat koodi, ühendusi ja avatud tööülesandeid.</p></div></div>
+    <div class="inspector-bottom"><div class="dot source"></div><div><strong>Tõendatud allikate põhimõte</strong><small>Valmisolekut ei järeldata ainult värvist ega rohelisest CI-st.</small></div></div>
+  </aside>
+</div>
+<script src="graph-data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
