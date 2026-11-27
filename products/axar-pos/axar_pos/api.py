@@ -251,7 +251,9 @@ class EnrollIn(Strict):
 
 
 class PinLoginIn(Strict):
-    staff_id: Annotated[str, Field(min_length=1, max_length=36)]
+    # #81: omit staff_id = PIN-only login (the server finds the person by the
+    # blind PIN index). A given staff_id is the pre-#81 name-grid path.
+    staff_id: Annotated[str | None, Field(min_length=1, max_length=36)] = None
     pin: Annotated[str, Field(min_length=1, max_length=16)]
 
 
@@ -294,6 +296,11 @@ class StaffIn(Strict):
 
 class PinIn(Strict):
     pin: Annotated[str, Field(min_length=4, max_length=8)]
+
+
+class RegisterGrantsIn(Strict):
+    """#81: the tills this person may work on; [] = all at their role locations."""
+    register_ids: Annotated[list[Annotated[int, Field(strict=True, ge=1)]], Field(max_length=200)]
 
 
 class CredentialsIn(Strict):
@@ -514,6 +521,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Fail closed: header identity must never coexist with real auth.
         raise RuntimeError("AXAR_POS_DEMO_IDENTITY cannot be enabled when AXAR_POS_SECRET_KEY is set")
     box = auth.SecretBox(settings.secret_key) if settings.secret_key else None
+    pepper = auth.pin_pepper(settings.secret_key)  # #81 blind PIN index; None = PIN-only login off
     login_limiter = auth.RateLimiter(limit=20, window_s=300)
 
     lifespan = None
@@ -1230,6 +1238,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"id": st.id, "display_name": st.display_name, "active": st.active,
                 "roles": [{"role": r.role, "location_id": r.location_id} for r in st.roles],
                 "has_pin": st.pin_hash is not None, "login": st.login,
+                # #81: False = legacy PIN that PIN-only login cannot find yet
+                "pin_indexed": st.pin_index is not None,
+                "register_ids": sorted(g.register_id for g in st.register_grants),
                 "has_back_office_login": st.password_hash is not None}
 
     def device_out(d) -> dict:
@@ -1267,7 +1278,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         reg = s.get(auth.Register, d.register_id) if d.register_id else None
         loc = s.get(auth.Location, d.location_id)
         return {"device": device_out(d), "tenant_name": tenant.name, "location_name": loc.name,
-                "register_name": reg.name if reg else None,
+                "register_name": reg.name if reg else None, "pin_only": pepper is not None,
                 "staff": [{"id": x.id, "display_name": x.display_name,
                            "can_approve": bool(auth.roles_at(x, d.location_id) & set(auth.MANAGER_ROLES))}
                           for x in staff]}
@@ -1277,7 +1288,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                   x_device_token: Annotated[str | None, Header()] = None):
         d = the_device(s, x_device_token)
         sess, raw, st = auth.pin_login(s, device=d, staff_id=body.staff_id, pin=body.pin, settings=settings,
-                                       now=settings.clock(), ip=client_ip(request))
+                                       now=settings.clock(), ip=client_ip(request), pepper=pepper)
         return session_out(sess, raw, st)
 
     @app.post("/api/v1/auth/login")
@@ -1341,12 +1352,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def admin_create_staff(body: StaffIn, who: Who, s: Db):
         st = auth.create_staff(s, who, display_name=body.display_name,
                                roles=[(r.role, r.location_id) for r in body.roles], pin=body.pin,
-                               now=settings.clock())
+                               now=settings.clock(), pepper=pepper)
         return staff_out(st)
 
     @app.put("/api/v1/admin/staff/{staff_id}/pin", status_code=204)
     def admin_set_pin(staff_id: str, body: PinIn, who: Who, s: Db):
-        auth.set_pin(s, who, staff_id, body.pin, settings.clock())
+        auth.set_pin(s, who, staff_id, body.pin, settings.clock(), pepper)
+
+    @app.post("/api/v1/admin/staff/{staff_id}/pin/generate")
+    def admin_generate_pin(staff_id: str, who: Who, s: Db):
+        """#81: a random unique PIN, shown ONCE to the manager who hands it over."""
+        return {"pin": auth.generate_pin(s, who, staff_id, settings.clock(), pepper)}
+
+    @app.put("/api/v1/admin/staff/{staff_id}/registers")
+    def admin_register_grants(staff_id: str, body: RegisterGrantsIn, who: Who, s: Db):
+        return staff_out(auth.set_register_grants(s, who, staff_id, body.register_ids, settings.clock()))
 
     @app.put("/api/v1/admin/staff/{staff_id}/credentials")
     def admin_credentials(staff_id: str, body: CredentialsIn, who: Who, s: Db):

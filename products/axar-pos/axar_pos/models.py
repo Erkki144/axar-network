@@ -939,6 +939,11 @@ class Staff(Base):
     display_name: Mapped[str] = mapped_column(String(100))
     active: Mapped[bool] = mapped_column(default=True)
     pin_hash: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # #81 blind index: "<key id>:" + HMAC-SHA256(server pepper, tenant | PIN).
+    # Lets the server find the ONE staff member a PIN belongs to without
+    # trying every Argon2 hash; unique per tenant (the database enforces it).
+    # NULL = legacy PIN set before #81 (or deactivated): PIN-only login cannot find it.
+    pin_index: Mapped[str | None] = mapped_column(String(80), nullable=True)
     failed_pin_attempts: Mapped[int] = mapped_column(Integer, default=0)
     pin_locked_until: Mapped[datetime | None] = mapped_column(nullable=True)
     # Back-office (strong) login: only managers/owners get these.
@@ -951,11 +956,34 @@ class Staff(Base):
     created_at: Mapped[datetime]
 
     roles: Mapped[list["StaffRole"]] = relationship(lazy="selectin", cascade="all, delete-orphan")
+    register_grants: Mapped[list["StaffRegisterGrant"]] = relationship(lazy="selectin",
+                                                                       cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "display_name", name="uq_staff_name"),
         UniqueConstraint("tenant_id", "login", name="uq_staff_login"),
+        UniqueConstraint("tenant_id", "pin_index", name="uq_staff_pin_index"),
     )
+
+
+class StaffRegisterGrant(Base):
+    """#81: the registers (tills) a staff member may work on, set in OFFICE.
+
+    No rows = the staff member works on every register of the locations where
+    they hold a role (pre-#81 behaviour). One or more rows = ONLY those
+    registers. The device decides the register; the grant decides whether
+    this person may log in on it. Checked at login and on every request."""
+
+    __tablename__ = "staff_register_grants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    staff_id: Mapped[str] = mapped_column(ForeignKey("staff.id"), index=True)
+    register_id: Mapped[int] = mapped_column(ForeignKey("registers.id"))
+    created_by: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime]
+
+    __table_args__ = (UniqueConstraint("staff_id", "register_id", name="uq_staff_register_grant"),)
 
 
 class StaffRole(Base):

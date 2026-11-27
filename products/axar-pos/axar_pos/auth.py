@@ -36,6 +36,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import Settings
@@ -48,6 +49,7 @@ from .models import (
     Location,
     Register,
     Staff,
+    StaffRegisterGrant,
     StaffRole,
     Tenant,
 )
@@ -122,6 +124,17 @@ class WeakSecret(DomainError):
     code = "weak_secret"
 
 
+class PinUnavailable(Conflict):
+    """#81: the PIN is taken by another active staff member of this tenant.
+    Deliberately does not say whose; prefer the server-generated PIN."""
+    code = "pin_unavailable"
+
+
+class InvalidGrant(DomainError):
+    status_code = 422
+    code = "invalid_grant"
+
+
 # ---------------------------------------------------------- primitives
 
 
@@ -150,6 +163,28 @@ def check_pin(pin: str) -> None:
         raise WeakSecret(f"PIN must be {PIN_MIN}-{PIN_MAX} digits")
     if len(set(pin)) == 1 or pin in "0123456789012" or pin in "9876543210987":
         raise WeakSecret("PIN is too easy to guess")
+
+
+# #81 blind PIN index. The pepper is derived from the server key (env, never
+# in the database), so a database dump alone cannot map index -> PIN. The key
+# id prefix allows a later rotation (docs/runbooks/PIN_INDEX_KEY_ROTATION.md).
+PIN_INDEX_KID = "v1"
+
+
+def pin_pepper(secret_key: str | None) -> bytes | None:
+    if not secret_key:
+        return None
+    key = base64.urlsafe_b64decode(secret_key)
+    return hmac.new(key, b"axar-pos/pin-index/" + PIN_INDEX_KID.encode(), hashlib.sha256).digest()
+
+
+def pin_index(pepper: bytes, tenant_id: str, pin: str) -> str:
+    mac = hmac.new(pepper, tenant_id.encode() + b"\x00" + pin.encode(), hashlib.sha256).hexdigest()
+    return f"{PIN_INDEX_KID}:{mac}"
+
+
+def _pin_conflict(e: IntegrityError) -> bool:
+    return "pin_index" in str(getattr(e, "orig", e))
 
 
 def check_password(pw: str) -> None:
@@ -297,6 +332,16 @@ def roles_at(staff: Staff, location_id: int | None) -> frozenset[str]:
     return frozenset(r.role for r in staff.roles if r.location_id is None or r.location_id == location_id)
 
 
+def may_work_on(staff: Staff, device: Device) -> bool:
+    """#81: active, a role at the device's location and, when the staff member
+    has register grants, the device's register is one of them. The DEVICE
+    decides the register; the client never names it."""
+    if not staff.active or staff.tenant_id != device.tenant_id or not roles_at(staff, device.location_id):
+        return False
+    granted = {g.register_id for g in staff.register_grants}
+    return not granted or device.register_id is None or device.register_id in granted
+
+
 def device_by_token(s: Session, raw: str | None) -> Device | None:
     if not raw or len(raw) > 200:
         return None
@@ -336,8 +381,17 @@ def resolve_session(s: Session, *, bearer: str | None, device_token: str | None,
     device = None
     if sess.device_id is not None:
         device = device_by_token(s, device_token)
-        if device is None or device.id != sess.device_id:
+        if device is None or device.id != sess.device_id or device.tenant_id != sess.tenant_id:
             raise Unauthorized("this session belongs to another device")
+    if sess.kind == "till" and (device is None or not may_work_on(staff, device)):
+        # #81: a grant or role removed in OFFICE ends the till session at the
+        # very next request, not at the next login.
+        s.execute(update(AuthSession).where(AuthSession.id == sess.id, AuthSession.revoked_at.is_(None))
+                  .values(revoked_at=now))
+        audit(s, now, "session.revoked", "grant", tenant_id=sess.tenant_id, staff_id=staff.id,
+              device_id=sess.device_id, session_id=sess.id)
+        s.commit()
+        raise Unauthorized("you may no longer work on this till")
     # touch=False for background traffic (the realtime stream): only real
     # staff actions keep a session from locking after inactivity.
     if touch and now - sess.last_seen_at >= TOUCH_EVERY:
@@ -449,7 +503,7 @@ def _locked(until: datetime | None, now: datetime) -> bool:
 
 
 def _verify_pin_for(s: Session, *, device: Device, staff_id: str, pin: str, now: datetime,
-                    ip: str | None, event: str) -> Staff:
+                    ip: str | None, event: str, need_grant: bool = False) -> Staff:
     """Shared by PIN login and step-up approval: lockouts + audit.
 
     The device row and then the staff row are locked (``FOR UPDATE``, always
@@ -470,7 +524,9 @@ def _verify_pin_for(s: Session, *, device: Device, staff_id: str, pin: str, now:
         s.commit()
         raise Locked("too many wrong PINs; try again later")
     ok = verify_secret(staff.pin_hash if staff is not None and staff.active else None, pin)
-    if ok and staff is not None and roles_at(staff, device.location_id):
+    allowed = staff is not None and (may_work_on(staff, device) if need_grant
+                                     else bool(roles_at(staff, device.location_id)))
+    if ok and allowed:
         staff.failed_pin_attempts, staff.pin_locked_until = 0, None
         device.failed_pin_attempts, device.pin_locked_until = 0, None
         return staff
@@ -487,17 +543,88 @@ def _verify_pin_for(s: Session, *, device: Device, staff_id: str, pin: str, now:
     raise InvalidCredentials("wrong PIN")
 
 
-def pin_login(s: Session, *, device: Device, staff_id: str, pin: str, settings: Settings, now: datetime,
-              ip: str | None) -> tuple[AuthSession, str, Staff]:
+def _lock_device(s: Session, device: Device) -> Device:
+    d = s.scalar(select(Device).where(Device.id == device.id).with_for_update()
+                 .execution_options(populate_existing=True))
+    if d is None or d.revoked_at is not None:
+        raise Unauthorized("this device is not enrolled (or was revoked)")
+    return d
+
+
+def _identify_by_pin(s: Session, *, device: Device, pin: str, pepper: bytes | None, now: datetime,
+                     ip: str | None) -> Staff:
+    """#81 PIN-only login: one blind-index lookup + one Argon2 verification.
+
+    Never iterates over staff hashes. Missing, unknown, inactive or not
+    granted all give the same error and count against the DEVICE (durable
+    lockout in the database), so the till cannot be used as a PIN oracle.
+    The PIN itself is never stored or logged.
+    """
+    device = _lock_device(s, device)
+    if _locked(device.pin_locked_until, now):
+        audit(s, now, "login.pin", "locked", tenant_id=device.tenant_id, device_id=device.id, ip=ip,
+              detail="mode=pin_only")
+        s.commit()
+        raise Locked("too many wrong PINs; try again later")
+    staff = None
+    if pepper is not None and pin.isdigit() and PIN_MIN <= len(pin) <= PIN_MAX:
+        staff = s.scalar(select(Staff).where(Staff.tenant_id == device.tenant_id,
+                                             Staff.pin_index == pin_index(pepper, device.tenant_id, pin))
+                         .with_for_update().execution_options(populate_existing=True))
+    ok = verify_secret(staff.pin_hash if staff is not None else None, pin)  # constant work either way
+    usable = ok and staff is not None and not _locked(staff.pin_locked_until, now)
+    if usable and may_work_on(staff, device):
+        staff.failed_pin_attempts, staff.pin_locked_until = 0, None
+        device.failed_pin_attempts, device.pin_locked_until = 0, None
+        return staff
+    device.failed_pin_attempts += 1
+    if device.failed_pin_attempts >= LOCK_AFTER:
+        device.pin_locked_until = now + _backoff(device.failed_pin_attempts)
+    reason = "not_granted" if usable else ("staff_locked" if ok and staff is not None else "no_match")
+    audit(s, now, "login.pin", "fail", tenant_id=device.tenant_id, device_id=device.id, ip=ip,
+          staff_id=staff.id if ok and staff is not None else None, detail=f"mode=pin_only reason={reason}")
+    s.commit()
+    raise InvalidCredentials("wrong PIN")
+
+
+def pin_login(s: Session, *, device: Device, staff_id: str | None, pin: str, settings: Settings, now: datetime,
+              ip: str | None, pepper: bytes | None = None) -> tuple[AuthSession, str, Staff]:
+    """staff_id None = #81 PIN-only (the server finds the person). A given
+    staff_id is the pre-#81 name-grid path: still verified by the server, and
+    a successful login backfills the blind index (lazy migration)."""
     from .db import bind_tenant
 
     bind_tenant(s, device.tenant_id)
-    staff = _verify_pin_for(s, device=device, staff_id=staff_id, pin=pin, now=now, ip=ip, event="login.pin")
+    if staff_id is None:
+        staff = _identify_by_pin(s, device=device, pin=pin, pepper=pepper, now=now, ip=ip)
+    else:
+        staff = _verify_pin_for(s, device=device, staff_id=staff_id, pin=pin, now=now, ip=ip, event="login.pin",
+                                need_grant=True)
     sess, raw = _new_session(s, staff=staff, device=device, kind="till", mfa=False, settings=settings, now=now)
     audit(s, now, "login.pin", "ok", tenant_id=device.tenant_id, staff_id=staff.id, device_id=device.id,
-          session_id=sess.id, ip=ip)
+          session_id=sess.id, ip=ip, detail="mode=pin_only" if staff_id is None else "mode=staff_select")
     s.commit()
+    if staff_id is not None and pepper is not None and staff.pin_index is None:
+        _backfill_pin_index(s, staff, pin, pepper, now)
     return sess, raw, staff
+
+
+def _backfill_pin_index(s: Session, staff: Staff, pin: str, pepper: bytes, now: datetime) -> None:
+    """Legacy Argon2-only PINs cannot be indexed offline (the PIN is not
+    recoverable). The first successful login computes it. If another active
+    person already holds the same PIN, the index stays empty and the office
+    is told to issue a new PIN (audit 'pin_index.backfill' conflict)."""
+    staff.pin_index = pin_index(pepper, staff.tenant_id, pin)
+    try:
+        s.commit()
+        outcome = "ok"
+    except IntegrityError as e:
+        s.rollback()
+        if not _pin_conflict(e):
+            raise
+        outcome = "conflict"
+    audit(s, now, "pin_index.backfill", outcome, tenant_id=staff.tenant_id, staff_id=staff.id)
+    s.commit()
 
 
 # ------------------------------------------------------- password + TOTP
@@ -628,22 +755,25 @@ def _check_roles(s: Session, who: Principal, roles: list[tuple[str, int | None]]
 
 
 def create_staff(s: Session, who: Principal, *, display_name: str, roles: list[tuple[str, int | None]],
-                 pin: str | None, now: datetime) -> Staff:
+                 pin: str | None, now: datetime, pepper: bytes | None = None) -> Staff:
     _check_roles(s, who, roles)
     if not roles:
         raise WeakSecret("at least one role is required")
     if pin is not None:
         check_pin(pin)
-    st = Staff(id=str(uuid.uuid4()), tenant_id=who.tenant_id, display_name=display_name,
-               pin_hash=hash_secret(pin) if pin else None, created_at=now)
+    st = Staff(id=str(uuid.uuid4()), tenant_id=who.tenant_id, display_name=display_name, created_at=now)
+    if pin:
+        _assign_pin(st, pin, pepper)
     st.roles = [StaffRole(tenant_id=who.tenant_id, role=r, location_id=loc) for r, loc in roles]
     s.add(st)
     audit(s, now, "staff.create", "ok", tenant_id=who.tenant_id, staff_id=who.staff_id,
           session_id=who.session_id, detail=f"new={st.id} roles={sorted(r for r, _ in roles)}")
     try:
         s.commit()
-    except Exception as e:  # unique name
+    except IntegrityError as e:  # unique name or PIN
         s.rollback()
+        if _pin_conflict(e):
+            raise PinUnavailable("this PIN cannot be used; choose another or let the system generate one") from e
         raise Conflict("a staff member with this name already exists") from e
     return st
 
@@ -661,13 +791,72 @@ def _managed_staff(s: Session, who: Principal, staff_id: str) -> Staff:
     return st
 
 
-def set_pin(s: Session, who: Principal, staff_id: str, pin: str, now: datetime) -> None:
+def _assign_pin(st: Staff, pin: str, pepper: bytes | None) -> None:
+    st.pin_hash, st.failed_pin_attempts, st.pin_locked_until = hash_secret(pin), 0, None
+    st.pin_index = pin_index(pepper, st.tenant_id, pin) if pepper is not None else None
+
+
+def set_pin(s: Session, who: Principal, staff_id: str, pin: str, now: datetime, pepper: bytes | None = None) -> None:
+    """Uniqueness among the tenant's staff is the DATABASE's job
+    (uq_staff_pin_index): two parallel assignments of one PIN cannot both win."""
     check_pin(pin)
     st = _managed_staff(s, who, staff_id)
-    st.pin_hash, st.failed_pin_attempts, st.pin_locked_until = hash_secret(pin), 0, None
+    _assign_pin(st, pin, pepper)
     audit(s, now, "staff.pin_set", "ok", tenant_id=who.tenant_id, staff_id=who.staff_id,
           session_id=who.session_id, detail=f"target={st.id}")
+    try:
+        s.commit()
+    except IntegrityError as e:
+        s.rollback()
+        if not _pin_conflict(e):
+            raise
+        audit(s, now, "staff.pin_set", "conflict", tenant_id=who.tenant_id, staff_id=who.staff_id,
+              session_id=who.session_id, detail=f"target={staff_id}")
+        s.commit()
+        raise PinUnavailable("this PIN cannot be used; choose another or let the system generate one") from e
+
+
+def generate_pin(s: Session, who: Principal, staff_id: str, now: datetime, pepper: bytes | None,
+                 length: int = 6) -> str:
+    """#81 recommended path: the server picks a random unique PIN and returns it
+    ONCE. Nobody learns which PINs colleagues hold (no 'taken' oracle)."""
+    if pepper is None:
+        raise InvalidGrant("PIN identity needs AXAR_POS_SECRET_KEY on the server")
+    for _ in range(25):
+        pin = "".join(secrets.choice("0123456789") for _ in range(length))
+        try:
+            check_pin(pin)
+        except WeakSecret:
+            continue
+        try:
+            set_pin(s, who, staff_id, pin, now, pepper)
+            return pin
+        except PinUnavailable:
+            continue
+    raise Conflict("could not find a free PIN; try again")
+
+
+def set_register_grants(s: Session, who: Principal, staff_id: str, register_ids: list[int],
+                        now: datetime) -> Staff:
+    """Replace the registers a staff member may work on. Empty list = every
+    register at their role locations. Takes effect at the next request of an
+    open till session (resolve_session)."""
+    st = _managed_staff(s, who, staff_id)
+    ids = sorted(set(register_ids))
+    regs = s.scalars(select(Register).where(Register.tenant_id == who.tenant_id, Register.id.in_(ids))).all() \
+        if ids else []
+    if len(regs) != len(ids):
+        raise NotFound("register not found")
+    for reg in regs:
+        require_admin(who, reg.location_id)
+        if not roles_at(st, reg.location_id):
+            raise InvalidGrant("give the staff member a role at this register's location first")
+    st.register_grants = [StaffRegisterGrant(tenant_id=who.tenant_id, register_id=r.id, created_by=who.staff_id,
+                                             created_at=now) for r in regs]
+    audit(s, now, "staff.registers_set", "ok", tenant_id=who.tenant_id, staff_id=who.staff_id,
+          session_id=who.session_id, detail=f"target={st.id} registers={ids or 'all_at_role_locations'}")
     s.commit()
+    return st
 
 
 def set_back_office_credentials(s: Session, who: Principal, staff_id: str, *, login: str, password: str,
@@ -701,6 +890,7 @@ def deactivate_staff(s: Session, who: Principal, staff_id: str, now: datetime) -
     if st.id == who.staff_id:
         raise Forbidden("you cannot deactivate yourself")
     st.active = False
+    st.pin_index = None  # #81: the PIN is free again; the hash stays for the record
     s.execute(update(AuthSession).where(AuthSession.staff_id == st.id, AuthSession.revoked_at.is_(None))
               .values(revoked_at=now))
     audit(s, now, "staff.deactivate", "ok", tenant_id=who.tenant_id, staff_id=who.staff_id,
@@ -713,7 +903,8 @@ def deactivate_staff(s: Session, who: Principal, staff_id: str, now: datetime) -
 
 
 def bootstrap_owner(s: Session, *, tenant_id: str, tenant_name: str, owner_name: str, login: str,
-                    password: str, pin: str | None, box: SecretBox, now: datetime) -> tuple[Staff, str]:
+                    password: str, pin: str | None, box: SecretBox, now: datetime,
+                    pepper: bytes | None = None) -> tuple[Staff, str]:
     """First owner of a tenant (admin CLI, owner DB connection). Refuses if the
     tenant already has an owner, so it cannot be used to take over a tenant."""
     check_password(password)
@@ -728,7 +919,9 @@ def bootstrap_owner(s: Session, *, tenant_id: str, tenant_name: str, owner_name:
     if has_owner is not None:
         raise Conflict("this tenant already has an owner; use the back office")
     st = Staff(id=str(uuid.uuid4()), tenant_id=tenant_id, display_name=owner_name, login=login,
-               password_hash=hash_secret(password), pin_hash=hash_secret(pin) if pin else None, created_at=now)
+               password_hash=hash_secret(password), created_at=now)
+    if pin:
+        _assign_pin(st, pin, pepper)
     secret = new_totp_secret()
     st.totp_secret_enc = box.seal(secret, aad=st.id)
     st.roles = [StaffRole(tenant_id=tenant_id, role="owner", location_id=None)]

@@ -133,6 +133,7 @@ NOT_A_LEDGER: dict[str, str] = {
     "devices": "identity; audited in auth_events", "auth_sessions": "identity; audited in auth_events",
     "enrollment_codes": "one-time codes; audited in auth_events", "approvals": "one-time step-up proofs",
     "auth_events": "append-only audit log itself",
+    "staff_register_grants": "identity (#81 till grants); audited in auth_events",
     "pos_settings": "configuration; changes audited",
     "edge_sync_state": "edge-node cursor; R13 checks the documents it produced",
     "sync_outbox": "edge-node queue; R13 checks central effects",

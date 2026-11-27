@@ -57,7 +57,7 @@ def cmd_bootstrap(args, settings: Settings) -> None:
         st, secret = auth.bootstrap_owner(
             s, tenant_id=args.tenant, tenant_name=args.tenant_name or args.tenant, owner_name=args.owner_name,
             login=args.login, password=password, pin=pin, box=auth.SecretBox(settings.secret_key),
-            now=settings.clock())
+            now=settings.clock(), pepper=auth.pin_pepper(settings.secret_key))
     print(f"owner staff id: {st.id}")
     print(f"TOTP secret (add to an authenticator app now, shown once): {secret}")
     print(auth.provisioning_uri(secret, f"{args.tenant}:{args.login}"))

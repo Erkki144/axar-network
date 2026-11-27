@@ -75,3 +75,10 @@ Built today: tenant + device realms (ADR-0009, `auth.py`, C10). Missing: platfor
 - **Guards:** `tests/test_realms.py` (every route has a realm; negative tests with real sessions; no DB change on refusal; one person, two logins), `tests/test_quote_and_ui_assets.py` (bundles stay apart).
 - **Screens:** `docs/reviews/76-screens/`.
 - **Still open:** office approvals of till actions stay a one-time step-up proof on the till (`/auth/approvals`); Menu Studio publishing with per-till ACK is #40.
+
+## 5. PIN is the identity, the device is the register (#81, server part)
+
+- `POST /api/v1/auth/pin-login` with **only** `{"pin"}` and the device token. The server finds the one staff member through a tenant-scoped blind index (HMAC with a server pepper, `UNIQUE(tenant_id, pin_index)`), verifies Argon2 once, and opens the **device's** register. The client can name neither the person nor the register (extra fields → 422).
+- **Register grants** (`staff_register_grants`, set in OFFICE: `PUT /api/v1/admin/staff/{id}/registers`) are checked at login **and on every request**. A grant or role removed, or a person deactivated, ends the open till session at its next request.
+- Wrong, unknown and not-granted PINs give one generic answer and count against the device (durable lockout). The PIN is never stored in clear or logged.
+- Migration and key rotation: `products/axar-pos/docs/runbooks/PIN_INDEX_KEY_ROTATION.md`. Still to do: the PIN-only till screen (the name grid goes) and tap measurements; then wire the action contract (#83).
