@@ -272,6 +272,11 @@ def _event_pipeline(s: Session, tenant_id: str) -> _Finding:
         cursor = c.cursor if c else 0
         if c is not None and c.blocked_at is not None:
             f.fail(consumer=name, reason="blocked", failing_seq=c.failing_seq, error=c.last_error)
+        elif c is not None and c.failing_seq is not None:
+            # Retrying with backoff: not "just lag". Show WHY, so a manager can fix the
+            # cause (e.g. an outlet without a default warehouse) before it blocks.
+            f.wait(consumer=name, reason="retrying", failing_seq=c.failing_seq, attempts=c.attempts,
+                   error=c.last_error, cursor=cursor, head=head, lag=head - cursor)
         elif cursor < head:
             f.wait(consumer=name, cursor=cursor, head=head, lag=head - cursor)
     for dl in s.scalars(select(DeadLetter).where(DeadLetter.tenant_id == tenant_id, DeadLetter.resolved_at.is_(None))):

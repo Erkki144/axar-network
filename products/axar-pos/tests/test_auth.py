@@ -763,3 +763,19 @@ def test_catalog_roles_and_four_eyes_with_real_sessions(shop, world):
     ok = tenant_mgr.post(f"/api/v1/pricing/prices/{draft['id']}/approve", {})
     assert ok.status_code == 200 and ok.json()["decided_by"] == boss
     assert any(p["sku"] == "SELJ" and p["price_cents"] == 650 for p in shop["till"].get("/api/v1/products").json())
+
+
+def test_owner_changes_a_staff_pin_old_pin_stops_and_new_pin_works(shop, world):
+    """Input path PUT /admin/staff/{id}/pin: the change lands in the staff
+    credential (old PIN refused, new PIN accepted on the bound till) and in the
+    audit log."""
+    adm, dev = shop["adm"], shop["dev"]
+    r = adm.put(f"/api/v1/admin/staff/{shop['cashier']}/pin", {"pin": "6157"})
+    assert r.status_code == 204, r.text
+    old = world.c.post("/api/v1/auth/pin-login", json={"staff_id": shop["cashier"], "pin": "4829"},
+                       headers={"X-Device-Token": dev})
+    assert old.status_code == 401
+    assert world.till(dev, shop["cashier"], "6157").get("/api/v1/auth/me").status_code == 200
+    ev = adm.get("/api/v1/admin/auth-events").json()
+    rows = ev if isinstance(ev, list) else ev.get("events", [])
+    assert any("pin" in (x.get("event") or "") and x.get("outcome") == "ok" for x in rows), rows[:5]
